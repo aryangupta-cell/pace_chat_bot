@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PACE Chatbot (Phase 1)</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; background: #f5f5f7; }
+  h1 { font-size: 1.3rem; }
+  #chat { background: white; border-radius: 8px; padding: 16px; height: 480px; overflow-y: auto; border: 1px solid #ddd; }
+  .msg { margin: 10px 0; white-space: pre-wrap; line-height: 1.4; }
+  .user { text-align: right; color: #0a58ca; }
+  .bot { text-align: left; color: #222; }
+  .bot .bubble { background: #eef1f5; display: inline-block; padding: 8px 12px; border-radius: 8px; max-width: 90%; text-align: left; }
+  .user .bubble { background: #0a58ca; color: white; display: inline-block; padding: 8px 12px; border-radius: 8px; max-width: 90%; }
+  #inputRow { display: flex; margin-top: 12px; gap: 8px; }
+  #msgInput { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #ccc; }
+  #sendBtn { padding: 10px 18px; border: none; border-radius: 6px; background: #0a58ca; color: white; cursor: pointer; }
+  #sendBtn:hover { background: #084298; }
+</style>
+</head>
+<body>
+<h1>PACE Chatbot — Phase 1 (attendance &amp; productivity)</h1>
+<div id="chat"></div>
+<div id="inputRow">
+  <input id="msgInput" type="text" placeholder="e.g. who has the worst attendance in Control Tower this month" autocomplete="off">
+  <button id="sendBtn">Send</button>
+</div>
+
+<script src="/static/chat-widget.js"></script>
+<script>
+initChatWidget({
+  chatEl: document.getElementById('chat'),
+  inputEl: document.getElementById('msgInput'),
+  sendBtnEl: document.getElementById('sendBtn'),
+});
+</script>
+</body>
+</html>
