@@ -1243,8 +1243,9 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         if intent == "leave_emp_check":
             rows = queries.leave_status_for_employee(emp_id, month=period_month, date_range=date_range)
             if not rows:
-                return ChatResponse(reply=f"No leave record found for {emp_name}{_period_note(month, date_range)}.")
-            return ChatResponse(reply=format_leave_rows(rows), rows=rows)
+                return ChatResponse(reply=f"{emp_name} took no leave{_period_note(month, date_range)}.")
+            return ChatResponse(reply=f"{emp_name} took leave on {len(rows)} day(s){_period_note(month, date_range)}:\n\n"
+                                       + format_leave_rows(rows), rows=rows)
 
         if intent == "call_emp":
             row = queries.call_activity_for_employee(emp_id, month=period_month, date_range=date_range)
@@ -1256,7 +1257,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         if intent == "visit_emp":
             rows = queries.visit_activity_for_employee(emp_id, month=period_month, date_range=date_range)
             if not rows:
-                return ChatResponse(reply=f"No visit data found for {emp_name}{_period_note(month, date_range)}.")
+                return ChatResponse(reply=f"{emp_name} made no client visits{_period_note(month, date_range)}.")
             if len(rows) == 1:
                 r = rows[0]
                 body = f"{r['worked_day']}: visit={r['visit_flag']} type={r['visit_type'] or 'N/A'}"
@@ -1264,12 +1265,12 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 headers = ["Date", "Visit", "Type"]
                 data = [[r["worked_day"], r["visit_flag"], r["visit_type"] or "N/A"] for r in rows]
                 body = _render_table(headers, data)
-            return ChatResponse(reply=f"Visit activity for {emp_name}:\n\n" + body, rows=rows)
+            return ChatResponse(reply=f"{emp_name} visited clients on {len(rows)} day(s){_period_note(month, date_range)}:\n\n" + body, rows=rows)
 
         if intent == "wfh_emp":
             rows = queries.wfh_status_for_employee(emp_id, month=period_month, date_range=date_range)
             if not rows:
-                return ChatResponse(reply=f"No WFH data found for {emp_name}{_period_note(month, date_range)}.")
+                return ChatResponse(reply=f"{emp_name} did not take WFH{_period_note(month, date_range)}.")
             if len(rows) == 1:
                 r = rows[0]
                 body = f"{r['worked_day']}: {r['wfh_status']}"
@@ -1277,7 +1278,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 headers = ["Date", "WFH status"]
                 data = [[r["worked_day"], r["wfh_status"]] for r in rows]
                 body = _render_table(headers, data)
-            return ChatResponse(reply=f"WFH status for {emp_name}:\n\n" + body, rows=rows)
+            return ChatResponse(reply=f"{emp_name} took WFH on {len(rows)} day(s){_period_note(month, date_range)}:\n\n" + body, rows=rows)
 
         if intent == "d_score_emp":
             rows = queries.d_score_ranking(None, month=period_month, date_range=date_range, limit=100000)

@@ -574,11 +574,19 @@ def _period_filter(month, date_range):
 # ---------------------------------------------------------------------------
 
 def leave_status_for_employee(employee_id, month=None, date_range=None):
+    # Bug fix: previously returned EVERY day in scope regardless of whether
+    # the employee was actually on leave that day (a full daily dump), even
+    # though the caller ("did X take leave" / "how many times did X take
+    # leave") only cares about the days leave was actually taken. Filter to
+    # rows matching DAY_FLAGS["leave"]'s condition so only actual leave days
+    # come back — same fix applied to visit_activity_for_employee and
+    # wfh_status_for_employee below, which had the identical defect.
+    condition, _ = DAY_FLAGS["leave"]
     frag, params = _period_filter(month, date_range)
     sql = f"""
         select employee_id, emp_name, dept_name, worked_day, applied_leave_type, applied_leave_status, final_half_day_flag
         from public.pace_1
-        where employee_id = %(employee_id)s and {frag}
+        where employee_id = %(employee_id)s and {condition} and {frag}
         order by worked_day desc
     """
     params["employee_id"] = employee_id
@@ -688,11 +696,13 @@ def call_ranking(dept_name, metric="total_calls", month=None, date_range=None, a
 # ---------------------------------------------------------------------------
 
 def visit_activity_for_employee(employee_id, month=None, date_range=None):
+    # See leave_status_for_employee above: filter to actual visit days only.
+    condition, _ = DAY_FLAGS["visit"]
     frag, params = _period_filter(month, date_range)
     sql = f"""
         select employee_id, emp_name, worked_day, visit_flag, visit_type
         from public.pace_1
-        where employee_id = %(employee_id)s and {frag}
+        where employee_id = %(employee_id)s and {condition} and {frag}
         order by worked_day desc
     """
     params["employee_id"] = employee_id
@@ -738,11 +748,13 @@ def zero_visit_employees(dept_name, month=None, date_range=None, limit=None):
 # ---------------------------------------------------------------------------
 
 def wfh_status_for_employee(employee_id, month=None, date_range=None):
+    # See leave_status_for_employee above: filter to actual WFH days only.
+    condition, _ = DAY_FLAGS["wfh"]
     frag, params = _period_filter(month, date_range)
     sql = f"""
         select employee_id, emp_name, worked_day, wfh_status
         from public.pace_1
-        where employee_id = %(employee_id)s and {frag}
+        where employee_id = %(employee_id)s and {condition} and {frag}
         order by worked_day desc
     """
     params["employee_id"] = employee_id

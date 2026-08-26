@@ -393,6 +393,9 @@ _ZERO_VISIT_PATTERNS = [
 _VISIT_EMP_PATTERNS = [
     r"\bvisits? (for|of|by)\b", r"\bdid\b.*\bvisit\b",
     r"\bhow many visits? (did|has)\b",
+    # Parity with the WFH Bug 1 fix above: bare "how many times X went on
+    # visit" had no matching pattern either.
+    r"\bhow many times\b.*\bwent on (a )?visit\b", r"\bhow many times\b.*\bvisited\b",
 ]
 
 # --- Category D (new): WFH ------------------------------------------------------
@@ -400,6 +403,13 @@ _WFH_EMP_PATTERNS = [
     r"\bwfh\b.*\b(for|of)\b", r"\bwork(ed|ing)? from home\b.*\b(for|of)\b", r"\bwas\b.*\bwfh\b",
     r"\b(was|is)\b.*\bworking from home\b",
     r"\bhow many wfh days (did|has)\b", r"\bwfh days (of|for)\b",
+    # Bug 1 fix: bare "how many times X took wfh" (no "month wise") had NO
+    # matching pattern at all, so it fell through to the generic fallback
+    # help message instead of the per-employee WFH lookup (which, after the
+    # queries.wfh_status_for_employee filtering fix, correctly returns just
+    # the actual WFH days and a count).
+    r"\bhow many times\b.*\btook wfh\b", r"\bhow many times\b.*\bwent (on )?wfh\b",
+    r"\bhow often\b.*\btook wfh\b", r"\bhow many times\b.*\bwfh\b",
 ]
 _WFH_RANKING_PATTERNS = [
     r"\bmost wfh\b", r"\bmost work from home\b", r"\bwfh ranking\b",
