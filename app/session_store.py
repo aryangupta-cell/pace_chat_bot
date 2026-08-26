@@ -57,6 +57,20 @@ def get_session(session_id):
             "month": None,
             "date_range": None,
         },
+        # The single most-recent LIST-PRODUCING answer (a day-flag count/
+        # list, a status count/list, or a ranking) - kept SEPARATE from
+        # sticky_context above (which is about filling in MISSING scope for
+        # a NEW question) and from the pronoun-resolution "last discussed
+        # employee" state. This exists to answer a vague follow-up like
+        # "list them" / "who are they" / "show me their names" by
+        # re-running the SAME query that produced the most recent list-type
+        # answer, expanded to a full list, using the SAME filters that
+        # produced it - not some older/stickier tracked value and not an
+        # unrelated individual-employee lookup that happened in between.
+        # Deliberately only ever set by call sites that produce a genuine
+        # list/count/ranking answer (see main.py's set_last_list() call
+        # sites) - single-employee lookups must NEVER overwrite this.
+        "last_list": None,
     })
 
 
@@ -80,6 +94,46 @@ def push_context(session, dept_name=None, employee_id=None, employee_name=None, 
         ctx["month"] = month
     if date_range is not None:
         ctx["date_range"] = date_range
+
+
+def set_last_list(session, kind, rerun_list=None, rerun_same=None, answer_kind="count",
+                   dept_name=None, employee_ids=None, team_label=None, month=None,
+                   date_range=None, statuses=None):
+    """Record the most recent LIST-PRODUCING answer, for resolving vague
+    follow-ups ("list them", "who are they", "show me their names") against
+    the CORRECT prior answer instead of stale sticky_context or an
+    unrelated individual-employee lookup.
+
+    `kind` - a rough category tag ('day_flag' | 'status' | 'ranking'),
+    mostly useful for status<->ranking switching on an explicit re-scope
+    ("show me the black ones instead").
+    `rerun_list` - a zero-default-arg callable(dept_name=, employee_ids=,
+    team_label=, month=, date_range=, limit=) -> (reply_text, rows) that
+    re-runs the SAME underlying query EXPANDED to a full list/names (used
+    for "list them"/"show me their names"-style follow-ups).
+    `rerun_same` - same signature, but re-runs the query in its ORIGINAL
+    answer shape (e.g. still a bare count) - used for a follow-up that only
+    re-scopes (e.g. "what about last month") without asking for names.
+    `answer_kind` - 'count' or 'list', whichever shape the ORIGINAL answer
+    was, so a pure re-scope follow-up can preserve it.
+    The remaining kwargs are the filters that produced the original answer,
+    stored so a follow-up's explicit re-scoping (a named department/status/
+    time period) can override just that one piece rather than starting
+    over."""
+    session["last_list"] = {
+        "kind": kind, "rerun_list": rerun_list, "rerun_same": rerun_same,
+        "answer_kind": answer_kind, "dept_name": dept_name, "employee_ids": employee_ids,
+        "team_label": team_label, "month": month, "date_range": date_range,
+        "statuses": statuses,
+    }
+
+
+def get_last_list(session):
+    return session.get("last_list")
+
+
+def clear_last_list(session):
+    session["last_list"] = None
 
 
 def get_recent_context(session, field):

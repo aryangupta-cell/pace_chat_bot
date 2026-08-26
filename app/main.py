@@ -48,6 +48,82 @@ _WEEKLY_FOLLOWUP_PATTERN = re.compile(
     re.I,
 )
 
+# --- Bug 1 fix: vague "list the thing I was just shown" follow-up resolution ---
+# A vague follow-up ("show me their names", "list them", "who are they",
+# "give me the list") needs to expand whatever the MOST RECENT list/count/
+# ranking-producing answer was about - tracked separately in
+# session["last_list"] (see session_store.set_last_list) - rather than
+# falling back to the unrelated whole-session sticky department/employee/
+# time-period context (which exists to fill in MISSING scope on a NEW
+# question, not to resolve "expand the thing I was just shown"). Explicitly
+# asks for a list/names/expansion - NOT just any short "who/what" question,
+# so it doesn't swallow genuinely fresh queries that happen to be short.
+_VAGUE_LIST_EXPAND_STRICT = re.compile(
+    r"("
+    r"show (me )?(their |the )?names\b"
+    r"|list (them|everyone|their names|the names)\b"
+    r"|who (are|were|was) (they|them)\b"
+    r"|can (you )?share (their |the )?names\b"
+    r"|share (their |the )?names\b"
+    r"|share names list\b"
+    r"|their names list\b"
+    r"|names please\b"
+    r"|^names\??\s*$"
+    r"|give me the (full |whole )?list\b"
+    r"|give me the rest of the list\b"
+    r"|^full list\b"
+    r"|full list please\b"
+    r"|show more\b"
+    r"|who else\b"
+    r"|expand this\b"
+    r"|show \d+ instead\b"
+    r"|not just \d+\b"
+    r"|who'?s next after them\b"
+    r"|who is next after them\b"
+    r"|list everyone\b"
+    r"|the (black|red|amber|green) ones instead\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# A looser set that OVERLAPS with phrasing a genuinely fresh, standalone
+# query could also use (e.g. "who was offline" / "show me who" / "who took
+# leave" name an actual flag/category, so they're plausible first messages
+# in a session, not just follow-ups). These are only ever treated as a
+# vague-list follow-up when a prior last_list actually exists (see
+# handle_message) - when there's no prior list, they fall through untouched
+# to the normal intent pipeline instead of being force-clarified, so a
+# fresh "who was offline yesterday" still works exactly as before.
+_VAGUE_LIST_EXPAND_LOOSE = re.compile(
+    r"("
+    r"who (are|were) the \w+"
+    r"|show me who\b"
+    r"|who was offline\b"
+    r"|who took leave\b"
+    r"|how many total\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_VAGUE_LIST_EXPAND_PATTERN = re.compile(
+    r"(" + _VAGUE_LIST_EXPAND_STRICT.pattern + "|" + _VAGUE_LIST_EXPAND_LOOSE.pattern + r")",
+    re.IGNORECASE,
+)
+
+# A narrower "re-scope only" follow-up ("what about last month", "what about
+# next week") - no explicit ask for names/a list, just a change of time
+# period/department applied to the SAME prior answer, kept in its ORIGINAL
+# answer shape (e.g. still a bare count) rather than force-expanded to a
+# list. Deliberately gated to short messages starting with this phrase, to
+# minimize collision with unrelated fresh queries.
+_VAGUE_RESCOPE_PATTERN = re.compile(r"^\s*what about\b", re.IGNORECASE)
+
+
+def _scope_note_generic(team_label, dept_name, month, date_range):
+    note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")
+    note += _period_note(month, date_range)
+    return note
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -825,18 +901,42 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
 
     if intent == "attendance_best":
         rows = queries.attendance_ranking(dept_name, month, worst=False, employee_ids=employee_ids, limit=limit)
+        if session is not None:
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+                _rows = queries.attendance_ranking(dept_name, month, worst=False, employee_ids=employee_ids, limit=limit)
+                return f"Best attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Best attendance{scope_note}:\n\n{format_attendance_rows(rows)}", rows=rows)
 
     if intent == "attendance_worst":
         rows = queries.attendance_ranking(dept_name, month, worst=True, employee_ids=employee_ids, limit=limit)
+        if session is not None:
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+                _rows = queries.attendance_ranking(dept_name, month, worst=True, employee_ids=employee_ids, limit=limit)
+                return f"Worst attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Worst attendance{scope_note}:\n\n{format_attendance_rows(rows)}", rows=rows)
 
     if intent == "productive_high":
         rows = queries.productive_time_ranking(dept_name, month, lowest=False, employee_ids=employee_ids, limit=limit)
+        if session is not None:
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+                _rows = queries.productive_time_ranking(dept_name, month, lowest=False, employee_ids=employee_ids, limit=limit)
+                return f"Most productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Most productive time{scope_note}:\n\n{format_productive_rows(rows)}", rows=rows)
 
     if intent == "productive_low":
         rows = queries.productive_time_ranking(dept_name, month, lowest=True, employee_ids=employee_ids, limit=limit)
+        if session is not None:
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+                _rows = queries.productive_time_ranking(dept_name, month, lowest=True, employee_ids=employee_ids, limit=limit)
+                return f"Least productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Least productive time{scope_note}:\n\n{format_productive_rows(rows)}", rows=rows)
 
     # --- Category B/C: generic metric rankings ---
@@ -847,6 +947,14 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             limit=limit, reporting_user_id=manager_id if employee_ids is None else None,
         )
         label = queries.METRICS[metric_key][1]
+        if session is not None:
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500,
+                       _metric_key=metric_key, _ascending=ascending, _label=label, _rid=manager_id):
+                _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
+                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None)
+                return f"Ranked by {_label}{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_metric_rows(_rows, _metric_key)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Ranked by {label}{scope_note}:\n\n{format_metric_rows(rows, metric_key)}", rows=rows)
 
     # --- Category A: single-employee lookups ---
@@ -1059,6 +1167,17 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             employee_ids=employee_ids, limit=limit,
         )
         label = "declining" if intent == "declining" else "improving"
+        if session is not None:
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500,
+                       _declining=(intent == "declining"), _rid=manager_id, _label=label):
+                _rows, _meta = queries.pace_score_trend_ranking(
+                    dept_name, _first_month(month), declining=_declining,
+                    reporting_user_id=_rid if employee_ids is None else None,
+                    employee_ids=employee_ids, limit=limit,
+                )
+                return f"Who is {_label}{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_trend_rows(_rows, _meta)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Who is {label}{scope_note}:\n\n{format_trend_rows(rows, meta)}", rows=rows)
 
     # --- Category A (new): Leave & absence ---
@@ -1172,6 +1291,12 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
 
     if intent == "leave_who":
         rows = queries.who_on_leave(dept_name, month=period_month, date_range=date_range, limit=limit)
+        if session is not None:
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=500):
+                _rows = queries.who_on_leave(dept_name, month=month, date_range=date_range, limit=limit)
+                return f"On leave{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_leave_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="day_flag", rerun_list=_rerun, rerun_same=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range)
         return ChatResponse(reply=f"On leave{scope_note}:\n\n{format_leave_rows(rows)}", rows=rows)
 
     if intent == "half_day_ranking":
@@ -1333,6 +1458,12 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             session["awaiting_weekly_breakdown"] = False
             session["weekly_breakdown_employee_id"] = None
             session["weekly_breakdown_employee_name"] = None
+
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=500):
+                _rows, _meta = queries.score_drop_ranking(dept_name, employee_ids=employee_ids, month=month, date_range=date_range, limit=limit)
+                return format_score_delta_ranking(_rows, _meta, f"Biggest PACE score drop{_scope_note_generic(team_label, dept_name, month, date_range)} (full list)"), _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range)
         return ChatResponse(reply=reply, rows=rows)
 
     if intent == "score_improvement_alltime":
@@ -1347,6 +1478,12 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             session["awaiting_weekly_breakdown"] = False
             session["weekly_breakdown_employee_id"] = None
             session["weekly_breakdown_employee_name"] = None
+
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=500):
+                _rows, _meta = queries.score_improvement_alltime(dept_name, employee_ids=employee_ids, month=month, limit=limit)
+                return format_score_delta_ranking(_rows, _meta, f"Most improved{_scope_note_generic(team_label, dept_name, month, date_range)} (full list)"), _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range)
         return ChatResponse(reply=reply, rows=rows)
 
     if intent == "emp_overview":
@@ -1477,10 +1614,35 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         day_scope_note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")
         day_scope_note += " " + (_period_label_for_range(date_range) if date_range else _period_note(month, None))
         scope_month = None if date_range else period_month
+
+        def _day_note(team_label, dept_name, month, date_range):
+            note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")
+            note += " " + (_period_label_for_range(date_range) if date_range else _period_note(month, None))
+            return note
+
         if intent == "day_count":
             result = queries.day_flag_count(flag_key, dept_name=dept_name, employee_ids=employee_ids, month=scope_month, date_range=date_range)
+            if session is not None:
+                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=500, _flag_key=flag_key):
+                    _rows = queries.day_flag_list(_flag_key, dept_name=dept_name, employee_ids=employee_ids, month=month, date_range=date_range, limit=limit)
+                    return format_day_list(_rows, _flag_key, _day_note(team_label, dept_name, month, date_range) + " (full list)"), _rows
+
+                def _rerun_same(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=500, _flag_key=flag_key):
+                    _result = queries.day_flag_count(_flag_key, dept_name=dept_name, employee_ids=employee_ids, month=month, date_range=date_range)
+                    return format_day_count(_result, _flag_key, _day_note(team_label, dept_name, month, date_range)), [_result]
+
+                session_store.set_last_list(session, kind="day_flag", rerun_list=_rerun_list, rerun_same=_rerun_same,
+                                             answer_kind="count", dept_name=dept_name, employee_ids=employee_ids,
+                                             team_label=team_label, month=scope_month, date_range=date_range)
             return ChatResponse(reply=format_day_count(result, flag_key, day_scope_note), rows=[result])
         rows = queries.day_flag_list(flag_key, dept_name=dept_name, employee_ids=employee_ids, month=scope_month, date_range=date_range, limit=limit)
+        if session is not None:
+            def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=500, _flag_key=flag_key):
+                _rows = queries.day_flag_list(_flag_key, dept_name=dept_name, employee_ids=employee_ids, month=month, date_range=date_range, limit=limit)
+                return format_day_list(_rows, _flag_key, _day_note(team_label, dept_name, month, date_range) + " (full list)"), _rows
+            session_store.set_last_list(session, kind="day_flag", rerun_list=_rerun_list, rerun_same=_rerun_list,
+                                         answer_kind="list", dept_name=dept_name, employee_ids=employee_ids,
+                                         team_label=team_label, month=scope_month, date_range=date_range)
         return ChatResponse(reply=format_day_list(rows, flag_key, day_scope_note), rows=rows)
 
     # --- NEW capability 2: status-category filters ---
@@ -1489,13 +1651,36 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         statuses = list(dict.fromkeys(statuses)) or ["Red", "Black"]
         st_scope_note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else " company-wide")
 
+        def _status_note(team_label, dept_name):
+            return f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else " company-wide")
+
         if intent == "status_list":
             rows = queries.status_list(statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
+            if session is not None:
+                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=500, _statuses=statuses):
+                    _rows = queries.status_list(_statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
+                    return format_status_list(_rows, _statuses, _status_note(team_label, dept_name) + " (full list)"), _rows
+                session_store.set_last_list(session, kind="status", rerun_list=_rerun_list, rerun_same=_rerun_list,
+                                             answer_kind="list", dept_name=dept_name, employee_ids=employee_ids,
+                                             team_label=team_label, statuses=statuses)
             return ChatResponse(reply=format_status_list(rows, statuses, st_scope_note), rows=rows)
 
         if intent == "status_count":
             n = queries.status_count(statuses, dept_name=dept_name, employee_ids=employee_ids)
             label = "/".join(statuses)
+            if session is not None:
+                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=500, _statuses=statuses):
+                    _rows = queries.status_list(_statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
+                    return format_status_list(_rows, _statuses, _status_note(team_label, dept_name) + " (full list)"), _rows
+
+                def _rerun_same(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=500, _statuses=statuses):
+                    _n = queries.status_count(_statuses, dept_name=dept_name, employee_ids=employee_ids)
+                    _label = "/".join(_statuses)
+                    return f"{_n} employee(s) are currently {_label}{_status_note(team_label, dept_name)}.", [{"n": _n}]
+
+                session_store.set_last_list(session, kind="status", rerun_list=_rerun_list, rerun_same=_rerun_same,
+                                             answer_kind="count", dept_name=dept_name, employee_ids=employee_ids,
+                                             team_label=team_label, statuses=statuses)
             return ChatResponse(reply=f"{n} employee(s) are currently {label}{st_scope_note}.", rows=[{"n": n}])
 
         if intent == "status_distribution":
@@ -1574,6 +1759,73 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         return ChatResponse(reply=f"Fewest WFH days{scope_note}:\n\n{format_count_rows(rows, 'wfh_days', 'WFH days')}", rows=rows)
 
     return ChatResponse(reply=intents.FALLBACK_MESSAGE)
+
+
+def _resolve_vague_list_followup(last_list, message, raw_message, session):
+    """Re-run the query behind session['last_list'] (see
+    session_store.set_last_list) in response to a vague follow-up ("list
+    them", "who are they", "give me the list") - expanded to a full list,
+    using the SAME filters that produced the original answer, UNLESS the
+    current message explicitly re-scopes (a named department/status/time
+    period), in which case that explicit piece overrides just that one
+    filter (never silently blended, never ignored - see category F)."""
+    dept_name, dept_candidates = entities.extract_department(message, fallback_text=raw_message)
+    if dept_candidates:
+        return ChatResponse(
+            reply=f"I found multiple matching departments: {', '.join(dept_candidates)}. Which one did you mean?",
+            needs_clarification=True, clarification_options=dept_candidates,
+        )
+    date_start, date_end, date_range_mentioned = entities.extract_date_range(message)
+    new_date_range = (date_start, date_end) if date_range_mentioned else None
+    months_list, month_mentioned = ([], False) if date_range_mentioned else entities.extract_months(message)
+    new_month = (months_list if len(months_list) > 1 else (months_list[0] if months_list else None))
+
+    eff_dept = dept_name if dept_name else last_list["dept_name"]
+    # A newly-named department switches the scope away from whatever team/
+    # "my team" scoping produced the original answer - it's a different
+    # scope entirely, not a refinement of it.
+    eff_employee_ids = last_list["employee_ids"] if dept_name is None else None
+    eff_team_label = last_list["team_label"] if dept_name is None else None
+    if new_date_range is not None:
+        eff_month, eff_date_range = None, new_date_range
+    elif month_mentioned:
+        eff_month, eff_date_range = new_month, None
+    else:
+        eff_month, eff_date_range = last_list["month"], last_list["date_range"]
+
+    # Explicit status switch on a RANKING answer ("show me the black ones
+    # instead") - re-route to a status list instead of expanding the
+    # ranking, since that's what's actually being asked for.
+    status_words = [s.capitalize() for s in re.findall(r"\b(black|red|amber|green)\b", message, re.I)]
+    if status_words and last_list["kind"] == "ranking":
+        rows = queries.status_list(status_words, dept_name=eff_dept, employee_ids=eff_employee_ids, limit=500)
+        note = f" for {eff_team_label}" if eff_team_label else (f" in {eff_dept}" if eff_dept else " company-wide")
+        reply = format_status_list(rows, status_words, note)
+        session_store.set_last_list(session, kind="status", rerun_list=None, rerun_same=None, answer_kind="list",
+                                     dept_name=eff_dept, employee_ids=eff_employee_ids, team_label=eff_team_label,
+                                     statuses=status_words)
+        return ChatResponse(reply=reply, rows=rows)
+
+    # A bare re-scope-only follow-up ("what about last month") that does NOT
+    # also ask for names/a list keeps the ORIGINAL answer's shape (e.g.
+    # still a bare count) rather than being force-expanded into a list.
+    use_same_shape = (
+        _VAGUE_RESCOPE_PATTERN.search(message) is not None
+        and _VAGUE_LIST_EXPAND_PATTERN.search(message) is None
+        and last_list.get("rerun_same") is not None
+    )
+    rerun = last_list.get("rerun_same") if use_same_shape else last_list.get("rerun_list")
+    if rerun is None:
+        rerun = last_list.get("rerun_same") or last_list.get("rerun_list")
+    if rerun is None:
+        return ChatResponse(
+            reply="I'm not able to expand that previous answer into a list right now — could you re-ask your "
+                  "question with the specifics (department/time period/status)?"
+        )
+
+    reply, rows = rerun(dept_name=eff_dept, employee_ids=eff_employee_ids, team_label=eff_team_label,
+                         month=eff_month, date_range=eff_date_range)
+    return ChatResponse(reply=reply, rows=rows)
 
 
 def handle_message(message: str, session_id: str = "default") -> ChatResponse:
@@ -1657,6 +1909,32 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # replay - names/codes and yes/no confirmations must stay exact as typed.
     raw_message = message
     message = spellcheck.correct_typos(message)
+
+    # --- Bug 1 fix: vague "list the thing I was just shown" follow-up
+    # resolution - deterministic, checked BEFORE LLM/rule-based intent
+    # classification so it can never be second-guessed by either matcher,
+    # and resolved against session["last_list"] (the most recent list/
+    # count/ranking-producing answer), NOT the unrelated whole-session
+    # sticky department/employee/time-period context (item #26/#29) and NOT
+    # the pronoun "last discussed employee" state (item #30) - see
+    # session_store.set_last_list for what does/doesn't set this. ---
+    last_list = session_store.get_last_list(session)
+    if last_list is not None and (
+        _VAGUE_LIST_EXPAND_PATTERN.search(message) is not None
+        or _VAGUE_RESCOPE_PATTERN.search(message) is not None
+    ):
+        return _resolve_vague_list_followup(last_list, message, raw_message, session)
+    if last_list is None and _VAGUE_LIST_EXPAND_STRICT.search(message) is not None:
+        # These phrasings ("list them", "who are they", "show me their
+        # names", ...) can NEVER be a meaningful standalone/fresh query -
+        # there is nothing to guess at, so ask for clarification rather
+        # than letting the LLM/rule matcher hallucinate a list from
+        # unrelated context (category E safety requirement).
+        return ChatResponse(
+            reply="I don't have a specific list from our conversation to expand — could you tell me what you'd "
+                  "like the names/list for (e.g. a department, status, or time period)?",
+            needs_clarification=True,
+        )
 
     # --- LLM-first intent classification (Gemini), with rule-based fallback
     # and safety cross-check ---
