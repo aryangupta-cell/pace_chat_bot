@@ -1484,9 +1484,14 @@ def day_flag_count(flag_key, dept_name=None, employee_ids=None, month=None, date
     return rows[0] if rows else {"n": 0, "total": 0}
 
 
-def day_flag_list(flag_key, dept_name=None, employee_ids=None, month=None, date_range=None, limit=None):
+def day_flag_list(flag_key, dept_name=None, employee_ids=None, month=None, date_range=None, limit=None,
+                   exclude_employee_id=None):
     """List of employees (name/dept/day(s)) matching DAY_FLAGS[flag_key] at
-    least once in the given period — the LIST counterpart of day_flag_count."""
+    least once in the given period — the LIST counterpart of day_flag_count.
+
+    `exclude_employee_id`, if given, drops that one employee from the result
+    (the "beside X"/"except X"/"excluding X" list-exclusion capability) —
+    everyone else in scope is still listed normally."""
     condition, _ = DAY_FLAGS[flag_key]
     frag, params = _period_filter(month, date_range)
     lim = limit or 200  # list intents want the full roster, not top-10
@@ -1497,6 +1502,7 @@ def day_flag_list(flag_key, dept_name=None, employee_ids=None, month=None, date_
         where {condition}
           and (%(dept_name)s is null or dept_name = %(dept_name)s)
           and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+          and (%(exclude_employee_id)s is null or employee_id != %(exclude_employee_id)s)
           and {frag}
         group by employee_id, emp_name, dept_name
         order by emp_name
@@ -1504,6 +1510,7 @@ def day_flag_list(flag_key, dept_name=None, employee_ids=None, month=None, date_
     """
     params["dept_name"] = dept_name
     params["employee_ids"] = employee_ids
+    params["exclude_employee_id"] = exclude_employee_id
     rows = run_query(sql, params)
     return rows
 

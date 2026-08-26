@@ -931,6 +931,16 @@ _DUAL_PURPOSE_EMP_INTENTS = {"ot_subscore", "wfh_subscore", "ps_worked_ranking",
 # Gemini's availability/latency/prompt tuning entirely.
 _PRONOUN_PATTERN = re.compile(r"\b(he|she|him|her|his|their|they|them)\b", re.IGNORECASE)
 
+# "beside X"/"except X"/"excluding X"/"other than X" — a query naming one
+# employee but asking to EXCLUDE them from an otherwise org/dept-wide list
+# ("beside muskan who all did visit yesterday"). This is a genuinely new
+# capability (no prior exclusion concept existed anywhere in the intent/
+# query layer) built at the day_flag_list level (leave/call/visit/wfh "who"
+# list queries), the same query path plural "who all ..." queries already
+# reroute to. Distinguished from a plain individual lookup so that naming
+# someone here does NOT resolve to an individual-employee answer about them.
+_EXCLUDE_PATTERN = re.compile(r"\b(?:beside|besides|except|excluding|other than)\b", re.IGNORECASE)
+
 
 # --- Conversational context carry-forward (feature) -------------------
 # Intents with a fixed "current month vs prior month" trend/delta
@@ -963,7 +973,18 @@ def _extract_employee_ctx(message, fb, session):
         # this employee if it names none of its own.
         session_store.push_context(session, employee_id=emp_id, employee_name=emp_name)
         return emp_id, emp_name
-    if emp_id is None and session is not None:
+    # Sticky-context inheritance is ONLY safe when the CURRENT message
+    # actually refers back to a person (a pronoun like "he"/"she"/"they",
+    # or a possessive "their") - see the docstring example "what about
+    # their attendance". An org-wide/plural query with no name and no
+    # pronoun at all - "who all are on visit yesterday", "give me name of
+    # all the employees that were on visit yesterday" - must NEVER inherit
+    # the last-discussed employee, or every such query silently narrows to
+    # whoever was last asked about individually (bug: this previously made
+    # visit/WFH/leave "who all" list queries answer about only the sticky
+    # employee instead of the whole org/dept). Only inherit when there's an
+    # explicit backward reference to hang the inheritance on.
+    if emp_id is None and session is not None and _PRONOUN_PATTERN.search(message):
         ctx_id = session_store.get_recent_context(session, "employee_id")
         ctx_name = session_store.get_recent_context(session, "employee_name")
         if ctx_id is not None:
@@ -1362,6 +1383,29 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     # --- Category A (new): Leave & absence ---
     if intent in ("leave_emp_check", "call_emp", "visit_emp", "wfh_emp", "d_score_emp",
                   "shift_type_emp", "breakshift_emp", "offline_emp", "meeting_ratio_emp"):
+        # "beside X"/"except X"/... exclusion (new capability): a query that
+        # NAMES an employee but only to exclude them from an otherwise
+        # org/dept-wide list ("beside muskan who all did visit yesterday")
+        # must NOT resolve as an individual lookup about that person - it
+        # must resolve straight to the plural day_flag_list path, excluding
+        # them. Checked first, before the normal employee resolution below,
+        # so the named person is never mistaken for the query's subject.
+        if (intent in ("leave_emp_check", "call_emp", "visit_emp", "wfh_emp")
+                and _EXCLUDE_PATTERN.search(message)):
+            try:
+                _excl_id, _excl_name = entities.extract_employee(message, fallback_text=fb)
+            except entities.Ambiguous as e:
+                return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                                     needs_clarification=True, clarification_options=e.candidates)
+            flag_key = _detect_day_flag(message)
+            if _excl_id is not None and flag_key:
+                day_scope_note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")
+                day_scope_note += " " + (_period_label_for_range(date_range) if date_range else _period_note(month, None))
+                day_scope_note += f" (excluding {_excl_name})"
+                rows = queries.day_flag_list(flag_key, dept_name=dept_name, employee_ids=employee_ids,
+                                              month=None if date_range else period_month, date_range=date_range,
+                                              limit=limit, exclude_employee_id=_excl_id)
+                return ChatResponse(reply=format_day_list(rows, flag_key, day_scope_note), rows=rows)
         try:
             emp_id, emp_name = _extract_employee_ctx(message, fb, session)
         except entities.Ambiguous as e:
