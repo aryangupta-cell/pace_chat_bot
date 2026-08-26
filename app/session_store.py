@@ -37,50 +37,57 @@ def get_session(session_id):
         "awaiting_ranking_weekly_breakdown": False,
         "ranking_weekly_breakdown_employee_ids": None,
         "ranking_weekly_breakdown_label": None,
-        # Conversational context carry-forward: a rolling short history (most
-        # recent last) of what department/employee/time-period was EXPLICITLY
-        # named in recent turns, so a follow-up that omits one of these can
-        # fall back to what was recently in scope (e.g. "who's in red in
-        # Founders Office" -> "who all are in black?" should stay scoped to
-        # Founders Office). Deliberately a small rolling list, not a single
-        # flag, per the "last 3-5 messages" requirement - see
+        # Conversational context carry-forward: the single most-recently
+        # EXPLICITLY-named department/employee/time-period, kept STICKY for
+        # the entire session (not a rolling window) - so a follow-up that
+        # omits one of these can fall back to whatever was last explicitly
+        # in scope, no matter how many messages back it was mentioned (e.g.
+        # "who's in red in Founders Office" -> six unrelated questions later
+        # -> "who all are in black?" should still stay scoped to Founders
+        # Office). Overwritten whenever a NEW explicit value appears; never
+        # expires on its own within a session. A brand-new session_id starts
+        # with all of these None, so there is no cross-session leakage - see
         # push_context()/get_recent_context() below. Only ever used as a
         # FALLBACK when the current message's own extraction finds nothing;
         # never overrides an explicit value in the current message.
-        "context_history": [],
+        "sticky_context": {
+            "dept_name": None,
+            "employee_id": None,
+            "employee_name": None,
+            "month": None,
+            "date_range": None,
+        },
     })
-
-
-# How many recent turns' explicit mentions to remember for fallback lookups.
-CONTEXT_HISTORY_LEN = 5
 
 
 def push_context(session, dept_name=None, employee_id=None, employee_name=None, month=None, date_range=None):
     """Record what was EXPLICITLY named in this turn (pass None for anything
     not mentioned this turn - do not pass through an already-inherited
-    value, so the history reflects real mentions, not propagated guesses).
-    Keeps only the last CONTEXT_HISTORY_LEN entries."""
-    if dept_name is None and employee_id is None and month is None and date_range is None:
-        return
-    history = session.setdefault("context_history", [])
-    history.append({
-        "dept_name": dept_name,
-        "employee_id": employee_id,
-        "employee_name": employee_name,
-        "month": month,
-        "date_range": date_range,
+    value, so this only reflects real mentions, not propagated guesses).
+    Each non-None field OVERWRITES the sticky value for that field and it
+    then persists for the rest of the session (until overwritten again),
+    rather than aging out after a fixed number of turns."""
+    ctx = session.setdefault("sticky_context", {
+        "dept_name": None, "employee_id": None, "employee_name": None,
+        "month": None, "date_range": None,
     })
-    del history[:-CONTEXT_HISTORY_LEN]
+    if dept_name is not None:
+        ctx["dept_name"] = dept_name
+    if employee_id is not None:
+        ctx["employee_id"] = employee_id
+        ctx["employee_name"] = employee_name
+    if month is not None:
+        ctx["month"] = month
+    if date_range is not None:
+        ctx["date_range"] = date_range
 
 
 def get_recent_context(session, field):
-    """Walks the last CONTEXT_HISTORY_LEN turns, most recent first, and
-    returns the first non-None value found for `field` ('dept_name',
-    'employee_id', 'employee_name', 'month', or 'date_range'). Returns None
-    if nothing recent set that field."""
-    history = session.get("context_history") or []
-    for entry in reversed(history):
-        val = entry.get(field)
-        if val is not None:
-            return val
-    return None
+    """Returns the sticky value currently held for `field` ('dept_name',
+    'employee_id', 'employee_name', 'month', or 'date_range'), or None if
+    nothing has been explicitly mentioned yet this session. Name kept as
+    `get_recent_context` for call-site compatibility, though the value is
+    no longer window-limited - it's whatever was last explicitly set,
+    persisted for the whole session."""
+    ctx = session.get("sticky_context") or {}
+    return ctx.get(field)

@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import entities, queries, intents, team, session_store, spellcheck
+from . import entities, queries, intents, team, session_store, spellcheck, llm_nlu
 
 app = FastAPI(title="Pace Chatbot (Phase 1)")
 
@@ -735,6 +735,23 @@ _INDIVIDUAL_EMP_INTENTS = set(_EMP_FIELD_INTENTS) | {
 # extract_employee() on the raw message before deciding whether to skip the
 # manager/team routing (see the bypass logic there).
 _DUAL_PURPOSE_EMP_INTENTS = {"ot_subscore", "wfh_subscore", "ps_worked_ranking"}
+
+# Pronoun-referring-to-a-person detection ("is he improving?" as a follow-up
+# to "aryan gupta score"). Deliberately kept as a RULE-BASED, deterministic
+# check rather than relying on Gemini to infer this from conversation
+# context: the LLM layer (llm_nlu.py) sees only the raw message, with no
+# session history in its prompt, so on a pronoun-only follow-up with no named
+# employee it has nothing to disambiguate from and tends to confidently guess
+# the generic org-wide ranking intent (e.g. "improving") instead of the
+# individual-employee intent (e.g. "emp_trend") - even though the rule-based
+# regex matcher (intents.match_intent) already correctly identifies these as
+# individual-shaped ("\bis .* (improving|declining)\b" matches "is he
+# improving" regardless of whether a name is present). When a pronoun is
+# present AND the rule-based matcher landed on an _INDIVIDUAL_EMP_INTENTS
+# entry, that rule-based intent is trusted over whatever the LLM proposed -
+# see the override in handle_message. This keeps the fix independent of
+# Gemini's availability/latency/prompt tuning entirely.
+_PRONOUN_PATTERN = re.compile(r"\b(he|she|him|her|his|their|they|them)\b", re.IGNORECASE)
 
 
 # --- Conversational context carry-forward (feature) -------------------
@@ -1641,7 +1658,78 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     raw_message = message
     message = spellcheck.correct_typos(message)
 
-    intent = intents.match_intent(message)
+    # --- LLM-first intent classification (Gemini), with rule-based fallback
+    # and safety cross-check ---
+    # The rule-based matcher (intents.match_intent) is ALWAYS computed too,
+    # both as the fallback when Gemini is unavailable/fails, AND as an
+    # independent second opinion used purely for the opposite-direction
+    # safety check below. Gemini's output only ever selects an intent NAME
+    # from the exact same fixed intent set already used by the rule-based
+    # matcher (validated in llm_nlu.classify) - it never invents a new code
+    # path, never touches the DB, and never produces the final answer; the
+    # rest of this function (dept/employee/month extraction, answer_intent(),
+    # queries.py) runs completely unchanged regardless of which matcher
+    # picked the intent.
+    rule_intent = intents.match_intent(message)
+    llm_result = llm_nlu.classify(raw_message)
+
+    # Pronoun override (see _PRONOUN_PATTERN above): a message referring to a
+    # person via "he"/"she"/etc. that the rule-based matcher already resolved
+    # to an individual-employee-scoped intent always wins over the LLM's
+    # intent choice, since Gemini has no session context to know the pronoun
+    # refers to whoever was last individually discussed and otherwise tends
+    # to guess a generic org-wide ranking intent instead. This is checked
+    # BEFORE the llm_result branch below so it short-circuits that logic
+    # entirely (including the opposite-direction clarification check, which
+    # would otherwise fire spuriously e.g. LLM="improving" vs rule="declining"
+    # style conflicts caused purely by the LLM's missing context, not a real
+    # ambiguity in the user's own wording).
+    _pronoun_override = (
+        _PRONOUN_PATTERN.search(message) is not None
+        and rule_intent in _INDIVIDUAL_EMP_INTENTS
+    )
+
+    if _pronoun_override:
+        intent = rule_intent
+    elif llm_result is not None:
+        llm_intent = llm_result["intent"]
+        # Safety cross-check: for opposite-direction-sensitive intents, if
+        # the independent rule-based matcher ALSO confidently landed on the
+        # exact opposite intent, don't guess - ask the user to clarify
+        # instead of silently picking one direction.
+        opposite_of_llm = intents._OPPOSITE_INTENTS.get(llm_intent)
+        if opposite_of_llm is not None and rule_intent == opposite_of_llm:
+            return ChatResponse(
+                reply=(
+                    "I'm not fully sure which direction you mean — did you want "
+                    f"\"{llm_intent.replace('_', ' ')}\" or \"{opposite_of_llm.replace('_', ' ')}\"? "
+                    "Please rephrase more specifically (e.g. use \"best\"/\"worst\" or "
+                    "\"improving\"/\"declining\" explicitly)."
+                ),
+                needs_clarification=True,
+                clarification_options=[llm_intent, opposite_of_llm],
+            )
+        intent = llm_intent
+        # Entity-hint augmentation: splice any employee/department name Gemini
+        # extracted into the text that the EXISTING extract_employee()/
+        # extract_department() functions parse. This lets those unchanged,
+        # safety-checked resolvers (exact match -> fuzzy match, same as
+        # always) pick up a name Gemini normalized/understood but that the
+        # rule-based regex text-matching might otherwise miss (e.g. a casual
+        # phrasing or minor misspelling) - Gemini never resolves the name
+        # itself, it only proposes text that flows through the same
+        # resolution/safety pipeline as before.
+        llm_entities = llm_result.get("entities", {})
+        hint_bits = []
+        for key in ("employee", "department", "manager"):
+            val = llm_entities.get(key)
+            if val and val.lower() not in message.lower():
+                hint_bits.append(str(val))
+        if hint_bits:
+            message = message + " " + " ".join(hint_bits)
+    else:
+        intent = rule_intent
+
     if intent is None:
         return ChatResponse(reply=intents.FALLBACK_MESSAGE)
 

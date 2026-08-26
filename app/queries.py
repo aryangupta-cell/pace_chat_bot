@@ -279,18 +279,28 @@ def employee_weekly_pace_trend(employee_id, num_weeks=6):
     new_pace_score_7_3_event_level for one employee, most recent num_weeks
     that have at least 2 scored days - a week-over-week delta is included
     for every week after the first returned. Falls back to public.pace_1
-    directly since new_pace_score_7_3_event_level is day-level and not in
-    pace_chatbot_view (same rationale as the Category K functions above)."""
+    directly since the capped sub-metrics are day-level and not in
+    pace_chatbot_view (same rationale as the Category K functions above).
+
+    BUG FIX: previously averaged new_pace_score_7_3_event_level (day-level
+    precomputed score) directly across the week. This does not match the
+    real ETL's period-score methodology (see employee_full_monthly_trend's
+    docstring) - fixed to the same 3-step aggregation (avg the 4 capped
+    sub-metrics across Standard-shift rows in the week, apply the score
+    formula once)."""
     sql = """
         select date_trunc('week', worked_day)::date as week_start,
                (date_trunc('week', worked_day)::date + interval '6 days')::date as week_end,
-               avg(new_pace_score_7_3_event_level) as avg_score,
-               count(new_pace_score_7_3_event_level) as scored_days
+               least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7)
+                    + (avg(capped_discipline) * 3)) * 10)) as avg_score,
+               count(*) as scored_days
         from public.pace_1
         where employee_id = %(employee_id)s
-          and new_pace_score_7_3_event_level is not null
+          and shift_type = 'Standard'
+          and capped_engagement is not null and capped_effectiveness is not null
+          and capped_discipline is not null and capped_working_hours is not null
         group by 1
-        having count(new_pace_score_7_3_event_level) >= 2
+        having count(*) >= 2
         order by 1 desc
         limit %(num_weeks)s
     """
@@ -1132,20 +1142,28 @@ def ranking_weekly_pace_trend(employee_ids, num_weeks=4):
     most recent `num_weeks` weeks that have at least 2 scored days for that
     employee, with a week-over-week delta per employee (reset at each
     employee's first returned week, same convention as
-    employee_weekly_pace_trend)."""
+    employee_weekly_pace_trend).
+
+    BUG FIX: see employee_weekly_pace_trend's docstring - same fix, the 4
+    capped sub-metrics are averaged across the week first and the score
+    formula applied once, instead of averaging the precomputed day-level
+    new_pace_score_7_3_event_level."""
     if not employee_ids:
         return []
     sql = """
         select employee_id, emp_name,
                date_trunc('week', worked_day)::date as week_start,
                (date_trunc('week', worked_day)::date + interval '6 days')::date as week_end,
-               avg(new_pace_score_7_3_event_level) as avg_score,
-               count(new_pace_score_7_3_event_level) as scored_days
+               least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7)
+                    + (avg(capped_discipline) * 3)) * 10)) as avg_score,
+               count(*) as scored_days
         from public.pace_1
         where employee_id = any(%(employee_ids)s)
-          and new_pace_score_7_3_event_level is not null
+          and shift_type = 'Standard'
+          and capped_engagement is not null and capped_effectiveness is not null
+          and capped_discipline is not null and capped_working_hours is not null
         group by employee_id, emp_name, 3, 4
-        having count(new_pace_score_7_3_event_level) >= 2
+        having count(*) >= 2
         order by employee_id, week_start
     """
     rows = run_query(sql, {"employee_ids": employee_ids})
@@ -1639,26 +1657,43 @@ def employee_full_monthly_trend(employee_id, metric_key="pace_score"):
     that column is aliased from last_60_days_new_pace_score_7_3 - a rolling
     60-*worked*-day window score that is effectively FROZEN per employee
     (confirmed live: Rudhi's rolling avg was 90.0/90.0/90.0/90.0 across 4
-    distinct calendar months, while the correct day-level
-    new_pace_score_7_3_event_level averaged 83.8/91.3/88.7/90.9 for the same
-    4 months - the exact "delta always zero" root cause that was already
-    fixed once for pace_score_delta, but was never applied here since this
-    function was added in a later round). Falls back to public.pace_1
-    directly for the pace_score metric so it groups the true day-level
-    event score by month, matching employee_pace_trend_monthly's
-    methodology. Other METRICS keys (engagement/effectiveness/discipline/
-    working_pct/etc.) are day-level, non-rolling columns already, so they
-    keep using pace_chatbot_view as before."""
+    distinct calendar months). Falls back to public.pace_1 directly for the
+    pace_score metric.
+
+    SECOND BUG FIX (later round): grouping day-level
+    new_pace_score_7_3_event_level by month and averaging it is ALSO wrong -
+    it does not match the real ETL's overall_new_pace_score_7_3, which
+    averages the 4 CAPPED sub-metrics (capped_engagement/effectiveness/
+    discipline/working_hours) across the period FIRST and applies the score
+    formula ONCE to those averages (Jensen's inequality: averaging a product
+    of averages != averaging per-row products). Confirmed live against
+    Looker's real overall_new_pace_score_7_3 for Aryan Gupta (99/96/96/87)
+    which the old per-day-average method got close-but-wrong (96/95/95/87).
+    Fixed to the correct 3-step aggregation: filter Standard-shift rows in
+    the period -> AVG each of the 4 capped sub-metrics -> apply the score
+    formula once per period. Other METRICS keys (engagement/effectiveness/
+    discipline/working_pct/etc.) are unaffected by this fix and keep using
+    pace_chatbot_view as before."""
     if metric_key == "pace_score":
         sql = """
-            select to_char(worked_day,'YYYY-MM') as mo,
-                   avg(new_pace_score_7_3_event_level) as metric_value,
-                   count(new_pace_score_7_3_event_level) as days_counted
-            from public.pace_1
-            where employee_id = %(employee_id)s and shift_type = 'Standard'
-            group by 1
-            having count(new_pace_score_7_3_event_level) > 0
-            order by 1
+            with per_month as (
+                select to_char(worked_day,'YYYY-MM') as mo,
+                       avg(capped_engagement) as avg_e,
+                       avg(capped_effectiveness) as avg_ef,
+                       avg(capped_discipline) as avg_d,
+                       avg(capped_working_hours) as avg_w,
+                       count(*) as days_counted
+                from public.pace_1
+                where employee_id = %(employee_id)s and shift_type = 'Standard'
+                  and capped_engagement is not null and capped_effectiveness is not null
+                  and capped_discipline is not null and capped_working_hours is not null
+                group by 1
+            )
+            select mo,
+                   least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10)) as metric_value,
+                   days_counted
+            from per_month
+            order by mo
         """
         return run_query(sql, {"employee_id": employee_id})
     expr, _ = METRICS[metric_key]
@@ -1673,16 +1708,29 @@ def employee_full_monthly_trend(employee_id, metric_key="pace_score"):
 
 
 def dept_full_monthly_trend(dept_name, metric_key="pace_score"):
+    """See employee_full_monthly_trend's docstring for the 3-step-aggregation
+    bug fix rationale (avg the 4 capped sub-metrics per period, apply the
+    score formula once) - same fix applied here, grouped by month."""
     if metric_key == "pace_score":
         sql = """
-            select to_char(worked_day,'YYYY-MM') as mo,
-                   avg(new_pace_score_7_3_event_level) as metric_value,
-                   count(distinct employee_id) as n_employees
-            from public.pace_1
-            where dept_name = %(dept_name)s and shift_type = 'Standard'
-              and new_pace_score_7_3_event_level is not null
-            group by 1
-            order by 1
+            with per_month as (
+                select to_char(worked_day,'YYYY-MM') as mo,
+                       avg(capped_engagement) as avg_e,
+                       avg(capped_effectiveness) as avg_ef,
+                       avg(capped_discipline) as avg_d,
+                       avg(capped_working_hours) as avg_w,
+                       count(distinct employee_id) as n_employees
+                from public.pace_1
+                where dept_name = %(dept_name)s and shift_type = 'Standard'
+                  and capped_engagement is not null and capped_effectiveness is not null
+                  and capped_discipline is not null and capped_working_hours is not null
+                group by 1
+            )
+            select mo,
+                   least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10)) as metric_value,
+                   n_employees
+            from per_month
+            order by mo
         """
         return run_query(sql, {"dept_name": dept_name})
     expr, _ = METRICS[metric_key]
@@ -1697,16 +1745,28 @@ def dept_full_monthly_trend(dept_name, metric_key="pace_score"):
 
 
 def team_full_monthly_trend(employee_ids, metric_key="pace_score"):
+    """See employee_full_monthly_trend's docstring for the 3-step-aggregation
+    bug fix rationale - same fix applied here, grouped by month."""
     if metric_key == "pace_score":
         sql = """
-            select to_char(worked_day,'YYYY-MM') as mo,
-                   avg(new_pace_score_7_3_event_level) as metric_value,
-                   count(distinct employee_id) as n_employees
-            from public.pace_1
-            where employee_id = any(%(employee_ids)s) and shift_type = 'Standard'
-              and new_pace_score_7_3_event_level is not null
-            group by 1
-            order by 1
+            with per_month as (
+                select to_char(worked_day,'YYYY-MM') as mo,
+                       avg(capped_engagement) as avg_e,
+                       avg(capped_effectiveness) as avg_ef,
+                       avg(capped_discipline) as avg_d,
+                       avg(capped_working_hours) as avg_w,
+                       count(distinct employee_id) as n_employees
+                from public.pace_1
+                where employee_id = any(%(employee_ids)s) and shift_type = 'Standard'
+                  and capped_engagement is not null and capped_effectiveness is not null
+                  and capped_discipline is not null and capped_working_hours is not null
+                group by 1
+            )
+            select mo,
+                   least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10)) as metric_value,
+                   n_employees
+            from per_month
+            order by mo
         """
         return run_query(sql, {"employee_ids": employee_ids})
     expr, _ = METRICS[metric_key]

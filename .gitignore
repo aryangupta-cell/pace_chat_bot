@@ -1,0 +1,24 @@
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+*credentials*
+*secrets*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Server logs (may contain request content)
+srv_out.log
+srv_err.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
