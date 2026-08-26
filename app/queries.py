@@ -1696,10 +1696,87 @@ def employee_full_monthly_trend(employee_id, metric_key="pace_score"):
             order by mo
         """
         return run_query(sql, {"employee_id": employee_id})
+    if metric_key in _CAPPED_SUBSCORE_COL:
+        # Same Jensen's-inequality correctness fix as pace_score above:
+        # engagement_pct/effectiveness_pct/discipline_pct in pace_1 are NOT
+        # a simple linear rescaling of capped_engagement/capped_effectiveness/
+        # capped_discipline (confirmed live: e.g. effectiveness_pct=50.00 pairs
+        # with capped_effectiveness=0.53, not 0.50 - the capping step is
+        # nonlinear). Averaging the pre-computed daily *_pct columns directly
+        # would NOT match averaging the capped column first, so this mirrors
+        # pace_chatbot_view/employee_full_monthly_trend's established fix:
+        # average the capped column per month, then scale to a percentage.
+        col = _CAPPED_SUBSCORE_COL[metric_key]
+        sql = f"""
+            select to_char(worked_day,'YYYY-MM') as mo,
+                   avg({col}) * 100 as metric_value,
+                   count(*) as days_counted
+            from public.pace_1
+            where employee_id = %(employee_id)s and shift_type = 'Standard' and {col} is not null
+            group by 1
+            order by 1
+        """
+        return run_query(sql, {"employee_id": employee_id})
     expr, _ = METRICS[metric_key]
     sql = f"""
         select to_char(worked_day,'YYYY-MM') as mo, {expr} as metric_value, count(*) as days_counted
         from {VIEW}
+        where employee_id = %(employee_id)s
+        group by 1
+        order by 1
+    """
+    return run_query(sql, {"employee_id": employee_id})
+
+
+# Sub-score percentage metrics that need the capped-column-average
+# methodology (see employee_full_monthly_trend's docstring) rather than a
+# plain avg() of the precomputed pace_chatbot_view *_pct column.
+_CAPPED_SUBSCORE_COL = {
+    "engagement": "capped_engagement",
+    "effectiveness": "capped_effectiveness",
+    "discipline": "capped_discipline",
+}
+
+
+# ---------------------------------------------------------------------------
+# Month-wise COUNT breakdowns (WFH/visit/leave/late/early/deficient-hours/OT)
+# for a single employee - the count-based sibling of
+# employee_full_monthly_trend's avg-based metrics. Straightforward COUNT(*)/
+# SUM() grouped by calendar month, no formula subtlety (unlike the
+# percentage sub-scores above).
+# ---------------------------------------------------------------------------
+
+COUNT_METRICS = {
+    "wfh": ("public.pace_1", "sum(case when wfh_status = 'Work From Home' then 1 else 0 end)", "WFH days"),
+    "visit": ("public.pace_1", "sum(case when visit_flag = 'Yes' then 1 else 0 end)", "visit days"),
+    "leave": ("public.pace_1", "sum(case when applied_leave_type is not null then 1 else 0 end)", "leave days"),
+    "late_comings": (VIEW, "sum(coalesce(lc_flag_per_day,0))", "late-coming days"),
+    "early_leavings": (VIEW, "sum(coalesce(el_flag_per_day,0))", "early-leaving days"),
+    "deficient_hours": (VIEW, "sum(coalesce(dh_flag_per_day,0))", "deficient-hour days"),
+    "ot_days": (None, None, "OT days"),
+    "ot_hours": (None, None, "OT hours"),
+}
+
+
+def employee_monthly_count_trend(employee_id, metric_key):
+    """One row per calendar month, a COUNT/SUM-based metric (not an average)
+    for a single employee - e.g. "WFH days month wise". OT days/hours are a
+    special case (filtered to shift_type = 'Overtime (OT)', same convention
+    as ot_hours_ranking) rather than a plain table/expr pair."""
+    if metric_key in ("ot_days", "ot_hours"):
+        expr = "count(*)" if metric_key == "ot_days" else "sum(coalesce(worked_hours,0))"
+        sql = f"""
+            select to_char(worked_day,'YYYY-MM') as mo, {expr} as metric_value, count(*) as days_counted
+            from public.pace_1
+            where employee_id = %(employee_id)s and shift_type = 'Overtime (OT)'
+            group by 1
+            order by 1
+        """
+        return run_query(sql, {"employee_id": employee_id})
+    table, expr, _ = COUNT_METRICS[metric_key]
+    sql = f"""
+        select to_char(worked_day,'YYYY-MM') as mo, {expr} as metric_value, count(*) as days_counted
+        from {table}
         where employee_id = %(employee_id)s
         group by 1
         order by 1

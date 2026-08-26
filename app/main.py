@@ -667,6 +667,39 @@ def _detect_subscore_key(message, default="engagement", include_working_hours=Fa
     return default
 
 
+# Keyword -> metric key for the "month wise" full-trend intent, covering
+# every metric this round generalized beyond overall PACE score (see
+# queries.employee_full_monthly_trend / queries.employee_monthly_count_trend
+# and queries.COUNT_METRICS). Checked in order, most specific phrase first
+# within each entry, first match wins - falls back to "pace_score" (the
+# pre-existing default) when no metric keyword is named at all.
+_FULL_TREND_METRIC_KEYWORDS = [
+    ("wfh", ("wfh", "work from home")),
+    ("visit", ("visit",)),
+    ("leave", ("leave",)),
+    ("deficient_hours", ("deficient hour", "deficient-hour")),
+    ("late_comings", ("late coming", "late-coming", "late comings", "came late", "come late", "coming late", "was late", "late-comings", "arrive late", "arrived late")),
+    ("early_leavings", ("early leaving", "early leavings", "left early", "leaving early")),
+    ("ot_hours", ("ot hours", "overtime hours")),
+    ("ot_days", ("ot day", "overtime day", " ot ", "overtime")),
+    ("engagement", ("engagement",)),
+    ("effectiveness", ("effectiveness",)),
+    ("discipline", ("discipline",)),
+    ("working_pct", ("working hours", "working %", "working percentage", "working pct")),
+]
+
+
+def _detect_full_trend_metric(message):
+    # Pad with spaces so word-ish tokens like " ot " don't need extra regex
+    # machinery to avoid matching inside another word.
+    ml = f" {message.lower()} "
+    for key, terms in _FULL_TREND_METRIC_KEYWORDS:
+        for t in terms:
+            if t in ml:
+                return key
+    return "pace_score"
+
+
 def format_trend_2month(rows, emp_name):
     if not rows:
         return f"Not enough data to show a 2-month trend for {emp_name}."
@@ -1734,11 +1767,16 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 rows = queries.dept_full_monthly_trend(dept_name)
                 return ChatResponse(reply=format_full_trend(rows, dept_name), rows=rows)
             return ChatResponse(reply="I couldn't find that employee — please give me their exact full name or employee code.")
-        metric_key = _detect_subscore_key(message, default="pace_score")
-        if metric_key not in queries.METRICS:
+        metric_key = _detect_full_trend_metric(message)
+        if metric_key in queries.COUNT_METRICS:
+            rows = queries.employee_monthly_count_trend(emp_id, metric_key)
+            label = queries.COUNT_METRICS[metric_key][2]
+            return ChatResponse(reply=format_full_trend(rows, emp_name, label), rows=rows)
+        if metric_key != "pace_score" and metric_key not in queries.METRICS:
             metric_key = "pace_score"
+        label = "PACE score" if metric_key == "pace_score" else queries.METRICS[metric_key][1]
         rows = queries.employee_full_monthly_trend(emp_id, metric_key=metric_key)
-        return ChatResponse(reply=format_full_trend(rows, emp_name, queries.METRICS[metric_key][1]), rows=rows)
+        return ChatResponse(reply=format_full_trend(rows, emp_name, label), rows=rows)
 
     if intent == "full_trend_dept":
         if not dept_name:

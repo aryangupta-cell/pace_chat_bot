@@ -83,6 +83,7 @@ Guidance on what some intent families mean:
 - subscore_compare_emp: which area (engagement/effectiveness/discipline) a specific person is weakest/strongest in
 - team_how_doing / team_lowest_scorers / team_compare: "my team" / manager's-team scoped questions
 - dept_best / dept_worst / dept_compare / dept_summary / dept_avg: department-level questions
+- full_trend_emp: a SPECIFIC named person's month-by-month/monthly breakdown for ANY metric — not just PACE score. This covers "X month wise", "X month by month", "how many times did [person] [do X] each month" for PACE score, WFH days, visit days, leave days, late-comings, early-leavings, deficient-hour days, OT days/hours, engagement %, effectiveness %, discipline %, or working-hours % of a NAMED employee. Prefer full_trend_emp over the single-day/status lookup intents (wfh_emp, leave_emp_check, emp_late_comings, etc.) whenever the message asks for a MONTHLY breakdown/trend rather than a one-off status check.
 
 CRITICAL DIRECTION SAFETY: many intents come in opposite pairs (best/worst,
 improving/declining, most/fewest, drop/improvement). Read the user's wording
@@ -120,6 +121,11 @@ _FEW_SHOT_EXAMPLES = [
     ("who's crushing it on pace score this month", {"intent": "pace_score_best", "entities": {"month": "this month"}, "confidence": 0.7}),
     ("is anyone racking up overtime hours", {"intent": "ot_ranking", "entities": {}, "confidence": 0.75}),
     ("month on month pace score trend for Rudhi", {"intent": "full_trend_emp", "entities": {"employee": "Rudhi"}, "confidence": 0.9}),
+    ("how many times did Aman Kawadia take wfh month wise", {"intent": "full_trend_emp", "entities": {"employee": "Aman Kawadia", "metric": "wfh"}, "confidence": 0.9}),
+    ("visit days for Rahul month by month", {"intent": "full_trend_emp", "entities": {"employee": "Rahul", "metric": "visit"}, "confidence": 0.88}),
+    ("leave days month wise for Priya", {"intent": "full_trend_emp", "entities": {"employee": "Priya", "metric": "leave"}, "confidence": 0.88}),
+    ("late comings each month for Aryan Gupta", {"intent": "full_trend_emp", "entities": {"employee": "Aryan Gupta", "metric": "late_comings"}, "confidence": 0.85}),
+    ("engagement % trend by month for Megha Sharma", {"intent": "full_trend_emp", "entities": {"employee": "Megha Sharma", "metric": "engagement"}, "confidence": 0.88}),
     ("hey what's the weather like", {"intent": "none", "entities": {}, "confidence": 0.95}),
 ]
 

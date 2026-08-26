@@ -667,6 +667,24 @@ _FULL_TREND_EMP_PATTERNS = [
     r"\bscore trend since\b", r"\bwhat has\b.*\bscore been each month\b",
     r"\bhow has\b.*\bscore changed over time\b",
     r"\b(discipline|engagement|effectiveness)\b.*\btrend (over|since)\b",
+    # "month wise"/"month by month" generalization (round: generalize the
+    # full-monthly-trend feature beyond PACE score to every metric below -
+    # WFH/visit/leave/late/early/deficient-hours/OT/engagement/
+    # effectiveness/discipline/working-hours). The actual metric named is
+    # resolved from the message text by main._detect_full_trend_metric(),
+    # not baked into the regex here - same "one generic pattern set + a
+    # keyword resolver" pattern already used by day_count/day_list for
+    # which day-flag is meant. Kept metric-agnostic so it also still covers
+    # bare "pace score month wise" / "score month by month" phrasings.
+    r"\bmonth[- ]?wise\b",
+    r"\bmonth[- ]by[- ]month\b",
+    r"\btrend by month\b", r"\bbreakdown by month\b", r"\bbreak(- |)down.*by month\b",
+    r"\bhow many times\b.*\b(each|every) month\b",
+    r"\bhow often\b.*\b(each|every) month\b",
+    r"\b(wfh|work from home|visit|leave|late[- ]?coming|early leav(ing|ings)|deficient hours?|ot|overtime)\b.*\b(month wise|month by month|each month|every month|per month)\b",
+    r"\b(month wise|month by month|each month|every month|per month)\b.*\b(wfh|work from home|visit|leave|late[- ]?coming|early leav(ing|ings)|deficient hours?|ot|overtime)\b",
+    r"\bmonthly (breakdown|trend|history)\b",
+    r"\bfor each month\b", r"\bby month\b.*\b(count|trend|breakdown)\b",
 ]
 _FULL_TREND_DEPT_PATTERNS = [
     r"\bdepartment'?s (average )?pace score trend\b",
