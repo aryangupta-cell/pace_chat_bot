@@ -1867,3 +1867,103 @@ def team_full_monthly_trend(employee_ids, metric_key="pace_score"):
         order by 1
     """
     return run_query(sql, {"employee_ids": employee_ids})
+
+
+# ---------------------------------------------------------------------------
+# PS (ps_worked_flag_day) exclusion support.
+#
+# `ps_worked_flag_day` only exists on public.pace_1 (NOT on
+# pace_chatbot_view, confirmed against the live schema), so every function
+# below queries pace_1 directly rather than VIEW. When PS wasn't working that
+# day, the day's engagement/effectiveness/productivity numbers reflect no
+# real usage capture and are unreliable — these functions let a query
+# explicitly drop those rows (ps_worked_flag_day = 0) before aggregating, or
+# report on the PS-off days themselves.
+#
+# Threshold used for the PROACTIVE data-quality caveat (Category C): flagged
+# only when PS-off days are >= 25% of the days counted in the period AND
+# there are at least 3 days in the period at all (so a single-day "yesterday"
+# query, where a PS-off day is either 0% or 100% of the period and adds no
+# real information, never triggers a noisy caveat). This is a judgment call,
+# not a value pulled from the data.
+# ---------------------------------------------------------------------------
+
+PS_OFF_CAVEAT_MIN_DAYS = 3
+PS_OFF_CAVEAT_RATIO = 0.25
+
+PS_FILTERED_METRICS = {
+    "engagement": ("avg(engagement_pct)", "engagement %"),
+    "effectiveness": ("avg(effectiveness_pct)", "effectiveness %"),
+    "discipline": ("avg(discipline_pct)", "discipline %"),
+    "working_hours": ("avg(working_pct)", "working hours %"),
+    "productive_min": ("sum(coalesce(productive_and_meeting_min,0))", "productive minutes"),
+    "whatsapp_min": ("sum(coalesce(whatsapp_min,0))", "WhatsApp minutes"),
+    "ai_min": ("sum(coalesce(ai_min,0))", "AI tool usage minutes"),
+    "tools_and_mails_min": ("sum(coalesce(tools_and_mails_min,0))", "tools & mail minutes"),
+}
+
+
+def employee_metric_ps_filtered(employee_id, metric_key, month=None, date_range=None, exclude_ps_off=True):
+    """avg/sum of one PS_FILTERED_METRICS metric for one employee, optionally
+    excluding ps_worked_flag_day=0 rows first. Also returns the day counts so
+    call sites can render "no data" gracefully (Category E) instead of a bare
+    NULL when every day in scope is PS-off."""
+    expr, label = PS_FILTERED_METRICS[metric_key]
+    frag, params = _period_filter(month, date_range)
+    ps_frag = "and ps_worked_flag_day = 1" if exclude_ps_off else ""
+    sql = f"""
+        select {expr} as metric_value,
+               count(*) as days_counted,
+               sum(case when ps_worked_flag_day = 1 then 1 else 0 end) as ps_working_days,
+               sum(case when ps_worked_flag_day = 0 or ps_worked_flag_day is null then 1 else 0 end) as ps_off_days
+        from public.pace_1
+        where employee_id = %(employee_id)s and {frag} {ps_frag}
+    """
+    params["employee_id"] = employee_id
+    rows = run_query(sql, params)
+    row = rows[0] if rows else None
+    if row is not None:
+        row["label"] = label
+    return row
+
+
+def ps_working_ratio(employee_id, month=None, date_range=None):
+    """Informational PS-working-day count/ratio for one employee (Category B)."""
+    frag, params = _period_filter(month, date_range)
+    sql = f"""
+        select count(*) as total_days,
+               sum(case when ps_worked_flag_day = 1 then 1 else 0 end) as ps_working_days,
+               sum(case when ps_worked_flag_day = 0 or ps_worked_flag_day is null then 1 else 0 end) as ps_off_days
+        from public.pace_1
+        where employee_id = %(employee_id)s and {frag}
+    """
+    params["employee_id"] = employee_id
+    rows = run_query(sql, params)
+    return rows[0] if rows else None
+
+
+def ps_off_ranking(dept_name, month=None, date_range=None, employee_ids=None, ascending=False, limit=None):
+    """Ranking of employees by PS non-working day count (Category B: "who has
+    the most/fewest PS non-working days")."""
+    frag, params = _period_filter(month, date_range)
+    filters = [frag]
+    if dept_name:
+        filters.append("dept_name = %(dept_name)s")
+        params["dept_name"] = dept_name
+    if employee_ids is not None:
+        filters.append("employee_id = any(%(employee_ids)s)")
+        params["employee_ids"] = employee_ids
+    where_clause = " and ".join(filters)
+    order = "asc" if ascending else "desc"
+    sql = f"""
+        select employee_id, emp_name, dept_name,
+               sum(case when ps_worked_flag_day = 0 or ps_worked_flag_day is null then 1 else 0 end) as ps_off_days,
+               count(*) as total_days
+        from public.pace_1
+        where {where_clause}
+        group by employee_id, emp_name, dept_name
+        order by ps_off_days {order} nulls last
+        limit %(limit)s
+    """
+    params["limit"] = limit or 10
+    return run_query(sql, params)

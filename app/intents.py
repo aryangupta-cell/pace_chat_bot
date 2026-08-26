@@ -349,6 +349,9 @@ _LEAVE_EMP_CHECK_PATTERNS = [
     r"\bwas\b.*\bon leave\b", r"\bis\b.*\bon leave\b",
     r"\bdid\b.*\btake (any )?leave\b",
     r"\bhas\b.*\bbeen on leave\b",
+    # Word-order/phrasing-invariance: statement form ("X took leave
+    # yesterday") without the "did" question-auxiliary had no pattern.
+    r"\btook leave\b",
 ]
 _HALF_DAY_RANKING_PATTERNS = [
     r"\bhalf[- ]?day\b.*\b(count|ranking|most)\b", r"\bmost half[- ]?days?\b",
@@ -396,6 +399,12 @@ _VISIT_EMP_PATTERNS = [
     # Parity with the WFH Bug 1 fix above: bare "how many times X went on
     # visit" had no matching pattern either.
     r"\bhow many times\b.*\bwent on (a )?visit\b", r"\bhow many times\b.*\bvisited\b",
+    # Word-order/phrasing-invariance fix: "on (a) visit" had no pattern at
+    # all before, in EITHER statement ("X was on visit yesterday") or
+    # question-inverted ("was X on visit yesterday") word order - \b.*\b is
+    # already order-agnostic between the two halves, so one pattern each
+    # covers both phrasings.
+    r"\b(was|is|were|are)\b.*\bon (a )?visit\b", r"\bwent on (a )?visit\b",
 ]
 
 # --- Category D (new): WFH ------------------------------------------------------
@@ -706,7 +715,43 @@ _FULL_TREND_TEAM_PATTERNS = [
 ]
 
 
+# --- PS (ps_worked_flag_day) exclusion (Part 3) --------------------------
+# Checked FIRST (before every generic metric pattern below) so a phrase like
+# "excluding PS non-working days, what's X's engagement" doesn't fall
+# through to the plain emp_engagement intent, which would silently ignore
+# the exclusion instruction. The metric itself (engagement/effectiveness/
+# etc.) is resolved from the message text by main._detect_ps_metric(), same
+# "one generic pattern set + a keyword resolver" style already used for
+# full-trend metric detection above.
+_PS_EXCLUDE_TRIGGER = (
+    r"\b(exclud\w+|remov\w+|filter(ing|ed)?( out)?|ignor\w+|only count)\b.*"
+    r"\bps\b.*\b(not working|non[- ]?working|off|wasn'?t working|was not working)\b"
+    r"|\bif ps (was|wasn'?t) (not )?working\b"
+    r"|\bps (not working|non[- ]?working|off) days?\b.*\b(exclud\w+|remov\w+|filter\w*|ignor\w+)\b"
+)
+_PS_EXCLUDE_PATTERNS = [_PS_EXCLUDE_TRIGGER]
+
+_PS_RATIO_PATTERNS = [
+    r"\bhow many (days? )?(was |is )?ps (not working|off)\b",
+    r"\bps non[- ]?working days?\b", r"\bps not working (count|days?)\b",
+    r"\bcount of days? ps was off\b", r"\bno ps data\b",
+    r"\bps[- ]working (ratio|days?|percentage)\b", r"\bwhat percentage of days? was ps working\b",
+    r"\bzero ps[- ]?working days?\b", r"\bmore than \d+ ps non[- ]?working days?\b",
+    r"\bmost ps non[- ]?working days?\b", r"\bfewest ps[- ]?working days?\b",
+    r"\bwhich department has the most ps non[- ]?working\b",
+]
+
+_PS_EXPLAIN_PATTERNS = [
+    r"\bwhat does\b.*\bps (not working|non[- ]?working)\b.*\bmean\b",
+    r"\bwhat is\b.*\bps not working\b",
+    r"\bexplain\b.*\bps (not working|worked flag)\b",
+]
+
+
 _INTENTS = [
+    ("ps_exclude_metric", _PS_EXCLUDE_PATTERNS),
+    ("ps_ratio_info", _PS_RATIO_PATTERNS),
+    ("ps_explain", _PS_EXPLAIN_PATTERNS),
     ("day_count", _DAY_COUNT_PATTERNS),
     ("day_list", _DAY_LIST_PATTERNS),
     ("status_transitions", _STATUS_TRANSITION_PATTERNS),
@@ -954,16 +999,11 @@ def match_intent(text):
 
 
 FALLBACK_MESSAGE = (
-    "I can currently answer questions about attendance, PACE score, productivity, "
-    "engagement, effectiveness, discipline, WhatsApp/AI tool usage, department "
-    "comparisons, team summaries, and more — for an individual employee, a "
-    "department, 'my team', or a specific manager's team. For example:\n"
+    "I can currently answer questions about attendance, PACE score, and productivity. "
+    "For example:\n"
     "- \"pace score of Aarna Jain\"\n"
     "- \"worst attendance in Accounts this month\"\n"
     "- \"top 5 by pace score in IT-Development\"\n"
-    "- \"compare Accounts vs Billing\"\n"
-    "- \"how is my team doing\"\n"
-    "- \"new joiners in my team\"\n\n"
-    "You can optionally mention a department, employee name, and/or a month; "
-    "if you leave them out I'll default to all departments / the current month."
+    "- \"compare Accounts vs Billing\"\n\n"
+    "You can optionally mention a department, employee name, and/or a month."
 )

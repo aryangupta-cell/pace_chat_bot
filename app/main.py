@@ -689,6 +689,69 @@ _FULL_TREND_METRIC_KEYWORDS = [
 ]
 
 
+# Maps an _EMP_FIELD_INTENTS intent name to the matching queries.py
+# PS_FILTERED_METRICS key, for the Category C proactive PS-off caveat below.
+# Only intents with a real PS-filterable metric are included here.
+_PS_CAVEAT_METRIC_BY_INTENT = {
+    "emp_engagement": "engagement",
+    "emp_effectiveness": "effectiveness",
+    "emp_discipline": "discipline",
+    "emp_working_pct": "working_hours",
+    "emp_productive_time": "productive_min",
+}
+
+_PS_METRIC_KEYWORDS = [
+    ("engagement", ["engagement"]),
+    ("effectiveness", ["effectiveness"]),
+    ("discipline", ["discipline"]),
+    ("working_hours", ["working hours", "working %", "working pct"]),
+    ("whatsapp_min", ["whatsapp"]),
+    ("ai_min", ["ai tool", "ai usage", "ai minutes"]),
+    ("tools_and_mails_min", ["tools and mail", "tools & mail", "mail minutes"]),
+    ("productive_min", ["productive minutes", "productive time", "productivity"]),
+]
+
+
+def _detect_ps_metric(message):
+    """Same 'keyword resolver over a fixed message' pattern as
+    _detect_full_trend_metric below, but for PS-exclusion queries
+    (queries.PS_FILTERED_METRICS keys). Defaults to engagement, the most
+    common metric named in the PS-exclusion test spec, when nothing more
+    specific is named."""
+    ml = f" {message.lower()} "
+    for key, terms in _PS_METRIC_KEYWORDS:
+        for t in terms:
+            if t in ml:
+                return key
+    return "engagement"
+
+
+def _ps_off_caveat(emp_id, month, date_range):
+    """Category C: a proactive data-quality note appended to a normal
+    (non-PS-filtered) engagement/effectiveness/etc. answer, but ONLY when
+    PS-off days are a MEANINGFUL fraction of the period - otherwise this
+    would fire on nearly every query and just be noise. Threshold and
+    rationale documented alongside queries.PS_OFF_CAVEAT_RATIO /
+    PS_OFF_CAVEAT_MIN_DAYS. Never raises/crashes the main answer - a lookup
+    failure here just means no caveat is appended."""
+    try:
+        ratio_row = queries.ps_working_ratio(emp_id, month=month, date_range=date_range)
+    except Exception:
+        return ""
+    if not ratio_row or not ratio_row.get("total_days"):
+        return ""
+    total = ratio_row["total_days"]
+    off = ratio_row.get("ps_off_days") or 0
+    if total < queries.PS_OFF_CAVEAT_MIN_DAYS:
+        return ""
+    if (off / total) < queries.PS_OFF_CAVEAT_RATIO:
+        return ""
+    pct = round((off / total) * 100)
+    return (f"\n\n(Note: PS wasn't working on {off} of {total} days ({pct}%) in this period — "
+            f"those days' numbers may be unreliable. Ask me to \"exclude PS non-working days\" "
+            f"if you'd like the number recalculated without them.)")
+
+
 def _detect_full_trend_metric(message):
     # Pad with spaces so word-ish tokens like " ot " don't need extra regex
     # machinery to avoid matching inside another word.
@@ -835,6 +898,12 @@ _INDIVIDUAL_EMP_INTENTS = set(_EMP_FIELD_INTENTS) | {
     # (extract_employee resolves the person directly) — must bypass the
     # team/admin routing exactly like every other entry in this set.
     "full_trend_emp", "status_emp",
+    # Part 3 (PS exclusion): ps_exclude_metric always targets a named
+    # employee in this implementation (no department-wide PS-filtered
+    # ranking yet), and ps_explain names no employee at all - both must
+    # bypass team/manager routing the same as every other individual-scoped
+    # intent above.
+    "ps_exclude_metric", "ps_explain",
 }
 
 # Genuinely dual-purpose: same intent name covers both an individual lookup
@@ -843,7 +912,7 @@ _INDIVIDUAL_EMP_INTENTS = set(_EMP_FIELD_INTENTS) | {
 # bypassed by intent name alone - handle_message instead probes
 # extract_employee() on the raw message before deciding whether to skip the
 # manager/team routing (see the bypass logic there).
-_DUAL_PURPOSE_EMP_INTENTS = {"ot_subscore", "wfh_subscore", "ps_worked_ranking"}
+_DUAL_PURPOSE_EMP_INTENTS = {"ot_subscore", "wfh_subscore", "ps_worked_ranking", "ps_ratio_info"}
 
 # Pronoun-referring-to-a-person detection ("is he improving?" as a follow-up
 # to "aryan gupta score"). Deliberately kept as a RULE-BASED, deterministic
@@ -991,6 +1060,80 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         return ChatResponse(reply=f"Ranked by {label}{scope_note}:\n\n{format_metric_rows(rows, metric_key)}", rows=rows)
 
     # --- Category A: single-employee lookups ---
+    # --- PS (ps_worked_flag_day) exclusion intents (Part 3) ---
+    if intent == "ps_explain":
+        return ChatResponse(
+            reply=(
+                "\"PS not working\" refers to pace_1.ps_worked_flag_day = 0 — days when the "
+                "productivity-sensor tracking wasn't active/installed for that employee, so no real "
+                "usage data (engagement, effectiveness, minutes, etc.) was captured for that day. "
+                "Numbers computed across a day like that can be unreliable, so you can ask me to "
+                "\"exclude PS non-working days\" for any metric and I'll drop those rows before "
+                "computing the answer."
+            )
+        )
+
+    if intent == "ps_ratio_info":
+        try:
+            emp_id, emp_name = _extract_employee_ctx(message, fb, session)
+        except entities.Ambiguous as e:
+            return ChatResponse(
+                reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                needs_clarification=True, clarification_options=e.candidates,
+            )
+        if emp_id is not None:
+            row = queries.ps_working_ratio(emp_id, month=month, date_range=date_range)
+            if not row or not row.get("total_days"):
+                return ChatResponse(reply=f"No data found for {emp_name} for that period.")
+            total, working, off = row["total_days"], row["ps_working_days"] or 0, row["ps_off_days"] or 0
+            pct = round((working / total) * 100) if total else 0
+            return ChatResponse(
+                reply=(f"{emp_name}{scope_note}: PS was working {working} of {total} days ({pct}%), "
+                       f"and NOT working {off} of {total} days."),
+                rows=[row],
+            )
+        # No named employee -> department/company-wide ranking of PS-off days.
+        ascending = bool(re.search(r"\bfewest\b", message, re.I))
+        rows = queries.ps_off_ranking(dept_name, month=month, date_range=date_range,
+                                       employee_ids=employee_ids, ascending=ascending, limit=limit)
+        if not rows:
+            return ChatResponse(reply=f"No PS-tracking data found{scope_note}.")
+        direction = "fewest" if ascending else "most"
+        headers = ["#", "Employee", "PS non-working days", "Total days"]
+        data = [[i, r["emp_name"], r["ps_off_days"], r["total_days"]] for i, r in enumerate(rows, 1)]
+        return ChatResponse(reply=f"Employees with the {direction} PS non-working days{scope_note}:\n\n{_render_table(headers, data)}", rows=rows)
+
+    if intent == "ps_exclude_metric":
+        metric_key = _detect_ps_metric(message)
+        try:
+            emp_id, emp_name = _extract_employee_ctx(message, fb, session)
+        except entities.Ambiguous as e:
+            return ChatResponse(
+                reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                needs_clarification=True, clarification_options=e.candidates,
+            )
+        if emp_id is None:
+            return ChatResponse(reply="I couldn't find that employee — please give me their exact full name or employee code, or a department for a ranking.")
+        row = queries.employee_metric_ps_filtered(emp_id, metric_key, month=month, date_range=date_range, exclude_ps_off=True)
+        if not row or not row.get("days_counted"):
+            return ChatResponse(reply=f"No data found for {emp_name} for that period.")
+        # Category E edge case: zero PS-working days in scope -> graceful
+        # "no data", not a nonsensical average-of-nothing (NULL) answer.
+        if not row.get("ps_working_days"):
+            return ChatResponse(
+                reply=f"{emp_name} had zero PS-working days{scope_note} — no reliable {row['label']} data to report "
+                      f"once PS non-working days are excluded.",
+                rows=[row],
+            )
+        value = row["metric_value"]
+        formatted = _fmt(value) if isinstance(value, (int, float)) else value
+        off = row.get("ps_off_days") or 0
+        excl_note = f" (excluding {off} PS non-working day(s))" if off else " (no PS non-working days to exclude in this period)"
+        return ChatResponse(
+            reply=f"{row['label']} for {emp_name}{scope_note}{excl_note}: {formatted}",
+            rows=[row],
+        )
+
     if intent in _EMP_FIELD_INTENTS or intent == "emp_attendance_summary":
         try:
             emp_id, emp_name = _extract_employee_ctx(message, fb, session)
@@ -1014,7 +1157,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             emp_scope_note = scope_note
             if team_label and team_label == f"{emp_name}'s team":
                 emp_scope_note = _period_note(month, date_range)
-            return ChatResponse(reply=f"{field_label} for {emp_name}{emp_scope_note}: {getter(detail)}", rows=[detail])
+            reply = f"{field_label} for {emp_name}{emp_scope_note}: {getter(detail)}"
+            if intent in _PS_CAVEAT_METRIC_BY_INTENT:
+                reply += _ps_off_caveat(emp_id, month, date_range)
+            return ChatResponse(reply=reply, rows=[detail])
         return ChatResponse(reply=format_employee_detail(detail, emp_name), rows=[detail] if detail else [])
 
     # "is X improving/declining" - an INDIVIDUAL employee's own trend, never
@@ -2006,7 +2152,19 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         and rule_intent in _INDIVIDUAL_EMP_INTENTS
     )
 
+    # PS-exclusion override (Part 3): these three intents (ps_exclude_metric/
+    # ps_ratio_info/ps_explain) are brand new and Gemini has no few-shot
+    # examples for them, so it tends to misclassify a PS-worded question as
+    # whatever generic metric it superficially resembles (e.g. reading "how
+    # many days..." as a deficient-hours count). The rule-based regexes for
+    # this family are narrow/explicit and rarely false-positive, so trust
+    # them over the LLM whenever they fire, same rationale as the pronoun
+    # override above.
+    _ps_override = rule_intent in ("ps_exclude_metric", "ps_ratio_info", "ps_explain")
+
     if _pronoun_override:
+        intent = rule_intent
+    elif _ps_override:
         intent = rule_intent
     elif llm_result is not None:
         llm_intent = llm_result["intent"]

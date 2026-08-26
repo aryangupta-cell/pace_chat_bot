@@ -39,6 +39,26 @@ function initChatWidget({ chatEl, inputEl, sendBtnEl }) {
         min-width: 24px;
       }
       .bubble table.pace-table tbody tr:nth-child(even) { background: #f2f5fa; }
+      .pace-typing-dots {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 0;
+      }
+      .pace-typing-dots span {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #9aa4b2;
+        opacity: 0.4;
+        animation: pace-typing-blink 1.2s infinite ease-in-out;
+      }
+      .pace-typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+      .pace-typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+      @keyframes pace-typing-blink {
+        0%, 80%, 100% { opacity: 0.4; transform: scale(0.85); }
+        40% { opacity: 1; transform: scale(1); }
+      }
     `;
     document.head.appendChild(style);
   }
@@ -75,11 +95,24 @@ function initChatWidget({ chatEl, inputEl, sendBtnEl }) {
     chatEl.scrollTop = chatEl.scrollHeight;
   }
 
+  function showTyping() {
+    const div = document.createElement('div');
+    div.className = 'msg bot pace-typing-msg';
+    const bubble = document.createElement('span');
+    bubble.className = 'bubble';
+    bubble.innerHTML = '<span class="pace-typing-dots"><span></span><span></span><span></span></span>';
+    div.appendChild(bubble);
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return div;
+  }
+
   async function send() {
     const text = inputEl.value.trim();
     if (!text) return;
     addMessage(text, 'user');
     inputEl.value = '';
+    const typingEl = showTyping();
     try {
       const resp = await fetch('/api/chat', {
         method: 'POST',
@@ -87,8 +120,10 @@ function initChatWidget({ chatEl, inputEl, sendBtnEl }) {
         body: JSON.stringify({ message: text, session_id: sessionId })
       });
       const data = await resp.json();
+      typingEl.remove();
       addMessage(data.reply, 'bot');
     } catch (err) {
+      typingEl.remove();
       addMessage('Error contacting server: ' + err, 'bot');
     }
   }
