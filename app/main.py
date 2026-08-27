@@ -2283,6 +2283,23 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     _months_list, month_mentioned = (([], False) if date_range_mentioned else entities.extract_months(message))
     month = _months_list if len(_months_list) > 1 else (_months_list[0] if _months_list else None)
 
+    # "total [visit/wfh/leave] taken by X" with NO month/date named at all
+    # must NOT silently narrow to the current month (extract_months() above
+    # defaults `month` to the current month with month_mentioned=False when
+    # nothing was said) - "total" with no period implies the whole available
+    # data window, so reroute to the same month-by-month breakdown used by
+    # the "[metric] month wise" phrasing (full_trend_emp / _detect_full_trend_metric,
+    # which already resolves "wfh"/"visit"/"leave" from the message text and
+    # queries the full history with no month filter at all). Only fires when
+    # the user actually wrote "total" AND named neither a month nor a
+    # date/week reference - an explicit period ("total visits in July")
+    # still scopes normally via the existing visit_emp/wfh_emp/leave_emp_check
+    # path below, untouched.
+    if (intent in ("visit_emp", "wfh_emp", "leave_emp_check")
+            and not month_mentioned and not date_range_mentioned
+            and re.search(r"\btotal\b", message, re.I)):
+        intent = "full_trend_emp"
+
     # --- Conversational context carry-forward (feature) ---
     # Remember exactly what THIS message explicitly named, before any
     # fallback fills gaps in - this is what gets recorded into the rolling
