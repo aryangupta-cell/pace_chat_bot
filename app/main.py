@@ -752,6 +752,30 @@ def _ps_off_caveat(emp_id, month, date_range):
             f"if you'd like the number recalculated without them.)")
 
 
+# Maps a metric_key resolved by _detect_full_trend_metric() back to the
+# single-value per-employee intent that answers the SAME metric for one
+# explicit period (as opposed to a month-by-month breakdown). Used by the
+# explicit-month override in handle_message below: only metrics with a
+# known single-value counterpart here are eligible to be forced out of
+# full_trend_emp when the user names an explicit month/date range. Metrics
+# with no defined single-value emp intent (ot_hours/ot_days/pace_score) are
+# deliberately left out - full_trend_emp remains their only path, so the
+# override leaves those alone rather than guessing a mapping that doesn't
+# exist.
+_FULL_TREND_METRIC_TO_SINGLE_INTENT = {
+    "wfh": "wfh_emp",
+    "visit": "visit_emp",
+    "leave": "leave_emp_check",
+    "deficient_hours": "emp_deficient_hours",
+    "late_comings": "emp_late_comings",
+    "early_leavings": "emp_early_leavings",
+    "engagement": "emp_engagement",
+    "effectiveness": "emp_effectiveness",
+    "discipline": "emp_discipline",
+    "working_pct": "emp_working_pct",
+}
+
+
 def _detect_full_trend_metric(message):
     # Pad with spaces so word-ish tokens like " ot " don't need extra regex
     # machinery to avoid matching inside another word.
@@ -2299,6 +2323,27 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             and not month_mentioned and not date_range_mentioned
             and re.search(r"\btotal\b", message, re.I)):
         intent = "full_trend_emp"
+
+    # Explicit-month/date-range override for full_trend_emp (extends the
+    # _PRONOUN_PATTERN "deterministic override wins regardless of which
+    # classifier proposed what" pattern to this case): a month-by-month
+    # BREAKDOWN only makes sense when no single period was named. If the
+    # message explicitly names a month or date range, "total visits by X in
+    # July" can only mean the single July value, never a table spanning
+    # every month - so full_trend_emp is never the right final intent here,
+    # no matter whether the rule-based matcher (via the "total" reroute
+    # right above) or Gemini (which has its own few-shot bias toward
+    # full_trend_emp for "breakdown"/"trend" phrasing, independent of the
+    # rule-based path and this file's month/date extraction) is the one
+    # that proposed it. Force it back to the matching single-value emp
+    # intent for that period, using the same metric-detection function
+    # full_trend_emp itself uses so the metric being asked about doesn't
+    # change - only whether it's rendered as one value or a full table.
+    if intent == "full_trend_emp" and (month_mentioned or date_range_mentioned):
+        _trend_metric_key = _detect_full_trend_metric(message)
+        _single_intent = _FULL_TREND_METRIC_TO_SINGLE_INTENT.get(_trend_metric_key)
+        if _single_intent is not None:
+            intent = _single_intent
 
     # --- Conversational context carry-forward (feature) ---
     # Remember exactly what THIS message explicitly named, before any
