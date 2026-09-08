@@ -12,9 +12,14 @@ SAFETY MODEL:
   - GPT-5 mini is given ONLY the condensed schema/rules reference doc
     (pace_chatbot_llm_reference.md) as context — never the raw ETL source,
     never table DDL beyond what that doc documents.
-  - The generated SQL is executed through the SAME existing read-only-ish DB
-    connection (db.run_query / db.get_conn, user aryangupta_ds) already used
-    by every other query in this app.
+  - The generated SQL is executed via db.run_query_rollback_only(), which
+    runs against the SAME DB (user aryangupta_ds) but in its own explicit
+    transaction that is ALWAYS rolled back after fetching results — never
+    committed. This is an additional safety layer scoped only to this
+    fallback path: even if a write statement slipped past _is_safe_select
+    below, it would be undone before it could persist. All other queries in
+    this app still go through db.run_query(), which commits normally and is
+    unchanged.
   - IMPORTANT, discovered during this round: aryangupta_ds is NOT actually a
     database-privilege-enforced read-only user — `has_database_privilege`
     checks and a live CREATE TABLE test (rolled back, nothing persisted)
@@ -229,7 +234,7 @@ def answer(question):
         exec_sql = exec_sql.rstrip().rstrip(";") + f" LIMIT {_MAX_ROWS}"
 
     try:
-        rows = db.run_query(exec_sql)
+        rows = db.run_query_rollback_only(exec_sql)
     except Exception as e:
         logger.warning("sql_fallback query execution failed: %s | sql=%r", e, exec_sql)
         log_fallback_query(question, sql, accepted=True, reject_reason=None, error=str(e))
