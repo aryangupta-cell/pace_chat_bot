@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import entities, queries, intents, team, session_store, spellcheck, llm_nlu
+from . import entities, queries, intents, team, session_store, spellcheck, llm_nlu, sql_fallback
 
 app = FastAPI(title="Pace Chatbot (Phase 1)")
 
@@ -2274,6 +2274,20 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         intent = rule_intent
 
     if intent is None:
+        # Neither the rule-based matcher nor the LLM classifier matched an
+        # existing intent — try the SQL-generation fallback path (Part 3)
+        # before giving up. This is a distinct, explicitly-authorized code
+        # path (see sql_fallback.py) that drafts read-only SQL with GPT-5
+        # mini and executes it through the same existing DB connection;
+        # any failure/rejection along the way falls through silently to the
+        # normal FALLBACK_MESSAGE, so this can never make things worse.
+        try:
+            fallback_result = sql_fallback.answer(raw_message)
+        except Exception:
+            logging.getLogger("pace_chatbot.main").exception("sql_fallback.answer() raised unexpectedly")
+            fallback_result = None
+        if fallback_result is not None:
+            return ChatResponse(reply=fallback_result["reply"], rows=fallback_result.get("rows", []))
         return ChatResponse(reply=intents.FALLBACK_MESSAGE)
 
     # Pass the RAW (pre-spellcheck) text as a fallback: dictionary spellcheck

@@ -93,6 +93,28 @@ If `origin` already exists, use `git remote set-url origin <url>` instead of
    | `PACE_DB_USER` | *(your DB user)* |
    | `PACE_DB_PASSWORD` | *(your DB password — rotate first, see section 0)* |
    | `GEMINI_API_KEY` | *(your Gemini API key)* |
+   | `OPENAI_API_KEY` | *(your OpenAI API key — scoped to the pace-chatbot project only)* |
+   | `LLM_PROVIDER` | `openai` (default) or `gemini` |
+
+### Switching LLM provider (no code change needed)
+
+The intent-classification layer (`app/llm_nlu.py`) supports two interchangeable
+providers, chosen purely by the `LLM_PROVIDER` env var:
+
+- `LLM_PROVIDER=openai` (default) — GPT-5 mini (`gpt-5-mini`), used for both
+  the intent-classification path and the SQL-generation fallback path
+  (`app/sql_fallback.py`).
+- `LLM_PROVIDER=gemini` — routes back to the original Gemini integration,
+  which is kept fully intact in the same file for exactly this purpose.
+
+To roll back instantly if GPT-5 mini has an issue: in the Render dashboard,
+Environment tab, set `LLM_PROVIDER` to `gemini` and save (Render redeploys/
+restarts automatically on env var change). No redeploy of code is required —
+this is a pure runtime switch. `GEMINI_API_KEY` must still be set in the
+environment for the Gemini path to work (it always has been). The SQL-
+generation fallback path currently only has an OpenAI implementation — under
+`LLM_PROVIDER=gemini` that path is inactive and unmatched questions fall
+through to the normal `FALLBACK_MESSAGE` instead, same as before this round.
 
    Do **not** set `PORT` yourself — Render injects it automatically at
    runtime, and the app now reads it via the `$PORT`/`${PORT:-8010}`
