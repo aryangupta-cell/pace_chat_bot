@@ -473,6 +473,26 @@ def compare_depts(dept_a, dept_b, month):
     return [dept_summary(dept_a, month), dept_summary(dept_b, month)]
 
 
+def rm_ranking(metric_key, month, ascending=False, limit=None):
+    """Best/worst reporting-manager team by a METRICS key, averaged per-RM
+    team - same shape/pattern as dept_ranking() above, just grouped by
+    reporting_manager_name instead of dept_name (new intent: 'which RM team
+    has the most/least score')."""
+    expr, _ = METRICS[metric_key]
+    order = "asc" if ascending else "desc"
+    lim = limit or LIMIT
+    sql = f"""
+        select reporting_manager_name, count(distinct employee_id) as n_employees, {expr} as metric_value
+        from {VIEW}
+        where (%(month)s is null or to_char(worked_day,'YYYY-MM') = any(%(month)s))
+          and reporting_manager_name is not null
+        group by reporting_manager_name
+        order by metric_value {order} nulls last
+        limit {lim}
+    """
+    return run_query(sql, {"month": _month_param(month)})
+
+
 # ---------------------------------------------------------------------------
 # Category G — employee-vs-employee comparison (reused by dept comparison's
 # sibling in Category E and by "compare my team to another manager's team")

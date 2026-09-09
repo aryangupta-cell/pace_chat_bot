@@ -121,6 +121,31 @@ _VAGUE_LIST_EXPAND_PATTERN = re.compile(
 # minimize collision with unrelated fresh queries.
 _VAGUE_RESCOPE_PATTERN = re.compile(r"^\s*what about\b", re.IGNORECASE)
 
+# Explicit scope-BROADENING override ("in the whole company", "overall",
+# "company-wide", "in general", "all departments", "everyone") - a follow-up
+# that carries no list-expand wording of its own but explicitly signals the
+# user wants to drop whatever department/team scope is currently sticky
+# (e.g. "AI Labs" locked in from an earlier ranking) and re-run the SAME
+# prior answer shape company-wide instead. Precedence: explicit scope
+# signal in the current message > sticky scope from recent turns > default.
+# Routed through the same rescope-only path as _VAGUE_RESCOPE_PATTERN
+# ("what about ...") - keeps the prior answer's shape (still a ranking,
+# still a count, etc.) rather than force-expanding to a list.
+_SCOPE_OVERRIDE_PATTERN = re.compile(
+    r"("
+    r"\bwhole company\b"
+    r"|\bentire company\b"
+    r"|\bfull company\b"
+    r"|\bcompany[- ]wide\b"
+    r"|\boverall\b"
+    r"|\bin general\b"
+    r"|\ball departments\b"
+    r"|\beveryone\b"
+    r"|\bacross the company\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _scope_note_generic(team_label, dept_name, month, date_range):
     note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")
@@ -271,6 +296,18 @@ def format_dept_rows(rows, metric_key):
         return f"{r['dept_name']} ({r['n_employees']} employees) — {label}: {_fmt(r['metric_value'])}"
     headers = ["#", "Department", "Employees", label]
     data = [[i, r["dept_name"], r["n_employees"], _fmt(r["metric_value"])] for i, r in enumerate(rows, 1)]
+    return _render_table(headers, data)
+
+
+def format_rm_rows(rows, metric_key):
+    if not rows:
+        return "No matching data found."
+    label = queries.METRICS[metric_key][1]
+    if len(rows) == 1:
+        r = rows[0]
+        return f"{r['reporting_manager_name']} ({r['n_employees']} employees) — {label}: {_fmt(r['metric_value'])}"
+    headers = ["#", "Reporting Manager", "Employees", label]
+    data = [[i, r["reporting_manager_name"], r["n_employees"], _fmt(r["metric_value"])] for i, r in enumerate(rows, 1)]
     return _render_table(headers, data)
 
 
@@ -1218,6 +1255,17 @@ _INDIVIDUAL_EMP_INTENTS = set(_EMP_FIELD_INTENTS) | {
 # manager/team routing (see the bypass logic there).
 _DUAL_PURPOSE_EMP_INTENTS = {"ot_subscore", "wfh_subscore", "ps_worked_ranking", "ps_ratio_info"}
 
+# Department-vs-department / RM-team-vs-RM-team ranking intents are
+# inherently company-wide comparisons across ALL departments (or ALL RM
+# teams) — queries.dept_ranking()/rm_ranking() don't even take a dept_name
+# scope. A sticky department from a prior turn (e.g. "AI Labs" locked in by
+# an earlier employee ranking) must never leak into these — asking "which
+# dept has the most score" or "which RM team has the most score" is itself
+# a signal of a different ranking DIMENSION, not a continuation of the
+# prior scoped employee ranking, so it's excluded from the dept-context
+# fallback below exactly like the individual-employee intents are.
+_DEPT_LEVEL_RANKING_INTENTS = {"dept_best", "dept_worst", "dept_avg", "rm_ranking_best", "rm_ranking_worst"}
+
 # Pronoun-referring-to-a-person detection ("is he improving?" as a follow-up
 # to "aryan gupta score"). Deliberately kept as a RULE-BASED, deterministic
 # check rather than relying on Gemini to infer this from conversation
@@ -1643,6 +1691,20 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         ascending = intent == "dept_worst"
         rows = queries.dept_ranking(metric_key, month, ascending=ascending, limit=limit)
         return ChatResponse(reply=f"Departments ranked by {queries.METRICS[metric_key][1]}:\n\n{format_dept_rows(rows, metric_key)}", rows=rows)
+
+    # RM (reporting-manager) team ranking - "which RM team has the most/
+    # least score" - same shape as dept_best/dept_worst just grouped by
+    # reporting_manager_name instead of dept_name (queries.rm_ranking()).
+    # A different ranking DIMENSION than the department/employee rankings
+    # above is itself a signal this is a fresh query, not a continuation of
+    # whatever department/employee scope was sticky from a prior turn - see
+    # the dept_name-reset carve-out for these two intents further up in
+    # this function (search "rm_ranking_best", "rm_ranking_worst").
+    if intent in ("rm_ranking_best", "rm_ranking_worst"):
+        metric_key = "pace_score"
+        ascending = intent == "rm_ranking_worst"
+        rows = queries.rm_ranking(metric_key, month, ascending=ascending, limit=limit)
+        return ChatResponse(reply=f"Reporting-manager teams ranked by {queries.METRICS[metric_key][1]}:\n\n{format_rm_rows(rows, metric_key)}", rows=rows)
 
     if intent == "dept_count":
         if not dept_name:
@@ -2396,12 +2458,19 @@ def _resolve_vague_list_followup(last_list, message, raw_message, session):
     months_list, month_mentioned = ([], False) if date_range_mentioned else entities.extract_months(message)
     new_month = (months_list if len(months_list) > 1 else (months_list[0] if months_list else None))
 
-    eff_dept = dept_name if dept_name else last_list["dept_name"]
+    # Explicit scope-broadening override ("in the whole company", "overall",
+    # "company-wide", ...) always wins over whatever scope is currently
+    # sticky, regardless of how that stickiness was set (named department,
+    # "my team", fuzzy/typo-corrected match, ...) - drops to company-wide
+    # (no department, no employee_ids/team_label) outright.
+    _scope_override = _SCOPE_OVERRIDE_PATTERN.search(message) is not None
+
+    eff_dept = None if _scope_override else (dept_name if dept_name else last_list["dept_name"])
     # A newly-named department switches the scope away from whatever team/
     # "my team" scoping produced the original answer - it's a different
     # scope entirely, not a refinement of it.
-    eff_employee_ids = last_list["employee_ids"] if dept_name is None else None
-    eff_team_label = last_list["team_label"] if dept_name is None else None
+    eff_employee_ids = None if _scope_override else (last_list["employee_ids"] if dept_name is None else None)
+    eff_team_label = None if _scope_override else (last_list["team_label"] if dept_name is None else None)
     if new_date_range is not None:
         eff_month, eff_date_range = None, new_date_range
     elif month_mentioned:
@@ -2426,7 +2495,7 @@ def _resolve_vague_list_followup(last_list, message, raw_message, session):
     # also ask for names/a list keeps the ORIGINAL answer's shape (e.g.
     # still a bare count) rather than being force-expanded into a list.
     use_same_shape = (
-        _VAGUE_RESCOPE_PATTERN.search(message) is not None
+        (_VAGUE_RESCOPE_PATTERN.search(message) is not None or _scope_override)
         and _VAGUE_LIST_EXPAND_PATTERN.search(message) is None
         and last_list.get("rerun_same") is not None
     )
@@ -2538,6 +2607,15 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     if last_list is not None and (
         _VAGUE_LIST_EXPAND_PATTERN.search(message) is not None
         or _VAGUE_RESCOPE_PATTERN.search(message) is not None
+        # Explicit scope-broadening override ("in the whole company",
+        # "overall", ...) with no other recognizable ranking/metric keyword
+        # of its own - can only be a re-scope of whatever was last asked,
+        # same as "what about ..." above. A message that ALSO carries its
+        # own real query keywords is left to the normal intent pipeline
+        # below (dept_best/rm_ranking/etc. are already company-wide by
+        # definition and don't need this path at all).
+        or (_SCOPE_OVERRIDE_PATTERN.search(message) is not None
+            and intents.match_intent(message) is None)
     ):
         return _resolve_vague_list_followup(last_list, message, raw_message, session)
     if last_list is None and _VAGUE_LIST_EXPAND_STRICT.search(message) is not None:
@@ -2857,7 +2935,8 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # must never inherit a department scope meant for an unrelated ranking
     # query - e.g. "pace score of Aryan Gupta" right after "who's in red in
     # Founders Office" should NOT scope Aryan's own lookup to that dept).
-    if dept_name is None and intent not in _INDIVIDUAL_EMP_INTENTS and intent not in _DUAL_PURPOSE_EMP_INTENTS:
+    if (dept_name is None and intent not in _INDIVIDUAL_EMP_INTENTS and intent not in _DUAL_PURPOSE_EMP_INTENTS
+            and intent not in _DEPT_LEVEL_RANKING_INTENTS):
         dept_name = session_store.get_recent_context(session, "dept_name")
 
     # Time-period fallback: only when the current message named neither a

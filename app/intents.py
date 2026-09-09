@@ -276,10 +276,38 @@ _DEPT_AVG_PATTERNS = [
 _DEPT_BEST_PATTERNS = [
     r"\bbest department\b", r"\btop department\b", r"\bwhich department is (the )?best\b",
     r"\bstrongest department\b", r"\bwhich department is doing (the )?best\b",
+    # dimension-explicit ranking phrasing ("which dept/department has the
+    # most/highest score") - checked ahead of the generic pace_score_best
+    # employee-ranking patterns (which would otherwise also match "most
+    # score") specifically so naming "dept"/"department" as the ranking
+    # DIMENSION routes to a real department-vs-department ranking instead
+    # of a sticky-scoped employee ranking. See _RM_RANKING_PATTERNS below
+    # for the reporting-manager-team sibling of this fix.
+    r"\bwhich (dept|department)\b.{0,20}\b(most|highest|best|top)\b.{0,15}\bscore\b",
+    r"\b(dept|department)\b.{0,20}\b(most|highest)\b.{0,15}\bscore\b.{0,10}\branking\b",
 ]
 _DEPT_WORST_PATTERNS = [
     r"\bworst department\b", r"\bbottom department\b", r"\bwhich department is (the )?worst\b",
     r"\bweakest department\b", r"\bwhich department is doing (the )?worst\b",
+    r"\bwhich (dept|department)\b.{0,20}\b(least|lowest|worst|bottom)\b.{0,15}\bscore\b",
+]
+
+# Ranking BY reporting-manager ("RM") team - "which RM team has the most/
+# least score" - grouped by reporting_manager_name rather than dept_name.
+# Same dimension-explicit-phrasing precedence rationale as _DEPT_BEST/
+# _DEPT_WORST_PATTERNS immediately above: must be checked before the
+# generic pace_score_best/worst employee-ranking patterns so naming "rm
+# team"/"reporting manager team" as the ranking dimension is never
+# shadowed by the bare "most score"/"least score" employee patterns.
+_RM_RANKING_BEST_PATTERNS = [
+    r"\b(rm|reporting manager)\s*(team)?\b.{0,20}\b(most|highest|best|top)\b.{0,15}\bscore\b",
+    r"\bwhich (rm|reporting manager)\s*(team)?\b.{0,25}\b(most|highest|best|top)\b",
+    r"\bbest (rm|reporting manager) team\b", r"\btop (rm|reporting manager) team\b",
+]
+_RM_RANKING_WORST_PATTERNS = [
+    r"\b(rm|reporting manager)\s*(team)?\b.{0,20}\b(least|lowest|worst|bottom)\b.{0,15}\bscore\b",
+    r"\bwhich (rm|reporting manager)\s*(team)?\b.{0,25}\b(least|lowest|worst|bottom)\b",
+    r"\bworst (rm|reporting manager) team\b", r"\bbottom (rm|reporting manager) team\b",
 ]
 _DEPT_COUNT_PATTERNS = [
     r"\bhow many (employees|people).*(department|in)\b", r"\bemployee count\b", r"\bheadcount\b",
@@ -884,6 +912,8 @@ _INTENTS = [
     ("dept_avg", _DEPT_AVG_PATTERNS),
     ("dept_best", _DEPT_BEST_PATTERNS),
     ("dept_worst", _DEPT_WORST_PATTERNS),
+    ("rm_ranking_best", _RM_RANKING_BEST_PATTERNS),
+    ("rm_ranking_worst", _RM_RANKING_WORST_PATTERNS),
     ("dept_count", _DEPT_COUNT_PATTERNS),
     ("dept_summary", _DEPT_SUMMARY_PATTERNS),
     ("emp_pace_score", _EMP_PACE_SCORE_PATTERNS),
