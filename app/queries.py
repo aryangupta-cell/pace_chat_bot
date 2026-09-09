@@ -1310,6 +1310,66 @@ def gainer_loser_ranking(dept_name=None, employee_ids=None, filter_sql=None, lim
     return gainers, losers, excluded_count, meta
 
 
+# ---------------------------------------------------------------------------
+# Day-vs-day / metric comparison ("was 2 Sept or 7 Sept better", "was Aryan
+# better on Sept 4 vs Sept 7?"). Single-day SNAPSHOT population aggregates,
+# queried directly against pace_1 (shift_type='Standard', worked_day=<date>)
+# rather than pace_chatbot_view's monthly CTEs - those are for period
+# averages, this is a single fixed day, so there is no Jensen's-inequality
+# capped-average correction needed here (that correction only applies when
+# averaging a MULTI-day period for one employee; a plain AVG() of a
+# population on one fixed day has no such issue). The default/explicit
+# metric mapping below is a CONFIRMED business rule, not a guess.
+# ---------------------------------------------------------------------------
+
+DAY_COMPARE_METRICS = {
+    "pace": ("new_pace_score_7_3_event_level", "PACE score"),
+    "engagement": ("engagement_pct", "Engagement"),
+    "discipline": ("discipline_pct", "Discipline"),
+    "working": ("working_pct", "Working %"),
+    "effectiveness": ("effectiveness_pct", "Effectiveness"),
+}
+DEFAULT_DAY_COMPARE_METRIC = "pace"
+
+
+def day_compare(date1, date2, dept_name=None, employee_id=None, metric_keys=None):
+    """Population-average comparison of one or more metrics between two
+    fixed days. `dept_name` holds the department FIXED (both days, same
+    department) - this is the "which day was better for department X" case,
+    distinct from a department-vs-department comparison on one day (that's
+    the existing dept_compare intent, untouched). `employee_id` scopes to
+    one employee instead of a population average. Returns a list of dicts,
+    one per requested metric: {metric_key, label, val1, val2, n1, n2}."""
+    keys = metric_keys or [DEFAULT_DAY_COMPARE_METRIC]
+    results = []
+    for key in keys:
+        col, label = DAY_COMPARE_METRICS.get(key, DAY_COMPARE_METRICS[DEFAULT_DAY_COMPARE_METRIC])
+        sql = f"""
+            select worked_day, avg({col}) as val, count(*) as n
+            from public.pace_1
+            where shift_type = 'Standard'
+              and worked_day = any(%(dates)s)
+              and {col} is not null
+              and (%(dept_name)s is null or dept_name = %(dept_name)s)
+              and (%(employee_id)s is null or employee_id = %(employee_id)s)
+            group by worked_day
+        """
+        params = {"dates": [date1, date2], "dept_name": dept_name, "employee_id": employee_id}
+        rows = run_query(sql, params)
+        by_day = {r["worked_day"]: r for r in rows}
+        r1 = by_day.get(date1)
+        r2 = by_day.get(date2)
+        results.append({
+            "metric_key": key,
+            "label": label,
+            "val1": r1["val"] if r1 else None,
+            "val2": r2["val"] if r2 else None,
+            "n1": r1["n"] if r1 else 0,
+            "n2": r2["n"] if r2 else 0,
+        })
+    return results
+
+
 # --- Sub-score (engagement/effectiveness/discipline) cross-compare & trend --
 
 SUBSCORES = {

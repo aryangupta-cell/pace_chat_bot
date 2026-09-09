@@ -512,6 +512,106 @@ def format_gainer_loser_ranking(gainers, losers, meta, scope_note, filter_label=
     return body
 
 
+_DAY_COMPARE_METRIC_KEYWORDS = [
+    ("engagement", r"\bengagement\b"),
+    ("discipline", r"\bdiscipline\b"),
+    ("working", r"\bworking\b"),
+    ("effectiveness", r"\beffectiveness\b"),
+    ("pace", r"\bpace\b"),
+]
+_DAY_COMPARE_TIE_THRESHOLD = 1  # points; within this, report "essentially the same"
+
+
+def _day_compare_metrics(message):
+    """Detects which metric(s) are being asked about. 'all scores'/'all
+    metrics' -> every metric, reported separately (never a combined/
+    composite score, per the confirmed business rule). Otherwise, every
+    explicitly-named metric keyword (order-preserving, de-duplicated) - or,
+    if none named, the single confirmed default (new_pace_score_7_3_event_level,
+    aliased 'pace')."""
+    text_l = (message or "").lower()
+    if re.search(r"\ball scores?\b|\ball metrics\b|\beverything\b", text_l):
+        return list(queries.DAY_COMPARE_METRICS.keys())
+    found = []
+    for key, pattern in _DAY_COMPARE_METRIC_KEYWORDS:
+        if re.search(pattern, text_l) and key not in found:
+            found.append(key)
+    return found or [queries.DEFAULT_DAY_COMPARE_METRIC]
+
+
+def format_day_compare(results, date1, date2, subject_label):
+    lines = [f"Comparing {subject_label} on {date1} vs {date2}:\n"]
+    for r in results:
+        v1, v2 = r["val1"], r["val2"]
+        if v1 is None or v2 is None:
+            lines.append(f"{r['label']}: no data available for one or both of those days.")
+            continue
+        f1, f2 = _fmt(v1), _fmt(v2)
+        diff = float(v1) - float(v2)
+        if abs(diff) <= _DAY_COMPARE_TIE_THRESHOLD:
+            verdict = "essentially the same, no meaningful difference"
+        elif diff > 0:
+            verdict = f"{date1} was better (+{_fmt(abs(diff))} pts)"
+        else:
+            verdict = f"{date2} was better (+{_fmt(abs(diff))} pts)"
+        lines.append(f"{r['label']}: {date1} = {f1}, {date2} = {f2} — {verdict}")
+    return "\n".join(lines)
+
+
+def _handle_day_compare(message, raw_message, session):
+    fb = raw_message if raw_message and raw_message != message else None
+    d1, d2, found = entities.extract_two_dates(message)
+    if not found:
+        # No explicit dates in THIS message (e.g. a same-session follow-up
+        # like "which day was more productive" with no restated dates) -
+        # fall back to the last day-vs-day date pair explicitly compared
+        # this session, if any.
+        ctx_dates = session_store.get_recent_context(session, "day_compare_dates")
+        if ctx_dates:
+            d1, d2 = ctx_dates
+        else:
+            return ChatResponse(
+                reply="Which two dates would you like me to compare — e.g. \"2 Sept vs 7 Sept\"?"
+            )
+    if d2 < d1:
+        d1, d2 = d2, d1
+
+    session_store.push_context(session, day_compare_dates=(d1, d2))
+
+    metric_keys = _day_compare_metrics(message)
+
+    # Employee-specific vs department-fixed vs full-company: try employee
+    # first (a named person takes precedence over a department mention in
+    # the same message being coincidental), then department, else full
+    # company. Both use word-boundary-safe extraction with fallback_text,
+    # same as every other entity lookup in this file.
+    employee_id = None
+    subject_label = "the full company"
+    try:
+        emp_id, emp_name = entities.extract_employee(message, fallback_text=fb)
+    except entities.Ambiguous as e:
+        return ChatResponse(
+            reply=f"I found multiple matching employees: {', '.join(e.candidates)}. Which one did you mean?",
+            needs_clarification=True, clarification_options=e.candidates,
+        )
+    dept_name, dept_candidates = entities.extract_department(message, fallback_text=fb)
+    if dept_candidates:
+        return ChatResponse(
+            reply=f"I found multiple matching departments: {', '.join(dept_candidates)}. Which one did you mean?",
+            needs_clarification=True, clarification_options=dept_candidates,
+        )
+
+    if emp_id:
+        employee_id = emp_id
+        subject_label = emp_name
+        dept_name = None  # employee-specific takes precedence; don't also scope by dept
+    elif dept_name:
+        subject_label = dept_name
+
+    results = queries.day_compare(d1, d2, dept_name=dept_name, employee_id=employee_id, metric_keys=metric_keys)
+    return ChatResponse(reply=format_day_compare(results, d1, d2, subject_label), rows=results)
+
+
 def format_score_delta_ranking(rows, meta, header_prefix):
     """Table of employees ranked by CURRENT-MONTH-AVG vs PRIOR-MONTH-AVG
     PACE score change (month-over-month) — same MIN_DAYS_FOR_DELTA
@@ -2336,6 +2436,16 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             message = message + " " + " ".join(hint_bits)
     else:
         intent = rule_intent
+
+    if intent == "day_compare":
+        # Day-vs-day / metric comparison has its own dedicated dept/employee
+        # resolution (see _handle_day_compare) - deliberately short-circuits
+        # here, BEFORE the generic dept-extraction/self-referential/
+        # named-manager machinery below, since none of that machinery knows
+        # about two-date comparisons and this intent's population is always
+        # "the full department/company on a fixed day," never a "my team"
+        # scope in this round.
+        return _handle_day_compare(message, raw_message, session)
 
     if intent is None:
         # Neither the rule-based matcher nor the LLM classifier matched an

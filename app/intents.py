@@ -283,6 +283,32 @@ _DEPT_COMPARE_PATTERNS = [
     r"\bwhich department is better\b.*\bvs\.?\b",
 ]
 
+# --- Day-vs-day / metric comparison ("2 Sept vs 7 Sept, which was better") --
+# Anchored on two actual DATE-shaped tokens (a digit next to a month name,
+# in either order - bare "4 Sept"/"Sept 4", no leading "on" required), never
+# just the word "compare" alone - this is deliberate so it can never start
+# incorrectly intercepting genuine department/employee comparisons (which
+# don't carry date tokens). Checked BEFORE dept_compare/team_compare/
+# employee_compare in _INTENTS below, per the confirmed routing bug: without
+# this, "compared to 2 Sept and 7 Sept which was better" fell through to
+# dept_compare and asked for two department names.
+_MONTHS_ALT = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+_DATE_TOKEN = (
+    r"(?:\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTHS_ALT + r"|" + _MONTHS_ALT + r"\s+\d{1,2}(?:st|nd|rd|th)?)"
+)
+_DAY_COMPARE_PATTERNS = [
+    _DATE_TOKEN + r"\b.{0,25}\b(?:vs\.?|versus|and|to|or)\b.{0,3}" + _DATE_TOKEN + r"\b",
+    # "which day was better/more productive" with no restated dates - relies
+    # on the day-vs-day dates from the prior turn (sticky session context),
+    # e.g. a same-session follow-up to the pattern above.
+    r"\bwhich day (was|is|were)\b.{0,30}\b(better|worse|more productive|higher|higher score|worse off)\b",
+    r"\bwhich (was|is|were) better\b", r"\bwhich (was|is|were) worse\b",
+    r"\bwhich (was|is|were) more productive\b",
+]
+
 # --- Category F: attendance specifics ----------------------------------------
 _CHRONIC_LATE_PATTERNS = [
     r"\bchronically late\b", r"\bhabitually late\b",
@@ -789,6 +815,7 @@ _INTENTS = [
     ("ps_worked_emp", _PS_WORKED_EMP_PATTERNS),
     ("ps_worked_ranking", _PS_WORKED_RANKING_PATTERNS),
     ("emp_overview", _EMP_OVERVIEW_PATTERNS),
+    ("day_compare", _DAY_COMPARE_PATTERNS),
     ("dept_compare", _DEPT_COMPARE_PATTERNS),
     ("team_compare", _TEAM_COMPARE_PATTERNS),
     ("employee_compare", _COMPARE_EMPLOYEES_PATTERNS),

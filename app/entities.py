@@ -496,6 +496,47 @@ def extract_date_range(text):
     return None, None, False
 
 
+def extract_two_dates(text):
+    """Finds TWO distinct calendar dates mentioned anywhere in `text`, for the
+    day-vs-day comparison feature ("compared to 2 Sept and 7 Sept which was
+    better", "was Aryan better on Sept 4 vs Sept 7?"). Unlike
+    extract_date_range()'s single-date "on <date>" branch, this deliberately
+    accepts BARE "N Month"/"Month N" phrasing with no leading "on" - that
+    bare form is exactly what both of the original motivating queries use,
+    and requiring "on" there would silently fail them. Scans for every
+    non-overlapping ISO or _MONTH_DAY_RE match in the text (in order of
+    appearance), parses each into a date, and returns the first two DISTINCT
+    dates found as (date1, date2, True) - or (None, None, False) if fewer
+    than two distinct dates are present. Does not touch/replace
+    extract_date_range(); day_compare's caller in main.py uses this
+    dedicated helper instead so the existing single-date/range callers stay
+    untouched."""
+    text_l = text.lower()
+    # Unlike _MONTH_DAY_RE (whose m1/m2 groups accept ANY word - safe there
+    # because that pattern is only ever matched right after a literal "on "
+    # anchor), free scanning across a whole sentence needs the month token
+    # itself restricted to a REAL month name/abbreviation - otherwise a
+    # phrase like "compared to 2 Sept and 7 Sept" false-matches "to 2" and
+    # "and 7" (treating "to"/"and" as bogus month names) before the real
+    # "2 Sept"/"7 Sept" tokens are ever reached.
+    _months_alt = "|".join(sorted(MONTH_NAMES.keys(), key=len, reverse=True))
+    _strict_month_day_re = (
+        r"(?:(?P<d1>\d{1,2})(?:st|nd|rd|th)?\s+(?P<m1>" + _months_alt + r")\b|"
+        r"\b(?P<m2>" + _months_alt + r")\s+(?P<d2>\d{1,2})(?:st|nd|rd|th)?)"
+    )
+    token_re = re.compile(r"(?:20\d{2}-\d{1,2}-\d{1,2})|(?:" + _strict_month_day_re + r")", re.I)
+    found = []
+    for m in token_re.finditer(text_l):
+        d = _parse_single_date_token(m.group(0))
+        if d is not None and d not in found:
+            found.append(d)
+        if len(found) >= 2:
+            break
+    if len(found) >= 2:
+        return found[0], found[1], True
+    return None, None, False
+
+
 def last_4_weeks_periods(today=None):
     """Returns (cur_start, cur_end, prior_start, prior_end) for the
     gainer/loser ranking feature: current = last 4 complete calendar weeks

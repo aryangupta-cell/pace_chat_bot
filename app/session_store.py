@@ -56,6 +56,13 @@ def get_session(session_id):
             "employee_name": None,
             "month": None,
             "date_range": None,
+            # Last day-vs-day comparison date pair (ISO dates), for the
+            # day_compare feature's own no-restated-dates follow-up case
+            # ("which day was more productive" right after "2 Sept vs 7
+            # Sept"). Kept as its own field, separate from date_range/month,
+            # since a day-vs-day pair is a fundamentally different shape
+            # (two fixed snapshot days, not a period).
+            "day_compare_dates": None,
         },
         # The single most-recent LIST-PRODUCING answer (a day-flag count/
         # list, a status count/list, or a ranking) - kept SEPARATE from
@@ -74,7 +81,8 @@ def get_session(session_id):
     })
 
 
-def push_context(session, dept_name=None, employee_id=None, employee_name=None, month=None, date_range=None):
+def push_context(session, dept_name=None, employee_id=None, employee_name=None, month=None,
+                  date_range=None, day_compare_dates=None):
     """Record what was EXPLICITLY named in this turn (pass None for anything
     not mentioned this turn - do not pass through an already-inherited
     value, so this only reflects real mentions, not propagated guesses).
@@ -94,6 +102,8 @@ def push_context(session, dept_name=None, employee_id=None, employee_name=None, 
         ctx["month"] = month
     if date_range is not None:
         ctx["date_range"] = date_range
+    if day_compare_dates is not None:
+        ctx["day_compare_dates"] = day_compare_dates
 
 
 def set_last_list(session, kind, rerun_list=None, rerun_same=None, answer_kind="count",
