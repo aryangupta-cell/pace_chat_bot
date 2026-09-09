@@ -541,6 +541,18 @@ _SCORE_IMPROVEMENT_ALLTIME_PATTERNS = [
     r"\bwho had the biggest (score )?improvement\b",
     r"\bbiggest score improvement\b", r"\blargest score improvement\b",
 ]
+_GAINER_LOSER_PATTERNS = [
+    r"\btop\s*\d*\s*gainer(s)?\b.*\bloser(s)?\b", r"\bgainer(s)?\b.*\bloser(s)?\b",
+    r"\btop\s*\d*\s*loser(s)?\b.*\bgainer(s)?\b",
+    r"\bwho (improved|declined)( the most)?\b.*\blast\s*4\s*weeks\b",
+    r"\bwho (improved|declined)( the most)?\b.*\blast\s+four\s+weeks\b",
+    r"\b(gainers?|losers?)\b.*\blast\s*4\s*weeks\b",
+    r"\bbiggest (gainers?|losers?)\b",
+    r"\btop\s*\d*\s*(gainers?|losers?)\b",
+    r"\bwho (gained|lost)( the most)?\b.*\b(score|pace)\b",
+    r"\bwho improved and (who )?declined\b",
+    r"\bscore change(s)?\b.*\blast\s*4\s*weeks\b",
+]
 _EMP_OVERVIEW_PATTERNS = [
     r"\bhow is\b(?!.*\bmy team\b)(?!.*\bdepartment\b).*\bperforming\b",
     r"\bhow'?s\b(?!.*\bmy team\b).*\bperforming\b",
@@ -766,6 +778,7 @@ _INTENTS = [
     # Category K (new round 2) — checked first: these combine keywords
     # ("engagement"+"OT", "black"+"improving", etc.) that would otherwise be
     # shadowed by the broader single-keyword patterns further down.
+    ("gainer_loser_ranking", _GAINER_LOSER_PATTERNS),
     ("score_drop_ranking", _SCORE_DROP_PATTERNS),
     ("score_improvement_alltime", _SCORE_IMPROVEMENT_ALLTIME_PATTERNS),
     ("subscore_compare_emp", _SUBSCORE_COMPARE_PATTERNS),
@@ -945,6 +958,7 @@ _CANONICAL_PHRASES = {
     "emp_attendance_summary": ["attendance summary of employee", "how was attendance"],
     "ot_ranking": ["most overtime hours", "who works the most overtime", "overtime ranking"],
     "full_trend_emp": ["pace score trend", "score trend over time", "month on month score"],
+    "gainer_loser_ranking": ["top 10 gainer and loser last 4 weeks", "who improved and declined the most in the last 4 weeks", "top gainers and losers"],
 }
 
 # Intent pairs whose canonical phrases are close enough (share a metric word,

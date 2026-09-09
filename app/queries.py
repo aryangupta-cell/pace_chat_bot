@@ -1,7 +1,7 @@
 import datetime
 
 from .db import run_query
-from .entities import VIEW
+from .entities import VIEW, last_4_weeks_periods
 
 LIMIT = 10
 
@@ -1191,6 +1191,123 @@ def ranking_weekly_pace_trend(employee_ids, num_weeks=4):
                 r["delta"] = r["avg_score"] - emp_rows[i - 1]["avg_score"]
         result.extend(emp_rows[-num_weeks:])
     return result
+
+
+# ---------------------------------------------------------------------------
+# Top-10 gainer/loser ranking: last 4 COMPLETE calendar weeks (Mon-Sun) vs
+# the 4 complete calendar weeks immediately before that. Uses the SAME
+# capped-average-first 3-step methodology as employee_full_monthly_trend/
+# ranking_weekly_pace_trend (avg the 4 capped sub-metrics across each
+# period's Standard days FIRST, then apply the score formula ONCE per
+# period) - NOT overall_new_pace_score_7_3/last_60_days_new_pace_score_7_3
+# (different fixed rolling windows) and NOT an average of precomputed
+# daily scores (the Jensen's-inequality bug fixed elsewhere in this
+# project - see employee_full_monthly_trend's history).
+# ---------------------------------------------------------------------------
+
+def _gainer_loser_cte(dept_name, employee_ids, filter_sql):
+    """Shared CTE chain: per-employee current/prior-period capped-average
+    scores, restricted to shift_type='Standard', filtered identically in
+    BOTH periods by dept/employee_ids/filter_sql (the filter restricts WHICH
+    employees are included - it never changes the window itself)."""
+    extra_filter = f"and {filter_sql}" if filter_sql else ""
+    return f"""
+        per_period as (
+            select employee_id, emp_name, dept_name,
+                   case when worked_day between %(cur_start)s and %(cur_end)s then 'cur'
+                        when worked_day between %(prior_start)s and %(prior_end)s then 'prior'
+                        else null end as period,
+                   capped_engagement, capped_effectiveness, capped_discipline, capped_working_hours
+            from public.pace_1
+            where shift_type = 'Standard'
+              and worked_day between %(prior_start)s and %(cur_end)s
+              and capped_engagement is not null and capped_effectiveness is not null
+              and capped_discipline is not null and capped_working_hours is not null
+              and (%(dept_name)s is null or dept_name = %(dept_name)s)
+              and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+              {extra_filter}
+        ),
+        agg as (
+            select employee_id, emp_name, dept_name, period,
+                   avg(capped_engagement) as avg_e, avg(capped_effectiveness) as avg_ef,
+                   avg(capped_discipline) as avg_d, avg(capped_working_hours) as avg_w,
+                   count(*) as n
+            from per_period
+            where period is not null
+            group by employee_id, emp_name, dept_name, period
+        ),
+        scored as (
+            select employee_id, emp_name, dept_name, period,
+                   least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10)) as score,
+                   n
+            from agg
+        ),
+        pivoted as (
+            select employee_id, emp_name, dept_name,
+                   max(case when period = 'cur' then score end) as cur_score,
+                   max(case when period = 'prior' then score end) as prior_score,
+                   max(case when period = 'cur' then n end) as cur_n,
+                   max(case when period = 'prior' then n end) as prior_n
+            from scored
+            group by employee_id, emp_name, dept_name
+        )
+    """
+
+
+def gainer_loser_ranking(dept_name=None, employee_ids=None, filter_sql=None, limit=None):
+    """Top gainers and top losers ranked by score CHANGE (current 4-complete-
+    calendar-weeks period minus the prior 4-complete-calendar-weeks period).
+    Employees need >=2 Standard days of data in BOTH periods to qualify.
+    Returns (gainers, losers, excluded_count, meta)."""
+    cur_start, cur_end, prior_start, prior_end = last_4_weeks_periods()
+    lim = limit or LIMIT
+    params = {
+        "cur_start": cur_start, "cur_end": cur_end,
+        "prior_start": prior_start, "prior_end": prior_end,
+        "dept_name": dept_name, "employee_ids": employee_ids,
+    }
+    cte = _gainer_loser_cte(dept_name, employee_ids, filter_sql)
+
+    # Population count (for the exclusion note): everyone who shows up in
+    # either period under the same dept/employee_ids/filter scope, vs. those
+    # who actually qualify (>=2 Standard days in BOTH periods).
+    pop_sql = f"""
+        with {cte}
+        select
+            count(*) as total_seen,
+            count(*) filter (where cur_n >= 2 and prior_n >= 2) as qualified
+        from pivoted
+    """
+    pop_row = run_query(pop_sql, params)
+    total_seen = pop_row[0]["total_seen"] if pop_row else 0
+    qualified_count = pop_row[0]["qualified"] if pop_row else 0
+    excluded_count = total_seen - qualified_count
+
+    def _ranked(ascending):
+        order = "asc" if ascending else "desc"
+        sql = f"""
+            with {cte},
+            qualified as (
+                select employee_id, emp_name, dept_name, cur_score, prior_score,
+                       (cur_score - prior_score) as score_change
+                from pivoted
+                where cur_n >= 2 and prior_n >= 2
+            )
+            select employee_id, emp_name, dept_name, cur_score, prior_score, score_change
+            from qualified
+            order by score_change {order}
+            limit {lim}
+        """
+        return run_query(sql, params)
+
+    losers = _ranked(ascending=True)
+    gainers = _ranked(ascending=False)
+    meta = {
+        "cur_start": cur_start, "cur_end": cur_end,
+        "prior_start": prior_start, "prior_end": prior_end,
+        "excluded_count": excluded_count, "qualified_count": qualified_count,
+    }
+    return gainers, losers, excluded_count, meta
 
 
 # --- Sub-score (engagement/effectiveness/discipline) cross-compare & trend --

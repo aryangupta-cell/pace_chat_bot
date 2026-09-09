@@ -461,6 +461,57 @@ def format_count_rows(rows, count_field, label, name_field=None):
     return _render_table(headers, data)
 
 
+_GAINER_LOSER_FILTERS = [
+    (r"\bwfh\b|\bwork(ing)? from home\b", "wfh_status = 'Work From Home'", "on WFH"),
+    (r"\bvisit(s|ed|ing)?\b|\bclient visit", "visit_flag = 'Yes'", "with client visits"),
+    (r"\bps[\s-]?worked\b|\bps status\b|\bps[\s-]?working\b", "ps_worked_flag_day = 1", "PS-worked"),
+]
+
+
+def _gainer_loser_filter(message):
+    """Detect an optional population filter (visit-only / PS-status /
+    work-mode subset) from the message text. Returns (filter_sql,
+    filter_label) or (None, None). This restricts WHICH employees are
+    included in gainer_loser_ranking - never the time window itself."""
+    text_l = (message or "").lower()
+    for pattern, filter_sql, label in _GAINER_LOSER_FILTERS:
+        if re.search(pattern, text_l):
+            return filter_sql, label
+    return None, None
+
+
+def format_gainer_loser_ranking(gainers, losers, meta, scope_note, filter_label=None):
+    filter_note = f", {filter_label} only" if filter_label else ""
+    window_note = (
+        f"Current period: {meta['cur_start']} to {meta['cur_end']} vs "
+        f"prior period: {meta['prior_start']} to {meta['prior_end']}"
+    )
+
+    def _table(rows):
+        if not rows:
+            return "None."
+        headers = ["#", "Employee", "Department", "Current score", "Prior score", "Change (pts)"]
+        data = []
+        for i, r in enumerate(rows, 1):
+            change = r["score_change"]
+            sign = "+" if change is not None and change > 0 else ""
+            data.append([
+                i, r["emp_name"], r["dept_name"],
+                _fmt(r["cur_score"]), _fmt(r["prior_score"]), f"{sign}{_fmt(change)}",
+            ])
+        return _render_table(headers, data)
+
+    body = (
+        f"Top gainers and losers{scope_note}{filter_note} (last 4 complete weeks vs prior 4 complete weeks):\n"
+        f"{window_note}\n\n"
+        f"Top Gainers:\n{_table(gainers)}\n\n"
+        f"Top Losers:\n{_table(losers)}\n\n"
+        f"({meta['excluded_count']} employee(s) excluded for insufficient data — need at least 2 Standard "
+        f"days of data in both periods.)"
+    )
+    return body
+
+
 def format_score_delta_ranking(rows, meta, header_prefix):
     """Table of employees ranked by CURRENT-MONTH-AVG vs PRIOR-MONTH-AVG
     PACE score change (month-over-month) — same MIN_DAYS_FOR_DELTA
@@ -1734,6 +1785,14 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                                          dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range)
         return ChatResponse(reply=reply, rows=rows)
 
+    if intent == "gainer_loser_ranking":
+        filter_sql, filter_label = _gainer_loser_filter(message)
+        gainers, losers, excluded_count, meta = queries.gainer_loser_ranking(
+            dept_name, employee_ids=employee_ids, filter_sql=filter_sql, limit=limit
+        )
+        reply = format_gainer_loser_ranking(gainers, losers, meta, scope_note, filter_label)
+        return ChatResponse(reply=reply, rows=gainers + losers)
+
     if intent == "emp_overview":
         try:
             emp_id, emp_name = _extract_employee_ctx(message, fb, session)
@@ -2402,7 +2461,8 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # as an explicit "my team" question - rather than silently running
     # unscoped across the whole company.
     _implicit_self_ref = intent in ("score_drop_ranking", "score_improvement_alltime") and not dept_name
-    if entities.is_self_referential(message) or _implicit_self_ref:
+    _is_explicit_self_ref = entities.is_self_referential(message)
+    if _is_explicit_self_ref or _implicit_self_ref:
         if session["email"] is None:
             session["awaiting_identity"] = True
             session["pending_message"] = message
@@ -2414,6 +2474,20 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
 
         employee_ids, is_universal = team.resolve_team(session["email"])
         if is_universal:
+            # Admin (universal-access) users asking "my team"/"my
+            # <something>" specifically (the literal self-referential
+            # phrasing, "my"/"our") get the full company DIRECTLY, no
+            # confirmation prompt - this was a confirmed business-rule
+            # change. The named-manager path ("X's team" where X happens to
+            # be a universal-access admin, handled further below) and the
+            # _implicit_self_ref case (no "my"/"our" wording at all, just no
+            # department named) deliberately keep the confirmation prompt -
+            # the business rule is scoped specifically to the asker's own
+            # literal "my team", not other self-referential-adjacent paths.
+            if _is_explicit_self_ref:
+                return answer_intent(intent, None, month, None, None, employee_ids=employee_ids,
+                                      team_label="the full company", message=message, session=session,
+                                      date_range=date_range, raw_message=raw_message)
             session["awaiting_admin_confirmation"] = True
             session["pending_message"] = message
             session["pending_message_raw"] = raw_message

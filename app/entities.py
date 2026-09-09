@@ -441,6 +441,14 @@ def extract_date_range(text):
     if rolling:
         return rolling
 
+    if re.search(r"\blast\s*4\s*weeks\b", text_l) or re.search(r"\blast\s+four\s+weeks\b", text_l):
+        # 4 COMPLETE calendar weeks (Mon-Sun), ending on the most recent
+        # fully-completed Sunday.
+        this_week_start = today - datetime.timedelta(days=today.weekday())
+        last_4_weeks_start = this_week_start - datetime.timedelta(days=28)
+        last_4_weeks_end = this_week_start - datetime.timedelta(days=1)
+        return last_4_weeks_start, last_4_weeks_end, True
+
     if re.search(r"\blast week\b", text_l):
         # ISO week: Monday-Sunday. "Last week" = the previous full ISO week.
         this_week_start = today - datetime.timedelta(days=today.weekday())
@@ -486,6 +494,21 @@ def extract_date_range(text):
             return d, d, True
 
     return None, None, False
+
+
+def last_4_weeks_periods(today=None):
+    """Returns (cur_start, cur_end, prior_start, prior_end) for the
+    gainer/loser ranking feature: current = last 4 complete calendar weeks
+    (Mon-Sun) ending on the most recent fully-completed Sunday; prior = the
+    4 complete calendar weeks immediately before that."""
+    if today is None:
+        today = datetime.date.today()
+    this_week_start = today - datetime.timedelta(days=today.weekday())
+    cur_start = this_week_start - datetime.timedelta(days=28)
+    cur_end = this_week_start - datetime.timedelta(days=1)
+    prior_start = this_week_start - datetime.timedelta(days=56)
+    prior_end = this_week_start - datetime.timedelta(days=29)
+    return cur_start, cur_end, prior_start, prior_end
 
 
 def is_self_referential(text):

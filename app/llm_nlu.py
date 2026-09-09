@@ -188,6 +188,9 @@ _FEW_SHOT_EXAMPLES = [
     ("late comings each month for Aryan Gupta", {"intent": "full_trend_emp", "entities": {"employee": "Aryan Gupta", "metric": "late_comings"}, "confidence": 0.85}),
     ("engagement % trend by month for Megha Sharma", {"intent": "full_trend_emp", "entities": {"employee": "Megha Sharma", "metric": "engagement"}, "confidence": 0.88}),
     ("hey what's the weather like", {"intent": "none", "entities": {}, "confidence": 0.95}),
+    ("top 10 gainer and loser last 4 weeks", {"intent": "gainer_loser_ranking", "entities": {}, "confidence": 0.9}),
+    ("who improved or declined the most in the last 4 weeks", {"intent": "gainer_loser_ranking", "entities": {}, "confidence": 0.9}),
+    ("top 10 gainers on wfh only in last 4 weeks", {"intent": "gainer_loser_ranking", "entities": {"metric": "wfh"}, "confidence": 0.85}),
 ]
 
 # ---------------------------------------------------------------------------
