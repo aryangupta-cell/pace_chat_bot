@@ -454,7 +454,36 @@ def dept_summary(dept_name, month):
 
 
 def dept_ranking(metric_key, month, ascending=False, limit=None):
-    """Best/worst department by a METRICS key, averaged per-department."""
+    """Best/worst department by a METRICS key, averaged per-department.
+
+    BUG FIX (see SESSION_HANDOFF.md): for metric_key="pace_score" with a
+    SPECIFIC month filter given, this previously averaged the view's
+    pre-computed overall_pace_score (a rolling 60-*worked*-day window score)
+    per department - the same Jensen's-inequality bug already fixed
+    elsewhere (employee_full_monthly_trend, metric_ranking, status_
+    transitions): the real ETL formula multiplies several averaged terms
+    together, so averaging the pre-computed daily/rolling score is NOT the
+    same as averaging the 4 capped_* ingredients first and applying the
+    score formula once. Fixed to the same capped-average-first recompute,
+    grouped by department, using the identical single-named-month branch
+    condition metric_ranking() uses (a rolling-window "current standing"
+    answer is still correct with no month filter or a multi-month list)."""
+    month_list = _month_param(month)
+    if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
+        order = "asc" if ascending else "desc"
+        lim = limit or LIMIT
+        sql = """
+            select dept_name, count(distinct employee_id) as n_employees,
+                   least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value
+            from public.pace_1
+            where to_char(worked_day,'YYYY-MM') = %(month)s and shift_type = 'Standard'
+              and capped_engagement is not null and capped_effectiveness is not null
+              and capped_discipline is not null and capped_working_hours is not null
+            group by dept_name
+            order by metric_value {order} nulls last
+            limit {lim}
+        """.format(order=order, lim=lim)
+        return run_query(sql, {"month": month_list[0]})
     expr, _ = METRICS[metric_key]
     order = "asc" if ascending else "desc"
     lim = limit or LIMIT
@@ -466,7 +495,7 @@ def dept_ranking(metric_key, month, ascending=False, limit=None):
         order by metric_value {order} nulls last
         limit {lim}
     """
-    return run_query(sql, {"month": _month_param(month)})
+    return run_query(sql, {"month": month_list})
 
 
 def compare_depts(dept_a, dept_b, month):
@@ -477,7 +506,29 @@ def rm_ranking(metric_key, month, ascending=False, limit=None):
     """Best/worst reporting-manager team by a METRICS key, averaged per-RM
     team - same shape/pattern as dept_ranking() above, just grouped by
     reporting_manager_name instead of dept_name (new intent: 'which RM team
-    has the most/least score')."""
+    has the most/least score').
+
+    BUG FIX: this was modeled on dept_ranking() and inherited its same
+    Jensen's-inequality bug for metric_key="pace_score" (see dept_ranking's
+    docstring) - fixed with the identical capped-average-first branch,
+    grouped by reporting_manager_name instead of dept_name."""
+    month_list = _month_param(month)
+    if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
+        order = "asc" if ascending else "desc"
+        lim = limit or LIMIT
+        sql = """
+            select reporting_manager_name, count(distinct employee_id) as n_employees,
+                   least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value
+            from public.pace_1
+            where to_char(worked_day,'YYYY-MM') = %(month)s and shift_type = 'Standard'
+              and capped_engagement is not null and capped_effectiveness is not null
+              and capped_discipline is not null and capped_working_hours is not null
+              and reporting_manager_name is not null
+            group by reporting_manager_name
+            order by metric_value {order} nulls last
+            limit {lim}
+        """.format(order=order, lim=lim)
+        return run_query(sql, {"month": month_list[0]})
     expr, _ = METRICS[metric_key]
     order = "asc" if ascending else "desc"
     lim = limit or LIMIT
@@ -490,7 +541,7 @@ def rm_ranking(metric_key, month, ascending=False, limit=None):
         order by metric_value {order} nulls last
         limit {lim}
     """
-    return run_query(sql, {"month": _month_param(month)})
+    return run_query(sql, {"month": month_list})
 
 
 # ---------------------------------------------------------------------------
