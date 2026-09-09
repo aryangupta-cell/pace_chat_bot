@@ -1207,10 +1207,15 @@ def ranking_weekly_pace_trend(employee_ids, num_weeks=4):
 
 def _gainer_loser_cte(dept_name, employee_ids, filter_sql):
     """Shared CTE chain: per-employee current/prior-period capped-average
-    scores, restricted to shift_type='Standard', filtered identically in
-    BOTH periods by dept/employee_ids/filter_sql (the filter restricts WHICH
-    employees are included - it never changes the window itself)."""
-    extra_filter = f"and {filter_sql}" if filter_sql else ""
+    scores, filtered identically in BOTH periods by dept/employee_ids and by
+    `filter_sql` - the full population filter (shift_type + visit_flag +
+    ps_worked_flag_day, per the default-population rule), which restricts
+    WHICH rows are included - it never changes the window itself. `filter_sql`
+    is required (callers must always pass a population filter; main.py's
+    _resolve_population_filter always supplies one, applying the confirmed
+    default of shift_type='Standard' AND visit_flag='No' AND
+    ps_worked_flag_day=1 when the user didn't ask for anything else)."""
+    pop_filter = f"and {filter_sql}" if filter_sql else "and shift_type = 'Standard'"
     return f"""
         per_period as (
             select employee_id, emp_name, dept_name,
@@ -1219,13 +1224,12 @@ def _gainer_loser_cte(dept_name, employee_ids, filter_sql):
                         else null end as period,
                    capped_engagement, capped_effectiveness, capped_discipline, capped_working_hours
             from public.pace_1
-            where shift_type = 'Standard'
-              and worked_day between %(prior_start)s and %(cur_end)s
+            where worked_day between %(prior_start)s and %(cur_end)s
               and capped_engagement is not null and capped_effectiveness is not null
               and capped_discipline is not null and capped_working_hours is not null
               and (%(dept_name)s is null or dept_name = %(dept_name)s)
               and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
-              {extra_filter}
+              {pop_filter}
         ),
         agg as (
             select employee_id, emp_name, dept_name, period,
@@ -1254,11 +1258,15 @@ def _gainer_loser_cte(dept_name, employee_ids, filter_sql):
     """
 
 
-def gainer_loser_ranking(dept_name=None, employee_ids=None, filter_sql=None, limit=None):
-    """Top gainers and top losers ranked by score CHANGE (current 4-complete-
-    calendar-weeks period minus the prior 4-complete-calendar-weeks period).
-    Employees need >=2 Standard days of data in BOTH periods to qualify.
-    Returns (gainers, losers, excluded_count, meta)."""
+def gainer_loser_ranking(dept_name=None, employee_ids=None, filter_sql=None, limit=None, directions=("gainers", "losers")):
+    """Top gainers and/or top losers ranked by score CHANGE (current
+    4-complete-calendar-weeks period minus the prior 4-complete-calendar-weeks
+    period). Employees need >=2 days of data in BOTH periods (under whatever
+    population filter is in effect) to qualify. `directions` controls which
+    of ('gainers', 'losers') are actually computed/returned - a losers-only
+    question should never compute or show gainers, and vice versa.
+    Returns (gainers, losers, excluded_count, meta) - gainers/losers is an
+    empty list (not None) for a direction not requested."""
     cur_start, cur_end, prior_start, prior_end = last_4_weeks_periods()
     lim = limit or LIMIT
     params = {
@@ -1300,8 +1308,8 @@ def gainer_loser_ranking(dept_name=None, employee_ids=None, filter_sql=None, lim
         """
         return run_query(sql, params)
 
-    losers = _ranked(ascending=True)
-    gainers = _ranked(ascending=False)
+    losers = _ranked(ascending=True) if "losers" in directions else []
+    gainers = _ranked(ascending=False) if "gainers" in directions else []
     meta = {
         "cur_start": cur_start, "cur_end": cur_end,
         "prior_start": prior_start, "prior_end": prior_end,
@@ -1332,26 +1340,31 @@ DAY_COMPARE_METRICS = {
 DEFAULT_DAY_COMPARE_METRIC = "pace"
 
 
-def day_compare(date1, date2, dept_name=None, employee_id=None, metric_keys=None):
+def day_compare(date1, date2, dept_name=None, employee_id=None, metric_keys=None, filter_sql=None):
     """Population-average comparison of one or more metrics between two
     fixed days. `dept_name` holds the department FIXED (both days, same
     department) - this is the "which day was better for department X" case,
     distinct from a department-vs-department comparison on one day (that's
     the existing dept_compare intent, untouched). `employee_id` scopes to
-    one employee instead of a population average. Returns a list of dicts,
-    one per requested metric: {metric_key, label, val1, val2, n1, n2}."""
+    one employee instead of a population average. `filter_sql` is the full
+    population filter (shift_type + visit_flag + ps_worked_flag_day, per the
+    default-population rule) - required; main.py's _resolve_population_filter
+    always supplies one, applying shift_type='Standard' AND visit_flag='No'
+    AND ps_worked_flag_day=1 by default. Returns a list of dicts, one per
+    requested metric: {metric_key, label, val1, val2, n1, n2}."""
     keys = metric_keys or [DEFAULT_DAY_COMPARE_METRIC]
+    pop_filter = f"and {filter_sql}" if filter_sql else "and shift_type = 'Standard'"
     results = []
     for key in keys:
         col, label = DAY_COMPARE_METRICS.get(key, DAY_COMPARE_METRICS[DEFAULT_DAY_COMPARE_METRIC])
         sql = f"""
             select worked_day, avg({col}) as val, count(*) as n
             from public.pace_1
-            where shift_type = 'Standard'
-              and worked_day = any(%(dates)s)
+            where worked_day = any(%(dates)s)
               and {col} is not null
               and (%(dept_name)s is null or dept_name = %(dept_name)s)
               and (%(employee_id)s is null or employee_id = %(employee_id)s)
+              {pop_filter}
             group by worked_day
         """
         params = {"dates": [date1, date2], "dept_name": dept_name, "employee_id": employee_id}

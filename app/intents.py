@@ -568,16 +568,20 @@ _SCORE_IMPROVEMENT_ALLTIME_PATTERNS = [
     r"\bbiggest score improvement\b", r"\blargest score improvement\b",
 ]
 _GAINER_LOSER_PATTERNS = [
-    r"\btop\s*\d*\s*gainer(s)?\b.*\bloser(s)?\b", r"\bgainer(s)?\b.*\bloser(s)?\b",
-    r"\btop\s*\d*\s*loser(s)?\b.*\bgainer(s)?\b",
-    r"\bwho (improved|declined)( the most)?\b.*\blast\s*4\s*weeks\b",
-    r"\bwho (improved|declined)( the most)?\b.*\blast\s+four\s+weeks\b",
-    r"\b(gainers?|losers?)\b.*\blast\s*4\s*weeks\b",
-    r"\bbiggest (gainers?|losers?)\b",
-    r"\btop\s*\d*\s*(gainers?|losers?)\b",
+    r"\btop\s*\d*\s*gainer(s)?\b.*\blos+er(s)?\b", r"\bgainer(s)?\b.*\blos+er(s)?\b",
+    r"\btop\s*\d*\s*los+er(s)?\b.*\bgainer(s)?\b",
+    r"\bwho (improved|declined|dropped)( the most)?\b.*\blast\s*4\s*weeks\b",
+    r"\bwho (improved|declined|dropped)( the most)?\b.*\blast\s+four\s+weeks\b",
+    r"\b(gainers?|los+ers?)\b.*\blast\s*4\s*weeks\b",
+    r"\bbiggest (gainers?|los+ers?)\b",
+    r"\btop\s*\d*\s*(gainers?|los+ers?)\b",
     r"\bwho (gained|lost)( the most)?\b.*\b(score|pace)\b",
     r"\bwho improved and (who )?declined\b",
+    r"\bwho improved and (who )?dropped\b",
+    r"\bwho dropped and (who )?improved\b",
     r"\bscore change(s)?\b.*\blast\s*4\s*weeks\b",
+    r"\bwho dropped the most\b", r"\bwho improved the most\b",
+    r"\bworst perform(er|ance)s?\b", r"\bbest perform(er|ance)s?\b",
 ]
 _EMP_OVERVIEW_PATTERNS = [
     r"\bhow is\b(?!.*\bmy team\b)(?!.*\bdepartment\b).*\bperforming\b",

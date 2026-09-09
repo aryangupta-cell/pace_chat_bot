@@ -461,27 +461,106 @@ def format_count_rows(rows, count_field, label, name_field=None):
     return _render_table(headers, data)
 
 
-_GAINER_LOSER_FILTERS = [
-    (r"\bwfh\b|\bwork(ing)? from home\b", "wfh_status = 'Work From Home'", "on WFH"),
-    (r"\bvisit(s|ed|ing)?\b|\bclient visit", "visit_flag = 'Yes'", "with client visits"),
-    (r"\bps[\s-]?worked\b|\bps status\b|\bps[\s-]?working\b", "ps_worked_flag_day = 1", "PS-worked"),
-]
+# ---------------------------------------------------------------------------
+# Item 1: which direction(s) - gainers-only / losers-only / both - a
+# gainer/loser question is actually asking for.
+# ---------------------------------------------------------------------------
+_LOSER_ONLY_PATTERN = r"\blos+er(s)?\b|\bworst perform(er|ance)s?\b|\bdropped the most\b|\bwho dropped\b|\bdeclin(e|ed|ing)\b"
+_GAINER_ONLY_PATTERN = r"\bgainer(s)?\b|\bimproved the most\b|\bwho improved\b|\bbest perform(er|ance)s?\b"
+_BOTH_PATTERN = r"\bgainers?\s+and\s+los+ers?\b|\blos+ers?\s+and\s+gainers?\b|\bboth\b|\bimproved\s+and\s+(who\s+)?dropped\b|\bdropped\s+and\s+(who\s+)?improved\b"
 
 
-def _gainer_loser_filter(message):
-    """Detect an optional population filter (visit-only / PS-status /
-    work-mode subset) from the message text. Returns (filter_sql,
-    filter_label) or (None, None). This restricts WHICH employees are
-    included in gainer_loser_ranking - never the time window itself."""
+def _gainer_loser_directions(message):
+    """Returns a tuple subset of ('gainers', 'losers') describing which
+    direction(s) the question actually asked for. Defaults to both when the
+    phrasing is ambiguous or explicitly asks for both."""
     text_l = (message or "").lower()
-    for pattern, filter_sql, label in _GAINER_LOSER_FILTERS:
-        if re.search(pattern, text_l):
-            return filter_sql, label
-    return None, None
+    if re.search(_BOTH_PATTERN, text_l):
+        return ("gainers", "losers")
+    wants_loser = bool(re.search(_LOSER_ONLY_PATTERN, text_l))
+    wants_gainer = bool(re.search(_GAINER_ONLY_PATTERN, text_l))
+    if wants_loser and not wants_gainer:
+        return ("losers",)
+    if wants_gainer and not wants_loser:
+        return ("gainers",)
+    return ("gainers", "losers")
 
 
-def format_gainer_loser_ranking(gainers, losers, meta, scope_note, filter_label=None):
-    filter_note = f", {filter_label} only" if filter_label else ""
+# ---------------------------------------------------------------------------
+# Item 3: shared default-population filter. shift_type='Standard' is the
+# unchanged always-default baseline; visit_flag='No' AND ps_worked_flag_day=1
+# are now ALSO applied by default whenever the question doesn't specify a
+# filter itself. Used by gainer/loser ranking and day-vs-day comparison only
+# this round (see SESSION_HANDOFF.md for the explicit scope boundary).
+# ---------------------------------------------------------------------------
+_OT_PATTERN = r"\bovertime\b|\bot\b"
+_STANDARD_PATTERN = r"\bstandard\b|\bstd\b"
+_VISIT_NO_PATTERN = r"\bnon[\s-]?visit\b|\bno visit\b|\bnot on visit\b|\bwithout visit\b|\bnon[\s-]?visiting\b"
+_VISIT_YES_PATTERN = r"\bvisit(s|ed|ing)?\b|\bclient visit"
+_PS_NOT_WORKING_PATTERN = r"\bps[\s-]?not[\s-]?work(ed|ing)?\b|\bps[\s-]?not[\s-]?installed\b"
+_PS_WORKING_PATTERN = r"\bps[\s-]?worked\b|\bps[\s-]?working\b|\bps status\b"
+
+
+def _resolve_population_filter(message):
+    """Detect explicit population-filter overrides in `message` and compose
+    the population filter SQL fragment + the dynamic footer text describing
+    what's actually in effect. Returns (filter_sql, footer_text).
+
+    Pure default (nothing overridden): shift_type='Standard' AND
+    visit_flag='No' AND ps_worked_flag_day=1 -> generic default footer,
+    never naming 'Standard' unless the user asked about shift type."""
+    text_l = (message or "").lower()
+
+    ot_requested = bool(re.search(_OT_PATTERN, text_l))
+    standard_requested = (not ot_requested) and bool(re.search(_STANDARD_PATTERN, text_l))
+    visit_no_explicit = bool(re.search(_VISIT_NO_PATTERN, text_l))
+    visit_yes = (not visit_no_explicit) and bool(re.search(_VISIT_YES_PATTERN, text_l))
+    ps_not_working = bool(re.search(_PS_NOT_WORKING_PATTERN, text_l))
+    ps_working_explicit = (not ps_not_working) and bool(re.search(_PS_WORKING_PATTERN, text_l))
+
+    clauses = []
+    footer_parts = []
+
+    if ot_requested:
+        clauses.append("shift_type = 'Overtime (OT)'")
+        footer_parts.append("OT (Overtime) days")
+    elif standard_requested:
+        clauses.append("shift_type = 'Standard'")
+        footer_parts.append("Standard shift days")
+    else:
+        clauses.append("shift_type = 'Standard'")
+
+    if visit_yes:
+        clauses.append("visit_flag = 'Yes'")
+        footer_parts.append("visit days")
+    elif visit_no_explicit:
+        clauses.append("visit_flag = 'No'")
+        footer_parts.append("non-visit days")
+    else:
+        clauses.append("visit_flag = 'No'")
+
+    if ps_not_working:
+        clauses.append("ps_worked_flag_day = 0")
+        footer_parts.append("PS-not-working days")
+    elif ps_working_explicit:
+        clauses.append("ps_worked_flag_day = 1")
+        footer_parts.append("PS-working days")
+    else:
+        clauses.append("ps_worked_flag_day = 1")
+
+    is_pure_default = not (ot_requested or standard_requested or visit_yes or visit_no_explicit
+                            or ps_not_working or ps_working_explicit)
+
+    if is_pure_default:
+        footer = "By default showing data for non visit and PS working days."
+    else:
+        footer = "Showing data for " + ", ".join(footer_parts) + "."
+
+    filter_sql = " and ".join(clauses)
+    return filter_sql, footer
+
+
+def format_gainer_loser_ranking(gainers, losers, meta, scope_note, directions, filter_footer):
     window_note = (
         f"Current period: {meta['cur_start']} to {meta['cur_end']} vs "
         f"prior period: {meta['prior_start']} to {meta['prior_end']}"
@@ -489,7 +568,7 @@ def format_gainer_loser_ranking(gainers, losers, meta, scope_note, filter_label=
 
     def _table(rows):
         if not rows:
-            return "None."
+            return "None (no rows matched)."
         headers = ["#", "Employee", "Department", "Current score", "Prior score", "Change (pts)"]
         data = []
         for i, r in enumerate(rows, 1):
@@ -501,13 +580,21 @@ def format_gainer_loser_ranking(gainers, losers, meta, scope_note, filter_label=
             ])
         return _render_table(headers, data)
 
+    sections = []
+    if "gainers" in directions:
+        sections.append(f"Top Gainers:\n{_table(gainers)}")
+    if "losers" in directions:
+        sections.append(f"Top Losers:\n{_table(losers)}")
+    if directions == ("gainers",):
+        title = "Top gainers"
+    elif directions == ("losers",):
+        title = "Top losers"
+    else:
+        title = "Top gainers and losers"
+
     body = (
-        f"Top gainers and losers{scope_note}{filter_note} (last 4 complete weeks vs prior 4 complete weeks):\n"
-        f"{window_note}\n\n"
-        f"Top Gainers:\n{_table(gainers)}\n\n"
-        f"Top Losers:\n{_table(losers)}\n\n"
-        f"({meta['excluded_count']} employee(s) excluded for insufficient data — need at least 2 Standard "
-        f"days of data in both periods.)"
+        f"{title}{scope_note} (last 4 complete weeks vs prior 4 complete weeks):\n"
+        f"{window_note}\n\n" + "\n\n".join(sections) + f"\n\n{filter_footer}"
     )
     return body
 
@@ -539,13 +626,16 @@ def _day_compare_metrics(message):
     return found or [queries.DEFAULT_DAY_COMPARE_METRIC]
 
 
-def format_day_compare(results, date1, date2, subject_label):
+def format_day_compare(results, date1, date2, subject_label, filter_footer=None):
     lines = [f"Comparing {subject_label} on {date1} vs {date2}:\n"]
+    any_data = False
     for r in results:
         v1, v2 = r["val1"], r["val2"]
         if v1 is None or v2 is None:
-            lines.append(f"{r['label']}: no data available for one or both of those days.")
+            lines.append(f"{r['label']}: no data available for one or both of those days "
+                         f"(0 matching rows) under the current filters.")
             continue
+        any_data = True
         f1, f2 = _fmt(v1), _fmt(v2)
         diff = float(v1) - float(v2)
         if abs(diff) <= _DAY_COMPARE_TIE_THRESHOLD:
@@ -555,6 +645,9 @@ def format_day_compare(results, date1, date2, subject_label):
         else:
             verdict = f"{date2} was better (+{_fmt(abs(diff))} pts)"
         lines.append(f"{r['label']}: {date1} = {f1}, {date2} = {f2} — {verdict}")
+    if filter_footer:
+        lines.append("")
+        lines.append(filter_footer)
     return "\n".join(lines)
 
 
@@ -608,8 +701,9 @@ def _handle_day_compare(message, raw_message, session):
     elif dept_name:
         subject_label = dept_name
 
-    results = queries.day_compare(d1, d2, dept_name=dept_name, employee_id=employee_id, metric_keys=metric_keys)
-    return ChatResponse(reply=format_day_compare(results, d1, d2, subject_label), rows=results)
+    filter_sql, filter_footer = _resolve_population_filter(message)
+    results = queries.day_compare(d1, d2, dept_name=dept_name, employee_id=employee_id, metric_keys=metric_keys, filter_sql=filter_sql)
+    return ChatResponse(reply=format_day_compare(results, d1, d2, subject_label, filter_footer), rows=results)
 
 
 def format_score_delta_ranking(rows, meta, header_prefix):
@@ -1891,11 +1985,12 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         return ChatResponse(reply=reply, rows=rows)
 
     if intent == "gainer_loser_ranking":
-        filter_sql, filter_label = _gainer_loser_filter(message)
+        filter_sql, filter_footer = _resolve_population_filter(message)
+        directions = _gainer_loser_directions(message)
         gainers, losers, excluded_count, meta = queries.gainer_loser_ranking(
-            dept_name, employee_ids=employee_ids, filter_sql=filter_sql, limit=limit
+            dept_name, employee_ids=employee_ids, filter_sql=filter_sql, limit=limit, directions=directions
         )
-        reply = format_gainer_loser_ranking(gainers, losers, meta, scope_note, filter_label)
+        reply = format_gainer_loser_ranking(gainers, losers, meta, scope_note, directions, filter_footer)
         return ChatResponse(reply=reply, rows=gainers + losers)
 
     if intent == "emp_overview":
