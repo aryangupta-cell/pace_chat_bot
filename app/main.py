@@ -1916,7 +1916,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         if flag_key is None:
             return ChatResponse(
                 reply="I couldn't tell which attendance/leave/WFH/visit/etc. flag and which day you meant — "
-                      "try e.g. \"how many employees were on WFH yesterday\" or \"who was on leave today\"."
+                      "try e.g. \"how many employees were on WFH yesterday\" or \"who was on leave last week\"."
             )
         day_scope_note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")
         day_scope_note += " " + (_period_label_for_range(date_range) if date_range else _period_note(month, None))
