@@ -111,6 +111,46 @@ def _is_word_boundary(text_l, start, end):
     return before_ok and after_ok
 
 
+_SNAP_MAX_EXTEND = 2  # small typo-tolerance budget, see docstring below
+
+
+def _snap_to_word_boundary(text_l, start, end):
+    """rapidfuzz's partial_ratio_alignment can return a span that ties in
+    score with the "real" word-aligned span but lands mid-word, or even
+    includes a leading/trailing space in the matched window itself (e.g.
+    typo "labd" scoring equally whether the matched window is "ai lab" or
+    " ai lab" - a one-character shift that leaves the trailing 'd' just
+    outside the returned span, with a stray leading space swallowed
+    instead). Rejecting those outright (the previous behavior) silently
+    killed real typo matches like "AI Labd" -> "AI Labs".
+
+    Fix: first trim any leading/trailing non-alnum chars the alignment
+    happened to include (that only ever shrinks the span, so it's always
+    safe). Then extend the remaining alnum core outward toward a real word
+    boundary, but ONLY by up to _SNAP_MAX_EXTEND characters per side - a
+    small typo-tolerance budget, not an unbounded widen. This is
+    deliberately capped: without a cap, "most productive employee" would
+    widen the "product" mid-word match all the way out to the full word
+    "productive" and then re-score reasonably well against "Product" -
+    reintroducing the exact substring-collision bug (a real one, confirmed
+    in this codebase's history) this whole word-boundary mechanism exists to
+    prevent. A short typo like one missing/swapped trailing letter fits
+    within the cap; swallowing an entire extra word suffix does not."""
+    while start < end and not text_l[start].isalnum():
+        start += 1
+    while end > start and not text_l[end - 1].isalnum():
+        end -= 1
+    n = 0
+    while start > 0 and text_l[start - 1].isalnum() and n < _SNAP_MAX_EXTEND:
+        start -= 1
+        n += 1
+    n = 0
+    while end < len(text_l) and text_l[end].isalnum() and n < _SNAP_MAX_EXTEND:
+        end += 1
+        n += 1
+    return start, end
+
+
 def _fuzzy_name_candidates(text_l, names):
     """names: real display strings (e.g. actual dept_name/emp_name casing).
     Returns the subset scoring >= threshold as (name, score) pairs, best first,
@@ -121,12 +161,23 @@ def _fuzzy_name_candidates(text_l, names):
         alignment = fuzz.partial_ratio_alignment(text_l, normalized)
         if alignment.score < FUZZY_NAME_THRESHOLD:
             continue
-        if not _is_word_boundary(text_l, alignment.src_start, alignment.src_end):
+        start, end = _snap_to_word_boundary(text_l, alignment.src_start, alignment.src_end)
+        if not _is_word_boundary(text_l, start, end):
+            continue
+        # Re-score the snapped (word-boundary-safe, whole-word) span directly
+        # against the candidate name, rather than trusting the original
+        # (possibly mid-word/shifted) alignment's score - this is what
+        # actually confirms the snap resolved to the real match and didn't
+        # just widen onto an unrelated extra word (e.g. "product" widening
+        # to "productive" correctly scores low against "Product").
+        span_score = fuzz.ratio(text_l[start:end], normalized)
+        score = span_score
+        if score < FUZZY_NAME_THRESHOLD:
             continue
         matched_len = alignment.dest_end - alignment.dest_start
         if matched_len / max(len(normalized), 1) < FUZZY_NAME_MIN_COVERAGE:
             continue
-        hits.append((name, alignment.score))
+        hits.append((name, score))
     hits.sort(key=lambda h: -h[1])
     return hits
 

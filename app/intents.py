@@ -189,6 +189,9 @@ _PACE_SCORE_BEST_PATTERNS = [
     # Bug 1 fix: bare "score" ranking synonyms (no "pace" prefix)
     r"\bhighest score\b", r"\bbest score\b", r"\btop\b.*\bscore\b",
     r"\bwho has the highest score\b",
+    # least-score follow-up round: parity with the worst-side "least score"
+    # addition below.
+    r"\bmost score\b",
 ]
 _PACE_SCORE_WORST_PATTERNS = [
     r"\bworst pace score\b", r"\blowest pace score\b", r"\bbottom\b.*\bpace score\b",
@@ -205,6 +208,14 @@ _PACE_SCORE_WORST_PATTERNS = [
     # Bug 1 fix: bare "score" ranking synonyms (no "pace" prefix)
     r"\blowest score\b", r"\bworst score\b",
     r"\bwho has the lowest score\b",
+    # least-score follow-up round: "least score" wasn't covered (only "least
+    # pace score" was) - the rule-based matcher missed it entirely and
+    # relied on the LLM, which misclassified it once a department mention
+    # ("...in AI Labs department") was appended (picked a dept-aggregate
+    # intent instead). Adding the bare pattern here makes the rule-based
+    # matcher fire reliably, which wins outright per the general precedence
+    # rule below.
+    r"\bleast score\b", r"\bwho has the least score\b",
 ]
 _ENGAGEMENT_HIGH_PATTERNS = [
     r"\bhighest engagement\b", r"\bmost engaged\b", r"\btop\b.*\bengagement\b",

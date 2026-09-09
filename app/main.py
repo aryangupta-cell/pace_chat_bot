@@ -101,6 +101,9 @@ _VAGUE_LIST_EXPAND_LOOSE = re.compile(
     r"|who was offline\b"
     r"|who took leave\b"
     r"|how many total\b"
+    r"|employee[- ]wise\b"
+    r"|by employee\b"
+    r"|employees? list\b"
     r")",
     re.IGNORECASE,
 )
@@ -951,6 +954,7 @@ _PS_CAVEAT_METRIC_BY_INTENT = {
 }
 
 _PS_METRIC_KEYWORDS = [
+    ("pace_score", ["pace score", "score"]),
     ("engagement", ["engagement"]),
     ("effectiveness", ["effectiveness"]),
     ("discipline", ["discipline"]),
@@ -1138,6 +1142,32 @@ _EMP_FIELD_INTENTS = {
     "emp_department": ("Department", lambda r: r['dept_name']),
     "emp_manager": ("Reporting manager", lambda r: r['reporting_manager_name']),
 }
+
+# Maps an _EMP_FIELD_INTENTS key to its queries.METRICS-family equivalent,
+# for the "no named employee, but this is clearly a bulk/all-employees
+# request" fallback below (e.g. "give me score of all the employees of AI
+# Labs department") - previously these intents ONLY had a single-employee
+# lookup path, so a bulk/plural phrasing with no named employee just failed
+# with "couldn't find that employee" instead of returning a ranking/list for
+# the scope in play. emp_department/emp_manager are deliberately excluded -
+# neither has a numeric METRICS counterpart to rank by.
+_EMP_FIELD_TO_METRIC_KEY = {
+    "emp_pace_score": "pace_score",
+    "emp_late_comings": "late_comings",
+    "emp_early_leavings": "early_leavings",
+    "emp_productive_time": "productive_min",
+    "emp_whatsapp": "whatsapp_min",
+    "emp_ai_usage": "ai_min",
+    "emp_discipline": "discipline",
+    "emp_engagement": "engagement",
+    "emp_effectiveness": "effectiveness",
+    "emp_deficient_hours": "deficient_hours_days",
+    "emp_working_pct": "working_pct",
+}
+
+_BULK_ALL_EMPLOYEES_PATTERN = re.compile(
+    r"\ball\b.*\bemployees?\b|\bemployees?\b.*\ball\b|\beveryone\b|\beach employee\b", re.IGNORECASE
+)
 
 # Intents that always answer about ONE named individual employee (resolved
 # via entities.extract_employee), never a team/department scope. These must
@@ -1421,7 +1451,38 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 needs_clarification=True, clarification_options=e.candidates,
             )
         if emp_id is None:
-            return ChatResponse(reply="I couldn't find that employee — please give me their exact full name or employee code, or a department for a ranking.")
+            # No named employee - this is a RANKING request ("...then who has
+            # the least score?"), not an individual lookup. Same "ranking
+            # fallback when no employee is named" shape as ps_ratio_info
+            # above; previously this branch just gave up with "couldn't find
+            # that employee" even for a plainly ranking-shaped message.
+            ranking_ascending = bool(re.search(
+                r"\b(least|lowest|worst|fewest|bottom|smallest)\b", message, re.I))
+            rows = queries.metric_ranking_ps_filtered(
+                metric_key, dept_name, month=month, date_range=date_range,
+                ascending=ranking_ascending, employee_ids=employee_ids, limit=limit,
+                exclude_ps_off=True,
+            )
+            direction = "lowest" if ranking_ascending else "highest"
+            label = queries.PS_FILTERED_METRICS[metric_key][1]
+            reply = (f"Ranked by {label} (excluding PS non-working days), {direction} first"
+                     f"{scope_note}:\n\n{format_metric_rows(rows, metric_key)}")
+            if session is not None:
+                def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month,
+                           date_range=date_range, limit=500, _metric_key=metric_key, _ascending=ranking_ascending):
+                    _rows = queries.metric_ranking_ps_filtered(
+                        _metric_key, dept_name, month=month, date_range=date_range,
+                        ascending=_ascending, employee_ids=employee_ids, limit=limit, exclude_ps_off=True,
+                    )
+                    _label = queries.PS_FILTERED_METRICS[_metric_key][1]
+                    _direction = "lowest" if _ascending else "highest"
+                    return (f"Ranked by {_label} (excluding PS non-working days), {_direction} first"
+                            f"{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n"
+                            f"{format_metric_rows(_rows, _metric_key)}", _rows)
+                session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                             dept_name=dept_name, employee_ids=employee_ids, team_label=team_label,
+                                             month=month, date_range=date_range)
+            return ChatResponse(reply=reply, rows=rows)
         row = queries.employee_metric_ps_filtered(emp_id, metric_key, month=month, date_range=date_range, exclude_ps_off=True)
         if not row or not row.get("days_counted"):
             return ChatResponse(reply=f"No data found for {emp_name} for that period.")
@@ -1451,6 +1512,36 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 needs_clarification=True, clarification_options=e.candidates,
             )
         if emp_id is None:
+            # No named employee - if this is clearly a bulk/all-employees
+            # phrasing ("give me score of all the employees of AI Labs
+            # department") or there's an active per-employee ranking in
+            # session context, answer with a ranking/list for the metric
+            # instead of failing with "couldn't find that employee" (that
+            # error should only ever fire for a genuinely unresolvable named
+            # person, not a plural/bulk request that never named one).
+            _metric_key = _EMP_FIELD_TO_METRIC_KEY.get(intent)
+            _last = session_store.get_last_list(session) if session is not None else None
+            _bulk_request = _BULK_ALL_EMPLOYEES_PATTERN.search(message) is not None
+            _ranking_context = _last is not None and _last.get("kind") == "ranking"
+            if _metric_key is not None and (_bulk_request or _ranking_context):
+                rows = queries.metric_ranking(
+                    _metric_key, dept_name, month, ascending=False, employee_ids=employee_ids,
+                    limit=limit or 500, reporting_user_id=manager_id if employee_ids is None else None,
+                )
+                label = queries.METRICS[_metric_key][1]
+                reply = f"{label.capitalize()}{scope_note} (full list):\n\n{format_metric_rows(rows, _metric_key)}"
+                if session is not None:
+                    def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month,
+                               date_range=date_range, limit=500, _mk=_metric_key, _rid=manager_id):
+                        _rows = queries.metric_ranking(_mk, dept_name, month, ascending=False, employee_ids=employee_ids,
+                                                        limit=limit, reporting_user_id=_rid if employee_ids is None else None)
+                        _label = queries.METRICS[_mk][1]
+                        return (f"{_label.capitalize()}{_scope_note_generic(team_label, dept_name, month, date_range)} "
+                                f"(full list):\n\n{format_metric_rows(_rows, _mk)}", _rows)
+                    session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                                 dept_name=dept_name, employee_ids=employee_ids, team_label=team_label,
+                                                 month=month, date_range=date_range)
+                return ChatResponse(reply=reply, rows=rows)
             return ChatResponse(reply="I couldn't find that employee — please give me their exact full name or employee code.")
         detail = queries.employee_detail(emp_id, month)
         if intent in _EMP_FIELD_INTENTS:
@@ -2674,6 +2765,25 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             needs_clarification=True,
             clarification_options=dept_candidates,
         )
+
+    # Response-SHAPE continuity fix: a message that names ONLY a department
+    # (no metric/ranking keyword of its own) defaults to intent
+    # "dept_summary" - a department-level AGGREGATE. But if the session's
+    # last list-producing answer was a per-EMPLOYEE ranking (kind=="ranking"
+    # in session_store's last_list, e.g. the "who has the least score"
+    # conversation), a bare department mention right after it reads as
+    # ADDING SCOPE to that ongoing ranking ("...in AI Labs") - not a request
+    # to switch to a completely different response shape (a company-wide-
+    # style department summary). Only fires when a department was actually
+    # NAMED this turn (dept_name is not None here, before any sticky-context
+    # fallback runs below) and a rerun_list callable is available to
+    # actually re-scope the prior ranking to it.
+    if intent == "dept_summary" and dept_name is not None and session is not None:
+        _last = session_store.get_last_list(session)
+        if _last is not None and _last.get("kind") == "ranking" and _last.get("rerun_list") is not None:
+            reply, rows = _last["rerun_list"](dept_name=dept_name)
+            session_store.push_context(session, dept_name=dept_name)
+            return ChatResponse(reply=reply, rows=rows)
 
     date_start, date_end, date_range_mentioned = entities.extract_date_range(message)
     date_range = (date_start, date_end) if date_range_mentioned else None

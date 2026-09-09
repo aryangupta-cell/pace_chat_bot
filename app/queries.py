@@ -2139,6 +2139,7 @@ PS_OFF_CAVEAT_MIN_DAYS = 3
 PS_OFF_CAVEAT_RATIO = 0.25
 
 PS_FILTERED_METRICS = {
+    "pace_score": ("least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10))", "PACE score"),
     "engagement": ("avg(engagement_pct)", "engagement %"),
     "effectiveness": ("avg(effectiveness_pct)", "effectiveness %"),
     "discipline": ("avg(discipline_pct)", "discipline %"),
@@ -2172,6 +2173,44 @@ def employee_metric_ps_filtered(employee_id, metric_key, month=None, date_range=
     if row is not None:
         row["label"] = label
     return row
+
+
+def metric_ranking_ps_filtered(metric_key, dept_name, month=None, date_range=None, ascending=False,
+                                employee_ids=None, limit=None, exclude_ps_off=True):
+    """Same shape as metric_ranking(), but for a "remove/exclude PS
+    non-working rows, then rank by X" follow-up with NO named employee (a
+    ranking request, not a single-employee lookup) - queries pace_1 directly
+    (ps_worked_flag_day isn't on pace_chatbot_view, same reason as the other
+    PS-filtered functions above) and drops ps_worked_flag_day=0 rows before
+    aggregating each employee's metric."""
+    expr, label = PS_FILTERED_METRICS[metric_key]
+    frag, params = _period_filter(month, date_range)
+    filters = [frag]
+    if dept_name:
+        filters.append("dept_name = %(dept_name)s")
+        params["dept_name"] = dept_name
+    if employee_ids is not None:
+        filters.append("employee_id = any(%(employee_ids)s)")
+        params["employee_ids"] = employee_ids
+    if exclude_ps_off:
+        filters.append("ps_worked_flag_day = 1")
+    where_clause = " and ".join(filters)
+    order = "asc" if ascending else "desc"
+    sql = f"""
+        select employee_id, emp_name, dept_name,
+               {expr} as metric_value,
+               count(*) as days_counted
+        from public.pace_1
+        where {where_clause}
+        group by employee_id, emp_name, dept_name
+        order by metric_value {order} nulls last
+        limit %(limit)s
+    """
+    params["limit"] = limit or LIMIT
+    rows = run_query(sql, params)
+    for r in rows:
+        r["label"] = label
+    return rows
 
 
 def ps_working_ratio(employee_id, month=None, date_range=None):
