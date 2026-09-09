@@ -2500,11 +2500,22 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         rule_intent in ("day_count", "day_list") and _detect_day_flag(message) == "ps_not_installed"
     )
 
+    # Gainer/loser direction override: Gemini has no few-shot examples yet
+    # for the direction-only phrasings ("best/worst performers", "who
+    # dropped/improved the most", "losser" typo) added for Item 1, and tends
+    # to misclassify them as a generic metric-ranking intent instead. The
+    # rule-based _GAINER_LOSER_PATTERNS regexes are narrow/explicit and
+    # rarely false-positive, so trust them over the LLM whenever they fire -
+    # same rationale as the PS overrides above.
+    _gainer_loser_override = rule_intent == "gainer_loser_ranking"
+
     if _pronoun_override:
         intent = rule_intent
     elif _ps_not_installed_override:
         intent = rule_intent
     elif _ps_override:
+        intent = rule_intent
+    elif _gainer_loser_override:
         intent = rule_intent
     elif llm_result is not None:
         llm_intent = llm_result["intent"]
