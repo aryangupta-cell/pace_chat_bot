@@ -166,6 +166,8 @@ _FEW_SHOT_EXAMPLES = [
     ("is Megha Sharma improving", {"intent": "emp_trend", "entities": {"employee": "Megha Sharma"}, "confidence": 0.95}),
     ("who is in red category in scm department", {"intent": "status_list", "entities": {"department": "SCM"}, "confidence": 0.9}),
     ("how many employees were on wfh yesterday", {"intent": "day_count", "entities": {"metric": "wfh"}, "confidence": 0.9}),
+    ("how many employees have ps not installed yesterday", {"intent": "day_count", "entities": {"metric": "ps_not_installed"}, "confidence": 0.85}),
+    ("who has ps not installed today", {"intent": "day_list", "entities": {"metric": "ps_not_installed"}, "confidence": 0.85}),
     ("aryan is declining in which discipline eng or eff", {"intent": "subscore_compare_emp", "entities": {"employee": "Aryan"}, "confidence": 0.8}),
     ("worst attendance in Accounts this month", {"intent": "attendance_worst", "entities": {"department": "Accounts", "month": "this month"}, "confidence": 0.9}),
     ("top 5 by pace score in IT-Development", {"intent": "pace_score_best", "entities": {"department": "IT-Development"}, "confidence": 0.9}),

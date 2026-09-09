@@ -2394,7 +2394,20 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # override above.
     _ps_override = rule_intent in ("ps_exclude_metric", "ps_ratio_info", "ps_explain")
 
+    # PS-not-installed override: same rationale as _ps_override above - this
+    # DAY_FLAGS flag is brand new and Gemini tends to pull "ps not installed"
+    # wording toward the older, more familiar ps_install_rate intent (a
+    # department PERCENTAGE, not this per-day distinct-employee COUNT/LIST)
+    # even with a few-shot example added. The rule-based day_count/day_list
+    # regexes for this flag are narrow/explicit, so trust them over the LLM
+    # whenever they fire.
+    _ps_not_installed_override = (
+        rule_intent in ("day_count", "day_list") and _detect_day_flag(message) == "ps_not_installed"
+    )
+
     if _pronoun_override:
+        intent = rule_intent
+    elif _ps_not_installed_override:
         intent = rule_intent
     elif _ps_override:
         intent = rule_intent
