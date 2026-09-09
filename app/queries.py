@@ -179,7 +179,44 @@ METRICS = {
 def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=None, limit=None, reporting_user_id=None):
     """Generic best/worst (or top-N/bottom-N via `limit`) ranking by any key
     in METRICS, optionally scoped by dept_name, employee_ids, and/or a
-    specific manager's reporting_user_id."""
+    specific manager's reporting_user_id.
+
+    BUG FIX (this round, Part 4b): for metric_key="pace_score" with a
+    SPECIFIC month filter given, ranking on pace_chatbot_view's
+    overall_pace_score (a rolling 60-*worked*-day window score, aliased from
+    last_60_days_new_pace_score_7_3) can under-represent that specific past
+    month, same root cause as employee_full_monthly_trend's/
+    _month_avg_status_cte's pre-existing fix. When a single specific month is
+    named, switch to the same capped-average-first recompute directly from
+    pace_1 (average the 4 capped sub-metrics for that month, then apply the
+    score formula once) instead of the view's rolling-window column. With NO
+    month filter (org-wide "who has the best pace score right now") or a
+    multi-month list, the rolling-window semantics are still the intended
+    "current standing" answer, so this branch only fires for exactly one
+    named month - the view-based query below is otherwise unchanged."""
+    month_list = _month_param(month)
+    if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
+        order = "asc" if ascending else "desc"
+        lim = limit or LIMIT
+        sql = f"""
+            select employee_id, emp_name, dept_name,
+                   least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value,
+                   count(*) as days_counted
+            from public.pace_1
+            where to_char(worked_day,'YYYY-MM') = %(month)s and shift_type = 'Standard'
+              and capped_engagement is not null and capped_effectiveness is not null
+              and capped_discipline is not null and capped_working_hours is not null
+              and (%(dept_name)s is null or dept_name = %(dept_name)s)
+              and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+              and (%(reporting_user_id)s is null or reporting_user_id = %(reporting_user_id)s)
+            group by employee_id, emp_name, dept_name
+            order by metric_value {order} nulls last
+            limit {lim}
+        """
+        return run_query(sql, {
+            "month": month_list[0], "dept_name": dept_name, "employee_ids": employee_ids,
+            "reporting_user_id": reporting_user_id,
+        })
     expr, _ = METRICS[metric_key]
     order = "asc" if ascending else "desc"
     lim = limit or LIMIT
@@ -197,7 +234,7 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
         limit {lim}
     """
     return run_query(sql, {
-        "dept_name": dept_name, "month": _month_param(month), "employee_ids": employee_ids,
+        "dept_name": dept_name, "month": month_list, "employee_ids": employee_ids,
         "reporting_user_id": reporting_user_id,
     })
 
@@ -1779,17 +1816,29 @@ def status_distribution_by_dept(limit=None):
 
 
 def _month_avg_status_cte(month):
-    """Bucket an employee's AVERAGE overall_pace_score in a given month into
+    """Bucket an employee's PACE score for a given SPECIFIC PAST month into
     the same Black/Red/Amber/Green thresholds the upstream status column
-    uses (Black <50, Red 50-64, Amber 65-79, Green >=80) — used for
-    status-transition queries where we need a PRIOR month's status and no
-    precomputed prior-month status column exists (only pace_score_prev_month,
-    a numeric average, does)."""
+    uses (Black <50, Red 50-64, Amber 65-79, Green >=80).
+
+    BUG FIX (this round, per SESSION_HANDOFF.md Part 4b): previously this
+    averaged pace_chatbot_view's overall_pace_score column (aliased from
+    last_60_days_new_pace_score_7_3, a rolling 60-*worked*-day window score),
+    which can under-represent a specific past month since it's a rolling
+    figure computed as of "now," not as of that month. Switched to the same
+    capped-average-first recompute already used correctly elsewhere in this
+    codebase (employee_full_monthly_trend's pace_score branch): average the 4
+    capped sub-metrics for the SPECIFIC requested month directly from
+    pace_1, then apply the score formula once. Only the score computation
+    changed - the MIN_DAYS_FOR_DELTA reliability gate (`having count(*) >=
+    %(min_days)s`) and dept_name/emp_name grouping are unchanged."""
     return f"""
-        select employee_id, emp_name, dept_name, avg(overall_pace_score) as avg_score,
+        select employee_id, emp_name, dept_name,
+               least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as avg_score,
                count(*) as days_counted
-        from {VIEW}
-        where to_char(worked_day,'YYYY-MM') = %(month)s
+        from public.pace_1
+        where to_char(worked_day,'YYYY-MM') = %(month)s and shift_type = 'Standard'
+          and capped_engagement is not null and capped_effectiveness is not null
+          and capped_discipline is not null and capped_working_hours is not null
         group by employee_id, emp_name, dept_name
         having count(*) >= %(min_days)s
     """

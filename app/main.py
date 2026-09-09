@@ -1205,6 +1205,19 @@ _DUAL_PURPOSE_EMP_INTENTS = {"ot_subscore", "wfh_subscore", "ps_worked_ranking",
 # Gemini's availability/latency/prompt tuning entirely.
 _PRONOUN_PATTERN = re.compile(r"\b(he|she|him|her|his|their|they|them)\b", re.IGNORECASE)
 
+# Part 3 ("did you mean X?" cascade) confidence threshold: the LLM's own
+# self-reported `confidence` (0.0-1.0, see llm_nlu.py's _SYSTEM_PROMPT) is
+# informative but not perfectly calibrated - it's a single model's own guess
+# about its own guess, not a verified accuracy rate. 0.6 was chosen as a
+# middle-of-the-road cutoff: below it, the few-shot examples in llm_nlu.py
+# that use confidence < 0.6 are deliberately the genuinely-vague/casual ones
+# ("give me a rundown of absenteeism" = 0.55) where the LLM itself signals
+# real uncertainty, while the bulk of concrete/well-covered phrasings score
+# 0.8+. Treating anything below this as "not confident enough to answer
+# directly" errs toward trying the (harmless, clearly-labeled) SQL-fallback
+# path more often rather than risking a wrong direct answer on a shaky guess.
+_LLM_LOW_CONFIDENCE_THRESHOLD = 0.6
+
 # "beside X"/"except X"/"excluding X"/"other than X" — a query naming one
 # employee but asking to EXCLUDE them from an otherwise org/dept-wide list
 # ("beside muskan who all did visit yesterday"). This is a genuinely new
@@ -2509,20 +2522,88 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # same rationale as the PS overrides above.
     _gainer_loser_override = rule_intent == "gainer_loser_ranking"
 
-    if _pronoun_override:
-        intent = rule_intent
-    elif _ps_not_installed_override:
-        intent = rule_intent
-    elif _ps_override:
-        intent = rule_intent
-    elif _gainer_loser_override:
+    # --- General precedence flip (this round) ---------------------------
+    # Historically this block preferred llm_intent whenever Gemini/OpenAI
+    # responded, with a small set of hand-built deterministic overrides
+    # (_pronoun_override / _ps_override / _ps_not_installed_override /
+    # _gainer_loser_override) bolted on top to force specific known-bad
+    # misclassification patterns back to the rule-based answer. Each of
+    # those overrides was really the same underlying lesson: the narrow,
+    # explicit regex matcher is usually MORE trustworthy than the LLM once
+    # it has actually fired, because it can't be fooled by phrasing outside
+    # its few-shot coverage the way the LLM can. This round generalizes
+    # that lesson: whenever the rule-based matcher finds ANY intent at all
+    # (rule_intent is not None), it wins outright. The LLM is now consulted
+    # to resolve intent ONLY when the rule-based matcher found nothing
+    # (rule_intent is None) - i.e. it fills gaps rather than second-guessing
+    # matches. The four old overrides are kept in place below (not deleted)
+    # as explicit, self-documenting special cases of this same rule, purely
+    # as a readability/safety-net aid - they are now redundant with the
+    # general rule (each fires only when rule_intent already matched one of
+    # those specific intents, which now always wins anyway) - the four
+    # `_..._override` booleans above are now DEAD/unused variables (no
+    # longer referenced in the branch below); they are left in place,
+    # uncalled, purely as documentation of the specific failure patterns the
+    # general rule now subsumes, and can be deleted in a future cleanup pass
+    # once this round's live regression testing has stood for a while. See
+    # SESSION_HANDOFF.md Part 1
+    # of this round for the regression-risk discussion (LLM correctly
+    # overriding a WRONG rule match, or handling genuinely novel phrasing
+    # the rule-based matcher used to incorrectly claim, are both now LOST
+    # whenever rule_intent is non-None but wrong - flagged explicitly).
+    # Low-confidence guess kept around ONLY for the Part-3 "did you mean X?"
+    # cascade below - never used to answer directly.
+    llm_low_confidence_guess = None
+    if rule_intent is not None:
         intent = rule_intent
     elif llm_result is not None:
         llm_intent = llm_result["intent"]
-        # Safety cross-check: for opposite-direction-sensitive intents, if
-        # the independent rule-based matcher ALSO confidently landed on the
-        # exact opposite intent, don't guess - ask the user to clarify
-        # instead of silently picking one direction.
+        llm_confidence = llm_result.get("confidence") or 0.0
+        if llm_intent == "none" or llm_confidence < _LLM_LOW_CONFIDENCE_THRESHOLD:
+            # Rule-based matcher found nothing AND the LLM either found
+            # nothing ("none") or is not confident enough to trust outright.
+            # Part 3: don't guess and don't immediately show the generic
+            # fallback either - try the SQL-generation fallback path first
+            # (handled by the `intent is None` branch further below), and
+            # keep the LLM's own guess (if it made one) around only as a
+            # "did you mean X?" suggestion for if/when SQL-fallback itself
+            # fails to produce anything sensible.
+            if llm_intent != "none":
+                llm_low_confidence_guess = llm_intent
+            intent = None
+        else:
+            intent = llm_intent
+            # Entity-hint augmentation: splice any employee/department name Gemini
+            # extracted into the text that the EXISTING extract_employee()/
+            # extract_department() functions parse. This lets those unchanged,
+            # safety-checked resolvers (exact match -> fuzzy match, same as
+            # always) pick up a name Gemini normalized/understood but that the
+            # rule-based regex text-matching might otherwise miss (e.g. a casual
+            # phrasing or minor misspelling) - Gemini never resolves the name
+            # itself, it only proposes text that flows through the same
+            # resolution/safety pipeline as before.
+            llm_entities = llm_result.get("entities", {})
+            hint_bits = []
+            for key in ("employee", "department", "manager"):
+                val = llm_entities.get(key)
+                if val and val.lower() not in message.lower():
+                    hint_bits.append(str(val))
+            if hint_bits:
+                message = message + " " + " ".join(hint_bits)
+    else:
+        intent = None
+
+    # Opposite-direction safety cross-check (kept fully intact, per explicit
+    # instruction - this is a deliberately SEPARATE safety mechanism, not an
+    # artifact of the old precedence order). Previously this only ran on the
+    # "LLM won" branch; it now also has to be checked when rule_intent won,
+    # since rule_intent winning unconditionally could otherwise silently
+    # suppress a case where the LLM confidently flagged the OPPOSITE
+    # direction from what the rule-based matcher matched - that disagreement
+    # is exactly the signal this check exists to catch, regardless of which
+    # side "wins" for the final answer.
+    if llm_result is not None and rule_intent is not None:
+        llm_intent = llm_result["intent"]
         opposite_of_llm = intents._OPPOSITE_INTENTS.get(llm_intent)
         if opposite_of_llm is not None and rule_intent == opposite_of_llm:
             return ChatResponse(
@@ -2535,26 +2616,6 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
                 needs_clarification=True,
                 clarification_options=[llm_intent, opposite_of_llm],
             )
-        intent = llm_intent
-        # Entity-hint augmentation: splice any employee/department name Gemini
-        # extracted into the text that the EXISTING extract_employee()/
-        # extract_department() functions parse. This lets those unchanged,
-        # safety-checked resolvers (exact match -> fuzzy match, same as
-        # always) pick up a name Gemini normalized/understood but that the
-        # rule-based regex text-matching might otherwise miss (e.g. a casual
-        # phrasing or minor misspelling) - Gemini never resolves the name
-        # itself, it only proposes text that flows through the same
-        # resolution/safety pipeline as before.
-        llm_entities = llm_result.get("entities", {})
-        hint_bits = []
-        for key in ("employee", "department", "manager"):
-            val = llm_entities.get(key)
-            if val and val.lower() not in message.lower():
-                hint_bits.append(str(val))
-        if hint_bits:
-            message = message + " " + " ".join(hint_bits)
-    else:
-        intent = rule_intent
 
     if intent == "day_compare":
         # Day-vs-day / metric comparison has its own dedicated dept/employee
@@ -2567,13 +2628,17 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         return _handle_day_compare(message, raw_message, session)
 
     if intent is None:
-        # Neither the rule-based matcher nor the LLM classifier matched an
-        # existing intent — try the SQL-generation fallback path (Part 3)
-        # before giving up. This is a distinct, explicitly-authorized code
-        # path (see sql_fallback.py) that drafts read-only SQL with GPT-5
-        # mini and executes it through the same existing DB connection;
-        # any failure/rejection along the way falls through silently to the
-        # normal FALLBACK_MESSAGE, so this can never make things worse.
+        # Neither the rule-based matcher nor a confident LLM classification
+        # matched an existing intent (rule_intent is None, and either the LLM
+        # also found nothing or its self-reported confidence was below
+        # _LLM_LOW_CONFIDENCE_THRESHOLD - see the branch above). Part 3 cascade:
+        # try the SQL-generation fallback path FIRST, automatically, before
+        # showing any clarification/generic-fallback message - the goal is a
+        # natural direct answer, not an extra confirm-dialog round-trip. This
+        # is a distinct, explicitly-authorized code path (see sql_fallback.py)
+        # that drafts read-only SQL with GPT-5 mini and executes it through
+        # the same existing DB connection, already labeled AI-generated/
+        # unverified in its own reply text.
         try:
             fallback_result = sql_fallback.answer(raw_message)
         except Exception:
@@ -2581,6 +2646,21 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             fallback_result = None
         if fallback_result is not None:
             return ChatResponse(reply=fallback_result["reply"], rows=fallback_result.get("rows", []))
+        # SQL-fallback itself failed to produce anything sensible (empty
+        # result, a SQL execution error, the safety check rejected the
+        # generated query, or it raised) - ONLY NOW fall through to a
+        # clarification. If the LLM had a low-confidence guess, offer it as
+        # a "did you mean X?" suggestion instead of the bare generic message.
+        if llm_low_confidence_guess is not None:
+            guess_label = llm_low_confidence_guess.replace("_", " ")
+            return ChatResponse(
+                reply=(
+                    f"I couldn't confidently answer that. Did you mean something like a \"{guess_label}\" "
+                    "question? Could you rephrase or be more specific?"
+                ),
+                needs_clarification=True,
+                clarification_options=[llm_low_confidence_guess],
+            )
         return ChatResponse(reply=intents.FALLBACK_MESSAGE)
 
     # Pass the RAW (pre-spellcheck) text as a fallback: dictionary spellcheck
