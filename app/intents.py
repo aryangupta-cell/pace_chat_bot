@@ -70,6 +70,15 @@ _IMPROVING_PATTERNS = [
     # casual phrasing round 3
     r"\bwho'?s on the (up|upward) (swing|trend)\b", r"\bwho'?s doing better\b",
     r"\bwho'?s picking up\b", r"\bwho'?s bouncing back\b",
+    # item A (SESSION_HANDOFF.md): "going up" as a synonym for improving -
+    # e.g. "whose pace score is going up (the most)?" - previously had no
+    # rule-based pattern at all (only "trending up" was covered), so this
+    # phrasing fell through to the fuzzy matcher / employee-lookup fallback.
+    # Typo tolerance (e.g. "donw"->"down") is handled upstream by
+    # spellcheck.correct_typos() before intent matching ever runs, per this
+    # project's established convention - no separate fuzzy handling needed
+    # here.
+    r"\bgoing up\b",
 ]
 
 _DECLINING_PATTERNS = [
@@ -82,6 +91,10 @@ _DECLINING_PATTERNS = [
     # casual phrasing round 3
     r"\bwho'?s on the (down|downward) (swing|trend)\b", r"\bwho'?s doing worse\b",
     r"\bwho'?s slipping\b", r"\bwho'?s sliding\b",
+    # item A (SESSION_HANDOFF.md): "going down" as a synonym for declining -
+    # see the matching "going up" addition to _IMPROVING_PATTERNS above for
+    # the full rationale.
+    r"\bgoing down\b",
 ]
 
 # --- Casual phrasing (new round): performance/attendance/productivity/score/

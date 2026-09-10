@@ -176,7 +176,8 @@ METRICS = {
 }
 
 
-def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=None, limit=None, reporting_user_id=None):
+def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=None, limit=None,
+                    reporting_user_id=None, date_range=None):
     """Generic best/worst (or top-N/bottom-N via `limit`) ranking by any key
     in METRICS, optionally scoped by dept_name, employee_ids, and/or a
     specific manager's reporting_user_id.
@@ -193,7 +194,60 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
     month filter (org-wide "who has the best pace score right now") or a
     multi-month list, the rolling-window semantics are still the intended
     "current standing" answer, so this branch only fires for exactly one
-    named month - the view-based query below is otherwise unchanged."""
+    named month - the view-based query below is otherwise unchanged.
+
+    `date_range` (item B, SESSION_HANDOFF.md): new, additive alternative to
+    `month` — a (start_date, end_date) tuple, used by callers that resolved
+    "no period named at all" to the last-60-days default
+    (queries.default_period_last_60_days()) instead of the old current-month
+    default. Mutually exclusive with `month` (mirrors every other date_range/
+    month dual-mode function in this file, e.g. metric_ranking_ps_filtered).
+    For metric_key="pace_score" with a date_range given, uses the SAME
+    capped-average-first-then-formula-once recompute as the single-month
+    branch above (still avoiding the Jensen's-inequality bug), just filtered
+    by `worked_day between` instead of `to_char(...) = month`."""
+    if date_range is not None:
+        start, end = date_range
+        order = "asc" if ascending else "desc"
+        lim = limit or LIMIT
+        if metric_key == "pace_score":
+            sql = f"""
+                select employee_id, emp_name, dept_name,
+                       least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value,
+                       count(*) as days_counted
+                from public.pace_1
+                where worked_day between %(date_start)s and %(date_end)s and shift_type = 'Standard'
+                  and capped_engagement is not null and capped_effectiveness is not null
+                  and capped_discipline is not null and capped_working_hours is not null
+                  and (%(dept_name)s is null or dept_name = %(dept_name)s)
+                  and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+                  and (%(reporting_user_id)s is null or reporting_user_id = %(reporting_user_id)s)
+                group by employee_id, emp_name, dept_name
+                order by metric_value {order} nulls last
+                limit {lim}
+            """
+            return run_query(sql, {
+                "date_start": start, "date_end": end, "dept_name": dept_name, "employee_ids": employee_ids,
+                "reporting_user_id": reporting_user_id,
+            })
+        expr, _ = METRICS[metric_key]
+        sql = f"""
+            select employee_id, emp_name, dept_name,
+                   {expr} as metric_value,
+                   count(*) as days_counted
+            from {VIEW}
+            where (%(dept_name)s is null or dept_name = %(dept_name)s)
+              and worked_day between %(date_start)s and %(date_end)s
+              and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+              and (%(reporting_user_id)s is null or reporting_user_id = %(reporting_user_id)s)
+            group by employee_id, emp_name, dept_name
+            order by metric_value {order} nulls last
+            limit {lim}
+        """
+        return run_query(sql, {
+            "dept_name": dept_name, "date_start": start, "date_end": end, "employee_ids": employee_ids,
+            "reporting_user_id": reporting_user_id,
+        })
     month_list = _month_param(month)
     if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
         order = "asc" if ascending else "desc"
@@ -453,7 +507,7 @@ def dept_summary(dept_name, month):
     return rows[0] if rows else None
 
 
-def dept_ranking(metric_key, month, ascending=False, limit=None):
+def dept_ranking(metric_key, month, ascending=False, limit=None, date_range=None):
     """Best/worst department by a METRICS key, averaged per-department.
 
     BUG FIX (see SESSION_HANDOFF.md): for metric_key="pace_score" with a
@@ -467,7 +521,37 @@ def dept_ranking(metric_key, month, ascending=False, limit=None):
     score formula once. Fixed to the same capped-average-first recompute,
     grouped by department, using the identical single-named-month branch
     condition metric_ranking() uses (a rolling-window "current standing"
-    answer is still correct with no month filter or a multi-month list)."""
+    answer is still correct with no month filter or a multi-month list).
+
+    `date_range` (item B): same additive last-60-days-default support as
+    metric_ranking() — see its docstring."""
+    if date_range is not None:
+        start, end = date_range
+        order = "asc" if ascending else "desc"
+        lim = limit or LIMIT
+        if metric_key == "pace_score":
+            sql = """
+                select dept_name, count(distinct employee_id) as n_employees,
+                       least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value
+                from public.pace_1
+                where worked_day between %(date_start)s and %(date_end)s and shift_type = 'Standard'
+                  and capped_engagement is not null and capped_effectiveness is not null
+                  and capped_discipline is not null and capped_working_hours is not null
+                group by dept_name
+                order by metric_value {order} nulls last
+                limit {lim}
+            """.format(order=order, lim=lim)
+            return run_query(sql, {"date_start": start, "date_end": end})
+        expr, _ = METRICS[metric_key]
+        sql = f"""
+            select dept_name, count(distinct employee_id) as n_employees, {expr} as metric_value
+            from {VIEW}
+            where worked_day between %(date_start)s and %(date_end)s
+            group by dept_name
+            order by metric_value {order} nulls last
+            limit {lim}
+        """
+        return run_query(sql, {"date_start": start, "date_end": end})
     month_list = _month_param(month)
     if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
         order = "asc" if ascending else "desc"
@@ -502,7 +586,7 @@ def compare_depts(dept_a, dept_b, month):
     return [dept_summary(dept_a, month), dept_summary(dept_b, month)]
 
 
-def rm_ranking(metric_key, month, ascending=False, limit=None):
+def rm_ranking(metric_key, month, ascending=False, limit=None, date_range=None):
     """Best/worst reporting-manager team by a METRICS key, averaged per-RM
     team - same shape/pattern as dept_ranking() above, just grouped by
     reporting_manager_name instead of dept_name (new intent: 'which RM team
@@ -511,7 +595,39 @@ def rm_ranking(metric_key, month, ascending=False, limit=None):
     BUG FIX: this was modeled on dept_ranking() and inherited its same
     Jensen's-inequality bug for metric_key="pace_score" (see dept_ranking's
     docstring) - fixed with the identical capped-average-first branch,
-    grouped by reporting_manager_name instead of dept_name."""
+    grouped by reporting_manager_name instead of dept_name.
+
+    `date_range` (item B): same additive last-60-days-default support as
+    metric_ranking()/dept_ranking() — see metric_ranking()'s docstring."""
+    if date_range is not None:
+        start, end = date_range
+        order = "asc" if ascending else "desc"
+        lim = limit or LIMIT
+        if metric_key == "pace_score":
+            sql = """
+                select reporting_manager_name, count(distinct employee_id) as n_employees,
+                       least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value
+                from public.pace_1
+                where worked_day between %(date_start)s and %(date_end)s and shift_type = 'Standard'
+                  and capped_engagement is not null and capped_effectiveness is not null
+                  and capped_discipline is not null and capped_working_hours is not null
+                  and reporting_manager_name is not null
+                group by reporting_manager_name
+                order by metric_value {order} nulls last
+                limit {lim}
+            """.format(order=order, lim=lim)
+            return run_query(sql, {"date_start": start, "date_end": end})
+        expr, _ = METRICS[metric_key]
+        sql = f"""
+            select reporting_manager_name, count(distinct employee_id) as n_employees, {expr} as metric_value
+            from {VIEW}
+            where worked_day between %(date_start)s and %(date_end)s
+              and reporting_manager_name is not null
+            group by reporting_manager_name
+            order by metric_value {order} nulls last
+            limit {lim}
+        """
+        return run_query(sql, {"date_start": start, "date_end": end})
     month_list = _month_param(month)
     if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
         order = "asc" if ascending else "desc"
@@ -2487,10 +2603,24 @@ BUILD_QUERY_METRICS = {
 BUILD_QUERY_DEFAULT_PERIOD_DAYS = 60
 
 
-def _build_query_default_period():
+def default_period_last_60_days():
+    """Shared "no period named at all" default — last 60 days (today
+    inclusive). Item B (SESSION_HANDOFF.md): the matrix-wide default was
+    changed from "current (in-progress) calendar month" to this, since a
+    partial current month frequently produced misleading "not enough data"
+    answers even though 60 real days of usable history exists. Was already
+    used by build_query() (item #57) under the old private name
+    `_build_query_default_period` — renamed to a public, shared helper so
+    other ranking functions (metric_ranking/dept_ranking/rm_ranking) can
+    reuse the exact same window instead of re-deriving it."""
     end = datetime.date.today()
     start = end - datetime.timedelta(days=BUILD_QUERY_DEFAULT_PERIOD_DAYS - 1)
     return start, end
+
+
+# Backward-compatible alias (old private name) — kept in case any other
+# in-repo caller still references it directly.
+_build_query_default_period = default_period_last_60_days
 
 
 def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None, scope=None):

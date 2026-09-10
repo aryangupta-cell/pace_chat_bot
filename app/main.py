@@ -663,6 +663,33 @@ def _first_month(month):
     return month
 
 
+def _no_period_named_at_all(message, session):
+    """True only when THIS message named no month/date reference AND no
+    sticky session context (recent dept/month/date_range carry-forward -
+    see handle_message's own identical check around 'Time-period fallback')
+    supplied one either. Used to distinguish a genuine "nothing specified at
+    all" case (item B, SESSION_HANDOFF.md: matrix-wide default changed from
+    current-in-progress-month to last-60-days) from a month/date the caller
+    already resolved via explicit mention or sticky context, which must be
+    left completely alone. Re-derives the same signals handle_message()
+    already computed (month_mentioned/date_range_mentioned) directly from
+    the raw message text rather than threading extra booleans through
+    answer_intent()'s signature - cheap, side-effect-free, and exactly
+    mirrors the logic already in handle_message()."""
+    date_mentioned = entities.extract_date_range(message)[2]
+    if date_mentioned:
+        return False
+    _, month_mentioned = entities.extract_months(message, default_to_current=False)
+    if month_mentioned:
+        return False
+    if session is not None:
+        if session_store.get_recent_context(session, "date_range") is not None:
+            return False
+        if session_store.get_recent_context(session, "month") is not None:
+            return False
+    return True
+
+
 def _format_months(months):
     """'2026-06','2026-07','2026-08' -> 'Jun+Jul+Aug 2026' (or, if the named
     months span different years, 'Jun 2026+Jan 2027')."""
@@ -2042,16 +2069,28 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     # --- Category B/C: generic metric rankings ---
     if intent in _METRIC_INTENTS:
         metric_key, ascending = _METRIC_INTENTS[intent]
+        # Item B (SESSION_HANDOFF.md): when NO period was named at all (no
+        # explicit mention this turn, no sticky session context either),
+        # default to the last 60 days instead of the old current-(partial)-
+        # month default - scoped locally to this branch (month/date_range
+        # for every OTHER branch in this function are untouched) via
+        # queries.metric_ranking()'s new date_range support.
+        _mr_month, _mr_date_range = month, date_range
+        _mr_scope_note = scope_note
+        if _no_period_named_at_all(message, session):
+            _mr_month = None
+            _mr_date_range = queries.default_period_last_60_days()
+            _mr_scope_note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) + _period_note(None, _mr_date_range)
         rows = queries.metric_ranking(
-            metric_key, dept_name, month, ascending=ascending, employee_ids=employee_ids,
-            limit=limit, reporting_user_id=manager_id if employee_ids is None else None,
+            metric_key, dept_name, _mr_month, ascending=ascending, employee_ids=employee_ids,
+            limit=limit, reporting_user_id=manager_id if employee_ids is None else None, date_range=_mr_date_range,
         )
         label = queries.METRICS[metric_key][1]
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500,
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=500,
                        _metric_key=metric_key, _ascending=ascending, _label=label, _rid=manager_id):
                 _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
-                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None)
+                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None, date_range=date_range)
                 return f"Ranked by {_label}{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_metric_rows(_rows, _metric_key)}", _rows
             # Direction-flip closure for bare superlative follow-ups
             # ("least"/"most"/"highest"/"lowest" with nothing else) - see
@@ -2063,18 +2102,18 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             # matcher (which previously always misrouted a bare direction
             # word to "productive_low"/"productive_high" regardless of what
             # the real prior metric was - see SESSION_HANDOFF.md item #63).
-            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500,
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=500,
                                  _metric_key=metric_key, _ascending=(not ascending), _label=label, _rid=manager_id):
                 _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
-                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None)
+                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None, date_range=date_range)
                 _dir_word = "lowest" if _ascending else "highest"
                 return (f"Ranked by {_label} ({_dir_word} first)"
                         f"{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n"
                         f"{format_metric_rows(_rows, _metric_key)}", _rows)
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
                                          answer_kind="list", ascending=ascending,
-                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
-        return ChatResponse(reply=f"Ranked by {label}{scope_note}:\n\n{format_metric_rows(rows, metric_key)}", rows=rows)
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range)
+        return ChatResponse(reply=f"Ranked by {label}{_mr_scope_note}:\n\n{format_metric_rows(rows, metric_key)}", rows=rows)
 
     # --- Category A: single-employee lookups ---
     # --- PS (ps_worked_flag_day) exclusion intents (Part 3) ---
@@ -2329,7 +2368,12 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     if intent in ("dept_best", "dept_worst", "dept_avg"):
         metric_key = "pace_score"
         ascending = intent == "dept_worst"
-        rows = queries.dept_ranking(metric_key, month, ascending=ascending, limit=limit)
+        # Item B: last-60-days default when nothing was named at all (see
+        # the _METRIC_INTENTS branch above for the full rationale).
+        _dr_month, _dr_date_range = month, None
+        if _no_period_named_at_all(message, session):
+            _dr_month, _dr_date_range = None, queries.default_period_last_60_days()
+        rows = queries.dept_ranking(metric_key, _dr_month, ascending=ascending, limit=limit, date_range=_dr_date_range)
         return ChatResponse(reply=f"Departments ranked by {queries.METRICS[metric_key][1]}:\n\n{format_dept_rows(rows, metric_key)}", rows=rows)
 
     # RM (reporting-manager) team ranking - "which RM team has the most/
@@ -2343,7 +2387,11 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     if intent in ("rm_ranking_best", "rm_ranking_worst"):
         metric_key = "pace_score"
         ascending = intent == "rm_ranking_worst"
-        rows = queries.rm_ranking(metric_key, month, ascending=ascending, limit=limit)
+        # Item B: same last-60-days default as dept_best/dept_worst above.
+        _rr_month, _rr_date_range = month, None
+        if _no_period_named_at_all(message, session):
+            _rr_month, _rr_date_range = None, queries.default_period_last_60_days()
+        rows = queries.rm_ranking(metric_key, _rr_month, ascending=ascending, limit=limit, date_range=_rr_date_range)
         return ChatResponse(reply=f"Reporting-manager teams ranked by {queries.METRICS[metric_key][1]}:\n\n{format_rm_rows(rows, metric_key)}", rows=rows)
 
     if intent == "dept_count":
@@ -2441,14 +2489,30 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         return ChatResponse(reply=f"New joiners{scope_note.replace(_period_note(month, date_range), '')}:\n\n{format_new_joiners(rows)}", rows=rows)
 
     if intent in ("improving", "declining"):
+        # Item B (SESSION_HANDOFF.md): this ranking is inherently a
+        # month-vs-prior-month DELTA (queries.pace_score_trend_ranking()
+        # internally computes prev_month = _prev_month(month) and compares
+        # the two) - a plain date-range window doesn't map onto that
+        # semantics, so "last 60 days" isn't literally applicable here.
+        # Judgment call, flagged in SESSION_HANDOFF.md: when NO period was
+        # named at all, use the last FULLY COMPLETED calendar month (vs the
+        # one before it) instead of the old default of the current,
+        # still-in-progress month (vs last month) - this is exactly the
+        # same underlying fix or item B everywhere else (avoid comparing
+        # against a partial/scarce-data month), applied in the way that
+        # actually fits this function's month-over-month mechanics.
+        _trend_month = _first_month(month)
+        if _no_period_named_at_all(message, session):
+            _trend_month = queries._prev_month(f"{datetime.date.today().year:04d}-{datetime.date.today().month:02d}")
         rows, meta = queries.pace_score_trend_ranking(
-            dept_name, _first_month(month), declining=(intent == "declining"),
+            dept_name, _trend_month, declining=(intent == "declining"),
             reporting_user_id=manager_id if employee_ids is None else None,
             employee_ids=employee_ids, limit=limit,
         )
         label = "declining" if intent == "declining" else "improving"
+        _trend_scope_note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) + _period_note(_trend_month, None)
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500,
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_trend_month, date_range=None, limit=500,
                        _declining=(intent == "declining"), _rid=manager_id, _label=label):
                 _rows, _meta = queries.pace_score_trend_ranking(
                     dept_name, _first_month(month), declining=_declining,
@@ -2457,8 +2521,8 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 )
                 return f"Who is {_label}{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_trend_rows(_rows, _meta)}", _rows
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
-                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
-        return ChatResponse(reply=f"Who is {label}{scope_note}:\n\n{format_trend_rows(rows, meta)}", rows=rows)
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_trend_month, date_range=None)
+        return ChatResponse(reply=f"Who is {label}{_trend_scope_note}:\n\n{format_trend_rows(rows, meta)}", rows=rows)
 
     # --- Category A (new): Leave & absence ---
     if intent in ("leave_emp_check", "call_emp", "visit_emp", "wfh_emp", "d_score_emp",
