@@ -69,7 +69,7 @@ _VAGUE_LIST_EXPAND_STRICT = re.compile(
     r"|their names list\b"
     r"|names please\b"
     r"|^names\??\s*$"
-    r"|give me the (full |whole )?list\b"
+    r"|give me (the )?(full |whole )?list\b(?!\s+of\s+\w)"
     r"|give me the rest of the list\b"
     r"|^full list\b"
     r"|full list please\b"
@@ -673,17 +673,73 @@ def _format_build_query_rows(rows, dimension, metrics, name_label=None):
     return _render_table(headers, data)
 
 
-def build_query_overview_reply(dimension, name, message="", period=None):
+_WANTS_LIST_PATTERN = re.compile(r"\blist\b", re.IGNORECASE)
+
+
+def build_query_overview_reply(dimension, name, message="", period=None, session=None):
     """Shared helper: runs queries.build_query() for a single named
     employee/RM/department scope and formats a reply - used both by the
     'how is ai labs doing'-style bug fix (redirecting a failed single-
     employee lookup to a department/RM overview when the name actually
     matches a department/RM instead) and by the new general fallback engine
-    in handle_message()."""
+    in handle_message().
+
+    Item #59 fixes (both reuse the EXISTING session_store.last_list/
+    sticky-context mechanism the older ranking functions already use -
+    nothing new invented here):
+      1. Wires this reply into session_store.set_last_list() so a follow-up
+         like "give me list" has real context to continue from (previously
+         build_query()'s output never registered a last_list at all, so any
+         such follow-up fell straight to the generic fallback).
+      2. Response-shape switching: if the CURRENT message explicitly asks
+         for a "list" (e.g. "give me list of ai labs") and the scope is a
+         department/RM (not already a single employee), answer with the
+         per-employee breakdown for that scope instead of the aggregate
+         summary - same "does this message want a list or a summary" idea
+         as the existing dept_summary/ranking switch a few lines below in
+         handle_message() (items #52/#53), just applied to build_query()'s
+         own summary/list duality.
+    """
     metrics = _detect_build_query_metrics(message)
     filters = _detect_build_query_filters(message)
-    rows = queries.build_query(dimension, metrics, filters=filters, period=period, name_filter=name, limit=1)
-    return _format_build_query_rows(rows, dimension, metrics, name_label=name), rows
+    wants_list = dimension != "employee" and _WANTS_LIST_PATTERN.search(message or "") is not None
+
+    def _summary_reply():
+        rows = queries.build_query(dimension, metrics, filters=filters, period=period, name_filter=name, limit=1)
+        return _format_build_query_rows(rows, dimension, metrics, name_label=name), rows
+
+    def _list_reply(limit=500):
+        rows = queries.build_query("employee", metrics, filters=filters, period=period,
+                                    scope=(dimension, name), limit=limit)
+        if not rows:
+            return f"No employees found for {name} in this period.", rows
+        table_reply = _format_build_query_rows(rows, "employee", metrics, name_label=None)
+        return f"{name} — employee list:\n\n{table_reply}", rows
+
+    if wants_list:
+        reply, rows = _list_reply()
+        answer_kind = "list"
+    else:
+        reply, rows = _summary_reply()
+        answer_kind = "count"
+
+    if session is not None:
+        def _rerun_list(dept_name=None, employee_ids=None, team_label=None, month=None, date_range=None, limit=500):
+            return _list_reply(limit=limit or 500)
+
+        def _rerun_same(dept_name=None, employee_ids=None, team_label=None, month=None, date_range=None, limit=500):
+            return (_list_reply() if wants_list else _summary_reply())
+
+        session_store.set_last_list(
+            session, kind="build_query", rerun_list=_rerun_list, rerun_same=_rerun_same, answer_kind=answer_kind,
+            dept_name=(name if dimension == "department" else None),
+            team_label=(f"{name}'s team" if dimension == "rm" else None),
+            date_range=period,
+        )
+        if dimension == "department":
+            session_store.push_context(session, dept_name=name)
+
+    return reply, rows
 
 
 def format_gainer_loser_ranking(gainers, losers, meta, scope_note, directions, filter_footer):
@@ -989,15 +1045,18 @@ def format_day_list(rows, flag_key, scope_note):
 
 
 def format_status_list(rows, statuses, scope_note):
-    label = "/".join(statuses)
+    # statuses=None/empty means NO status filter (item #59) - "all" rather
+    # than the old hardcoded Red/Black default.
+    label = "/".join(statuses) if statuses else "all statuses"
+    subject = f"currently {label}" if statuses else "listed (all statuses)"
     if not rows:
-        return f"No one is currently {label}{scope_note}."
+        return f"No one is {subject}{scope_note}."
     if len(rows) == 1:
         r = rows[0]
         return f"{r['emp_name']} ({r['dept_name']}) — {r['overall_std_pace_status']}"
     headers = ["#", "Employee", "Department", "Status"]
     data = [[i, r["emp_name"], r["dept_name"], r["overall_std_pace_status"]] for i, r in enumerate(rows, 1)]
-    return f"Employees currently {label}{scope_note}:\n\n" + _render_table(headers, data)
+    return f"Employees {subject}{scope_note}:\n\n" + _render_table(headers, data)
 
 
 def format_status_distribution(rows):
@@ -1705,7 +1764,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             # that employee". Only fires when neither the bulk-list nor
             # active-ranking-context branch above already handled it.
             if dept_name and not (_bulk_request or _ranking_context):
-                reply, rows = build_query_overview_reply("department", dept_name, message, period=date_range)
+                reply, rows = build_query_overview_reply("department", dept_name, message, period=date_range, session=session)
                 return ChatResponse(reply=reply, rows=rows)
             if _metric_key is not None and (_bulk_request or _ranking_context):
                 rows = queries.metric_ranking(
@@ -2311,10 +2370,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             # no keyword requirement), so redirect to a department overview
             # via the new build_query() engine instead of failing.
             if dept_name:
-                reply, rows = build_query_overview_reply("department", dept_name, message, period=date_range)
+                reply, rows = build_query_overview_reply("department", dept_name, message, period=date_range, session=session)
                 return ChatResponse(reply=reply, rows=rows)
             if manager_id:
-                reply, rows = build_query_overview_reply("rm", manager_name, message, period=date_range)
+                reply, rows = build_query_overview_reply("rm", manager_name, message, period=date_range, session=session)
                 return ChatResponse(reply=reply, rows=rows)
             return ChatResponse(reply="I couldn't find that employee — please give me their exact full name or employee code.")
         detail = queries.employee_detail(emp_id, month)
@@ -2470,8 +2529,20 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
 
     # --- NEW capability 2: status-category filters ---
     if intent in ("status_list", "status_count", "status_distribution", "status_transitions"):
+        # item #59 fix: no color word named in the message used to silently
+        # default to ["Red", "Black"] here, narrowing an unqualified request
+        # ("list of all the employees") to only Red/Black-status employees
+        # and truncating the real headcount. `statuses=None` now means NO
+        # status filter at all (every current status) - see
+        # queries.status_list()/status_count()'s own docstrings. Scoped only
+        # to status_list/status_count: status_transitions computes its own
+        # from_status/to_status independently just below and never reads
+        # this `statuses` variable, and status_distribution doesn't use it
+        # either, so neither is affected by this default change - a message
+        # that genuinely needs two named statuses for a transition still
+        # requires them, this default never substitutes for that.
         statuses = [s.capitalize() for s in re.findall(r"\b(black|red|amber|green)\b", message, re.I)]
-        statuses = list(dict.fromkeys(statuses)) or ["Red", "Black"]
+        statuses = list(dict.fromkeys(statuses)) or None
         st_scope_note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else " company-wide")
 
         def _status_note(team_label, dept_name):
@@ -2490,7 +2561,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
 
         if intent == "status_count":
             n = queries.status_count(statuses, dept_name=dept_name, employee_ids=employee_ids)
-            label = "/".join(statuses)
+            label = "/".join(statuses) if statuses else "all-status"
             if session is not None:
                 def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=500, _statuses=statuses):
                     _rows = queries.status_list(_statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
@@ -2498,7 +2569,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
 
                 def _rerun_same(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=500, _statuses=statuses):
                     _n = queries.status_count(_statuses, dept_name=dept_name, employee_ids=employee_ids)
-                    _label = "/".join(_statuses)
+                    _label = "/".join(_statuses) if _statuses else "all-status"
                     return f"{_n} employee(s) are currently {_label}{_status_note(team_label, dept_name)}.", [{"n": _n}]
 
                 session_store.set_last_list(session, kind="status", rerun_list=_rerun_list, rerun_same=_rerun_same,
@@ -3001,13 +3072,13 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         _bq_date_start, _bq_date_end, _bq_date_mentioned = entities.extract_date_range(message)
         _bq_period = (_bq_date_start, _bq_date_end) if _bq_date_mentioned else None
         if _bq_emp_id:
-            reply, rows = build_query_overview_reply("employee", _bq_emp_id, message, period=_bq_period)
+            reply, rows = build_query_overview_reply("employee", _bq_emp_id, message, period=_bq_period, session=session)
             return ChatResponse(reply=reply, rows=rows)
         if _bq_dept_name and not _bq_dept_candidates:
-            reply, rows = build_query_overview_reply("department", _bq_dept_name, message, period=_bq_period)
+            reply, rows = build_query_overview_reply("department", _bq_dept_name, message, period=_bq_period, session=session)
             return ChatResponse(reply=reply, rows=rows)
         if _bq_mgr_id:
-            reply, rows = build_query_overview_reply("rm", _bq_mgr_name, message, period=_bq_period)
+            reply, rows = build_query_overview_reply("rm", _bq_mgr_name, message, period=_bq_period, session=session)
             return ChatResponse(reply=reply, rows=rows)
         return ChatResponse(reply=intents.FALLBACK_MESSAGE)
 

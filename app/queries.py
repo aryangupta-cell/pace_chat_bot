@@ -1837,27 +1837,34 @@ def _latest_status_cte():
 
 def status_list(statuses, dept_name=None, employee_ids=None, limit=None):
     """Employees whose CURRENT (latest worked_day) overall_std_pace_status is
-    in `statuses` (e.g. ['Red'])."""
+    in `statuses` (e.g. ['Red']). `statuses=None` (or empty) means NO status
+    filter at all - i.e. every current status - NOT the old hardcoded
+    ["Red","Black"] default (item #59 fix: that default silently narrowed a
+    bare "list of all employees"-style request to only Red/Black employees,
+    truncating the real headcount)."""
     lim = limit or 200
     sql = f"""
         with {_latest_status_cte()}
         select employee_id, emp_name, dept_name, overall_std_pace_status
         from latest
-        where overall_std_pace_status = any(%(statuses)s)
+        where (%(statuses)s is null or overall_std_pace_status = any(%(statuses)s))
         order by emp_name
         limit {lim}
     """
-    return run_query(sql, {"dept_name": dept_name, "employee_ids": employee_ids, "statuses": statuses})
+    return run_query(sql, {"dept_name": dept_name, "employee_ids": employee_ids, "statuses": statuses or None})
 
 
 def status_count(statuses, dept_name=None, employee_ids=None):
+    """`statuses=None` (or empty) means NO status filter - counts everyone in
+    scope, not just the old hardcoded ["Red","Black"] default - see
+    status_list() docstring (item #59)."""
     sql = f"""
         with {_latest_status_cte()}
         select count(*) as n
         from latest
-        where overall_std_pace_status = any(%(statuses)s)
+        where (%(statuses)s is null or overall_std_pace_status = any(%(statuses)s))
     """
-    rows = run_query(sql, {"dept_name": dept_name, "employee_ids": employee_ids, "statuses": statuses})
+    rows = run_query(sql, {"dept_name": dept_name, "employee_ids": employee_ids, "statuses": statuses or None})
     return rows[0]["n"] if rows else 0
 
 
@@ -2373,7 +2380,7 @@ def _build_query_default_period():
     return start, end
 
 
-def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None):
+def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None, scope=None):
     """General parametrized engine: SELECT <metrics> GROUP BY <dimension> FROM
     public.pace_1 WHERE <filters> AND <period>.
 
@@ -2392,6 +2399,12 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         to scope to one group (e.g. a single department's overview).
     limit: max rows returned (default LIMIT for a ranking-style call; a
         single-name_filter call naturally returns <= 1 row regardless).
+    scope: optional (scope_dimension, scope_name) tuple - an ADDITIONAL
+        filter on a DIFFERENT dimension than the one being grouped by, e.g.
+        dimension="employee" with scope=("department", "AI Labs") to list
+        every employee IN that department (item #59: response-shape
+        switching from a department summary to its per-employee list reuses
+        this, same rerun_list mechanism as the older ranking functions).
 
     Returns a list of dict rows, one per group, each with the dimension's
     key column(s), `n_employees`, and one column per requested metric
@@ -2446,6 +2459,12 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     if dimension in ("rm", "department"):
         col = "reporting_manager_name" if dimension == "rm" else "dept_name"
         where.append(f"{col} is not null")
+
+    if scope:
+        scope_dim, scope_name = scope
+        scope_col = {"employee": "employee_id", "rm": "reporting_manager_name", "department": "dept_name"}[scope_dim]
+        where.append(f"{scope_col} = %(scope_name)s")
+        params["scope_name"] = scope_name
 
     where_clause = " and ".join(where) if where else "true"
 
