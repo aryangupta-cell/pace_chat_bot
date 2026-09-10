@@ -204,6 +204,80 @@ def _handle_bare_direction_followup(message, session):
     )
     return ChatResponse(reply=reply, rows=rows)
 
+# --- List-population pronoun follow-up ("their pace score" / "there pace
+# score" / "what about them") (item #67) ---
+# Extends the item #61/#62 sticky-context meta-followup mechanism to a
+# related but distinct case: "there"/"their"/"them" (or a plausible typo)
+# referring back to a just-shown LIST answer - a department/RM-team roster
+# (roster_list, item #66), a ranking, a gainer/loser list, a filtered
+# subset - asking for a DIFFERENT metric for that SAME population, e.g.
+# "give me complete list of ai labs employees" -> "their pace score". This
+# is deliberately NOT the same mechanism as _PRONOUN_PATTERN/
+# _extract_employee_ctx above, which only ever inherits a single employee_id
+# pushed via push_context (set for an individual lookup, never for a
+# department/RM-team list answer) - there's no collision risk between the
+# two: this one only fires when session_store.last_list actually carries a
+# dept_name/team_label (a population scope), the other only when a single
+# employee_id was pushed to recent context.
+_LIST_POPULATION_PRONOUN_PATTERN = re.compile(
+    r"\b(their|thier|thear|theyre|there|them|thm)\b", re.IGNORECASE
+)
+
+
+def _handle_list_pronoun_metric_followup(message, session):
+    """See _LIST_POPULATION_PRONOUN_PATTERN above. Checked BEFORE intent
+    classification, same slot as _handle_filter_meta_followup/
+    _handle_bare_direction_followup, so a plural population reference can
+    never be misrouted to an unrelated fresh single-employee or
+    company-wide query. Reuses build_query_overview_reply() (item #64/#66's
+    engine) - no parallel query mechanism is built here.
+
+    Returns None (falls through to normal routing) when: no pronoun match,
+    no metric keyword named (too ambiguous to guess at, same non-guessing
+    discipline as item #61's topic gate), no prior list, or the prior list's
+    scope carries neither a dept_name nor a team_label (e.g. a bare
+    company-wide roster, or a single-employee context, or an untracked
+    answer shape) - a known, narrow scope limit, not a silent guess.
+    """
+    if session is None:
+        return None
+    text_l = (message or "").lower().strip()
+    if not _LIST_POPULATION_PRONOUN_PATTERN.search(text_l):
+        return None
+    if not any(re.search(pat, text_l) for _, pat in _BUILD_QUERY_METRIC_PATTERNS):
+        return None
+    last_list = session_store.get_last_list(session)
+    if last_list is None:
+        return None
+    dept_name = last_list.get("dept_name")
+    team_label = last_list.get("team_label")
+    if dept_name:
+        dimension, name = "department", dept_name
+    elif team_label:
+        # team_label is stored as "<Manager Name>'s team" (see
+        # build_query_overview_reply/answer_intent) - strip the suffix back
+        # to the bare manager name build_query_overview_reply("rm", ...)
+        # expects.
+        dimension, name = "rm", re.sub(r"'s team$", "", team_label)
+    else:
+        return None
+    # Prior list's own period (only ever populated for build_query-based
+    # answers - see build_query_overview_reply's set_last_list call). Ranking-
+    # kind answers store a bare "month" string instead, which isn't the
+    # (start, end) shape build_query()'s period param expects, so it's
+    # deliberately not threaded through here - the new metric query falls
+    # back to build_query()'s own last-60-days default (item #65) in that
+    # case, a reasonable secondary approximation given the population/scope
+    # (the primary correctness concern here) is still exactly preserved.
+    period = last_list.get("date_range")
+    # Force the per-employee list shape (not a single aggregate row) - the
+    # user just saw a roster of NAMES, so "their pace score" reads as "show
+    # me each of their pace scores," matching build_query_overview_reply's
+    # own wants_list branch (dimension != "employee" + a "list" cue).
+    synthetic_message = f"{message} list"
+    reply, rows = build_query_overview_reply(dimension, name, synthetic_message, period=period, session=session)
+    return ChatResponse(reply=reply, rows=rows)
+
 # A narrower "re-scope only" follow-up ("what about last month", "what about
 # next week") - no explicit ask for names/a list, just a change of time
 # period/department applied to the SAME prior answer, kept in its ORIGINAL
@@ -3394,6 +3468,16 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     _bare_direction_response = _handle_bare_direction_followup(message, session)
     if _bare_direction_response is not None:
         return _bare_direction_response
+
+    # --- List-population pronoun follow-up ("their pace score" / "there
+    # pace score" right after a department/RM-team roster or ranking, item
+    # #67) - checked BEFORE intent classification, same reasoning as the two
+    # checks immediately above: a plural population reference must never be
+    # misrouted by the fuzzy matcher or the LLM into an unrelated fresh
+    # query. See _handle_list_pronoun_metric_followup above. ---
+    _list_pronoun_response = _handle_list_pronoun_metric_followup(message, session)
+    if _list_pronoun_response is not None:
+        return _list_pronoun_response
 
     # --- LLM-first intent classification (Gemini), with rule-based fallback
     # and safety cross-check ---
