@@ -177,9 +177,14 @@ than guessing when:
     CANNOT correctly apply a department/employee scope plus a custom time
     period — do NOT route a scoped, period-qualified "pace status" question
     to any of those.
-  - The message asks for a "day level" / "day-level" / "event level" pace
-    score aggregated over a MULTI-DAY period (not a single specific day) —
-    distinct from the existing emp_pace_score/employee_day_summary intents.
+  - The message contains the words "day level" / "day-level" / "event
+    level" anywhere near "pace score" — for ANY dimension (employee, RM,
+    department, or company), and REGARDLESS of whether a period is also
+    named. This is a DISTINCT metric (the per-row event-level score,
+    averaged) from the plain "PACE score" the existing dept_avg/dept_summary/
+    team_how_doing/emp_pace_score intents compute — never silently treat a
+    "day level"/"event level" pace-score question as if the "day level"
+    qualifier weren't there.
   - The message asks for a "precomputed" or "60 day" / "60-day" department
     score or status specifically (distinct wording from the existing
     dept_avg/dept_summary intents, which compute a different, live-
@@ -381,6 +386,9 @@ _FEW_SHOT_EXAMPLES = [
     ("what pace status banding is Rahul Kanwaria in over the last 2 weeks", {"intent": "none", "entities": {"employee": "Rahul Kanwaria", "month": "last 2 weeks"}, "confidence": 0.2}),
     ("precomputed 60 day dept score for Billing", {"intent": "none", "entities": {"department": "Billing", "metric": "dept_score_60_days_precomputed"}, "confidence": 0.2}),
     ("day level pace score for the SCM department over the last week", {"intent": "none", "entities": {"department": "SCM", "month": "last week", "metric": "pace_score_day_level"}, "confidence": 0.2}),
+    ("day level pace score for Accounts department over the last 2 weeks", {"intent": "none", "entities": {"department": "Accounts", "month": "last 2 weeks", "metric": "pace_score_day_level"}, "confidence": 0.2}),
+    ("event level pace score for my team over the last month", {"intent": "none", "entities": {"month": "last month", "metric": "pace_score_day_level"}, "confidence": 0.2}),
+    ("precomputed 60 day dept score for Founders Office", {"intent": "none", "entities": {"department": "Founders Office", "metric": "dept_score_60_days_precomputed"}, "confidence": 0.2}),
 ]
 
 # ---------------------------------------------------------------------------
