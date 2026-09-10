@@ -1001,6 +1001,18 @@ def _detect_build_query_filters(message):
     return filters
 
 
+# capped_* metrics are internal 0-1(ish) fractions, not whole-number scores
+# or percentages - _fmt()'s default nd=0 rounding turns e.g. 0.887 into the
+# misleading "1". Item #72 fix (found live during item #71's own testing,
+# flagged there as a cosmetic bug, fixed here): format these with 2 decimal
+# places instead, everything else keeps the existing whole-number rounding.
+_BUILD_QUERY_DECIMAL_METRICS = {"capped_engagement", "capped_effectiveness", "capped_discipline"}
+
+
+def _fmt_bq(v, metric_key):
+    return _fmt(v, nd=2) if metric_key in _BUILD_QUERY_DECIMAL_METRICS else _fmt(v)
+
+
 def _format_build_query_rows(rows, dimension, metrics, name_label=None):
     if not rows:
         return f"No data found for {name_label or 'that scope'} in this period."
@@ -1011,12 +1023,12 @@ def _format_build_query_rows(rows, dimension, metrics, name_label=None):
                "company": None}[dimension]
     if len(rows) == 1 and name_label:
         row = rows[0]
-        parts = ", ".join(f"{_BUILD_QUERY_METRIC_LABELS[m]}: {_fmt(row.get(m))}" for m in metrics)
+        parts = ", ".join(f"{_BUILD_QUERY_METRIC_LABELS[m]}: {_fmt_bq(row.get(m), m)}" for m in metrics)
         return f"{name_label} — {row.get('n_employees')} employee(s)\n{parts}"
     headers = [dimension.capitalize()] + [_BUILD_QUERY_METRIC_LABELS[m] for m in metrics]
     data = []
     for r in rows:
-        data.append([r.get(dim_col)] + [_fmt(r.get(m)) for m in metrics])
+        data.append([r.get(dim_col)] + [_fmt_bq(r.get(m), m) for m in metrics])
     return _render_table(headers, data)
 
 

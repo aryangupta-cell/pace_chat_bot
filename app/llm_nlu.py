@@ -156,6 +156,38 @@ If the message doesn't match any listed intent (e.g. small talk, an
 unrelated question, or something this system genuinely has no capability
 for), return intent "none".
 
+IMPORTANT — do not force-fit new vocabulary onto a superficially-similar OLD
+intent. A separate, more precise engine downstream handles anything you
+return "none" for, so guessing wrong here silently gives the user an
+incorrect number. Specifically return "none" (low/zero confidence) rather
+than guessing when:
+  - The message explicitly says "capped" before a metric name (e.g. "capped
+    effectiveness", "capped engagement", "capped discipline", "internal
+    capped X"). These are a DISTINCT raw internal metric family from the
+    existing engagement_pct/effectiveness_pct/discipline_pct intents
+    (emp_effectiveness, effectiveness_high/low, engagement_high/low,
+    most_disciplined/least_disciplined, etc.) — do NOT route a "capped X"
+    question to any of those percentage-based intents.
+  - The message asks for "pace status" (Black/Red/Amber/Green banding) for a
+    specific department/employee/RM/company SCOPED TO A NAMED TIME PERIOD
+    (e.g. "pace status for AI Labs over the last 30 days", "status banding
+    for Accounts last 2 weeks"). The existing status_list/status_count/
+    status_distribution/status_emp intents only handle unscoped or literal
+    color-name questions ("who is red status", "how many are black") and
+    CANNOT correctly apply a department/employee scope plus a custom time
+    period — do NOT route a scoped, period-qualified "pace status" question
+    to any of those.
+  - The message asks for a "day level" / "day-level" / "event level" pace
+    score aggregated over a MULTI-DAY period (not a single specific day) —
+    distinct from the existing emp_pace_score/employee_day_summary intents.
+  - The message asks for a "precomputed" or "60 day" / "60-day" department
+    score or status specifically (distinct wording from the existing
+    dept_avg/dept_summary intents, which compute a different, live-
+    recomputed number).
+When genuinely unsure whether a message matches an existing intent well
+versus needing this more precise handling, prefer "none" with low confidence
+over a confident wrong guess.
+
 Respond with JSON matching the given schema. `confidence` is your own 0.0-1.0
 estimate of how sure you are about the intent choice."""
 
@@ -338,6 +370,17 @@ _FEW_SHOT_EXAMPLES = [
     # downstream by entities.py, not by the LLM.
     ("pace score for the whole company over the last 3 weeks", {"intent": "none", "entities": {"metric": "pace_score", "month": "last 3 weeks"}, "confidence": 0.35}),
     ("how did IT-Development do between 1 Aug and 20 Aug", {"intent": "none", "entities": {"department": "IT-Development", "month": "between 1 Aug and 20 Aug"}, "confidence": 0.35}),
+    # --- Round (item #72): guardrail examples — do NOT force-fit "capped X"
+    # or scoped/period-qualified "pace status" onto an old percentage/status
+    # intent; return "none" so the dedicated extraction-LLM cascade step
+    # (llm_nlu.extract_build_query) gets a chance to handle these precisely.
+    ("capped effectiveness for the whole company", {"intent": "none", "entities": {"metric": "capped_effectiveness"}, "confidence": 0.2}),
+    ("what's the internal capped engagement value for Accounts", {"intent": "none", "entities": {"department": "Accounts", "metric": "capped_engagement"}, "confidence": 0.2}),
+    ("capped discipline for Rahul Kanwaria", {"intent": "none", "entities": {"employee": "Rahul Kanwaria", "metric": "capped_discipline"}, "confidence": 0.2}),
+    ("pace status for AI Labs over the last 30 days", {"intent": "none", "entities": {"department": "AI Labs", "month": "last 30 days"}, "confidence": 0.2}),
+    ("what pace status banding is Rahul Kanwaria in over the last 2 weeks", {"intent": "none", "entities": {"employee": "Rahul Kanwaria", "month": "last 2 weeks"}, "confidence": 0.2}),
+    ("precomputed 60 day dept score for Billing", {"intent": "none", "entities": {"department": "Billing", "metric": "dept_score_60_days_precomputed"}, "confidence": 0.2}),
+    ("day level pace score for the SCM department over the last week", {"intent": "none", "entities": {"department": "SCM", "month": "last week", "metric": "pace_score_day_level"}, "confidence": 0.2}),
 ]
 
 # ---------------------------------------------------------------------------
