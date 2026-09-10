@@ -937,6 +937,14 @@ _BUILD_QUERY_METRIC_LABELS = {
     "discipline_pct": "discipline %", "working_pct": "working hours %", "LC": "late-comings",
     "EL": "early leavings", "DH": "deficient-hour days", "working_hours": "total working hours",
     "productive_minutes": "avg productive minutes",
+    # Item #70 gap-fill metrics (this round) — reachable only via the new
+    # extraction-LLM cascade step (_extraction_llm_reply), not via
+    # _detect_build_query_metrics()'s keyword patterns, since these are
+    # narrower/internal-facing metrics not worth adding regex keywords for.
+    "pace_status": "PACE status", "capped_engagement": "capped engagement (internal)",
+    "capped_effectiveness": "capped effectiveness (internal)", "capped_discipline": "capped discipline (internal)",
+    "pace_score_day_level": "avg day-level PACE score", "dept_score_60_days_precomputed": "precomputed dept score (60d)",
+    "dept_status_60_days_derived": "derived dept status (60d)",
 }
 
 _BUILD_QUERY_METRIC_PATTERNS = [
@@ -1085,6 +1093,152 @@ def build_query_overview_reply(dimension, name, message="", period=None, session
         if dimension == "department":
             session_store.push_context(session, dept_name=name)
 
+    return reply, rows
+
+
+def _month_str_to_range(month_str):
+    """'YYYY-MM' -> (first_day, last_day) date tuple. Small local helper -
+    the extraction-LLM cascade step (item #70) needs to turn a resolved
+    month string into build_query()'s (start,end) period shape; every other
+    caller in this codebase passes month/date_range separately into
+    queries._period_filter() instead, so this conversion didn't exist yet."""
+    import calendar
+    year, mo = int(month_str[:4]), int(month_str[5:7])
+    last_day = calendar.monthrange(year, mo)[1]
+    return datetime.date(year, mo, 1), datetime.date(year, mo, last_day)
+
+
+def _extraction_llm_reply(raw_message, message, session):
+    """Item #70: the new extraction-LLM cascade step. Called only when both
+    the rule-based matcher and llm_nlu.classify() found nothing usable
+    (intent is None), and strictly BEFORE sql_fallback.answer() (see the
+    ordering judgment call documented in SESSION_HANDOFF.md item #70/this
+    round). Returns (reply, rows) on success, or None to let the cascade
+    fall through to sql_fallback.answer() next - on ANY validation failure,
+    hallucinated field, or LLM/network error, this returns None rather than
+    raising or guessing, per the standing hard-safety contract.
+    """
+    sticky = (session or {}).get("sticky_context") or {}
+    hint_bits = []
+    if sticky.get("dept_name"):
+        hint_bits.append(f"currently discussing department: {sticky['dept_name']}")
+    if sticky.get("employee_name"):
+        hint_bits.append(f"currently discussing employee: {sticky['employee_name']}")
+    context_hint = "; ".join(hint_bits) or None
+
+    try:
+        extracted = llm_nlu.extract_build_query(raw_message, context_hint=context_hint)
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception("llm_nlu.extract_build_query() raised unexpectedly")
+        return None
+    if not extracted:
+        return None
+
+    dimension = extracted.get("dimension")
+    if dimension not in queries.BUILD_QUERY_DIMENSIONS:
+        return None  # hallucinated dimension - fail safe, fall through
+
+    # Validate every extracted metric against the REAL metric-key set (not a
+    # hand-duplicated list) - drop anything invalid rather than crashing;
+    # empty after filtering -> the same "defaults to pace_score" convention
+    # _detect_build_query_metrics() already uses.
+    valid_metric_keys = set(queries.BUILD_QUERY_METRICS.keys()) | {
+        "pace_score", "pace_status", "dept_status_60_days_derived",
+    }
+    metrics = [m for m in (extracted.get("metrics") or []) if m in valid_metric_keys]
+    if not metrics:
+        metrics = ["pace_score"]
+    # dept_status_60_days_derived / dept_score_60_days_precomputed only make
+    # sense for dimension="department" - drop them otherwise rather than
+    # letting build_query() raise a confusing SQL error downstream.
+    if dimension != "department":
+        metrics = [m for m in metrics if m not in ("dept_status_60_days_derived", "dept_score_60_days_precomputed")]
+        if not metrics:
+            metrics = ["pace_score"]
+
+    # Never trust the LLM's own filter values blindly beyond the enum the
+    # schema already constrains them to - queries.build_query() itself
+    # validates/defaults these further, so just pass through.
+    filters = extracted.get("filters") or {}
+
+    # Re-parse period_phrase through the EXISTING, already-tested date
+    # parsers - never trust LLM date arithmetic directly.
+    period = None
+    phrase = extracted.get("period_phrase")
+    if phrase:
+        d_start, d_end, mentioned = entities.extract_date_range(phrase)
+        if mentioned:
+            period = (d_start, d_end)
+        else:
+            month_str, mentioned_m = entities.extract_month(phrase, default_to_current=False)
+            if mentioned_m and month_str:
+                period = _month_str_to_range(month_str)
+        # If the phrase was named but genuinely unparseable, period stays
+        # None -> build_query() defaults to last 60 days (documented, not a
+        # crash) rather than us guessing.
+
+    # Re-resolve dimension_name through the EXISTING fuzzy-safe extraction
+    # functions against the ORIGINAL message - never trust the LLM's own
+    # name transcription directly, same fallback_text pattern used
+    # everywhere else in this file.
+    name_text = extracted.get("dimension_name") or message
+    name_filter = None
+    if dimension == "employee":
+        try:
+            emp_id, emp_name = entities.extract_employee(name_text, fallback_text=raw_message)
+        except entities.Ambiguous as e:
+            return (
+                f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                [],
+            )
+        if not emp_id and extracted.get("dimension_name"):
+            # LLM claimed a name but our resolver can't find it at all -
+            # don't silently run a company-wide query under that name;
+            # fail safe and let the cascade fall through instead.
+            return None
+        name_filter = emp_id
+        name_label = emp_name or sticky.get("employee_name")
+    elif dimension == "department":
+        dept_name, candidates = entities.extract_department(name_text, fallback_text=raw_message)
+        if candidates:
+            return (
+                f"Multiple departments match that name: {', '.join(candidates)}. Which one did you mean?",
+                [],
+            )
+        if not dept_name and extracted.get("dimension_name"):
+            return None
+        name_filter = dept_name or sticky.get("dept_name")
+        name_label = name_filter
+    elif dimension == "rm":
+        try:
+            mgr_id, mgr_name = entities.extract_manager(name_text, fallback_text=raw_message)
+        except entities.Ambiguous:
+            mgr_id, mgr_name = None, None
+        if not mgr_id and extracted.get("dimension_name"):
+            return None
+        name_filter = mgr_name
+        name_label = mgr_name
+    else:  # company
+        name_filter = None
+        name_label = "The whole company"
+
+    if dimension in ("employee", "department", "rm") and not name_filter:
+        # Nothing resolvable at all (no name in the message, no sticky
+        # context either) - not enough to run a scoped query; fall through.
+        return None
+
+    try:
+        rows = queries.build_query(dimension, metrics, filters=filters, period=period,
+                                    name_filter=name_filter, limit=1)
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception("build_query() raised inside extraction-LLM cascade step")
+        return None
+
+    reply = _format_build_query_rows(rows, dimension, metrics, name_label=name_label)
+    if session is not None and dimension == "department" and name_filter:
+        session_store.push_context(session, dept_name=name_filter)
+    if session is not None and dimension == "employee" and name_filter:
+        session_store.push_context(session, employee_id=name_filter, employee_name=name_label)
     return reply, rows
 
 
@@ -3753,6 +3907,25 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         # that drafts read-only SQL with GPT-5 mini and executes it through
         # the same existing DB connection, already labeled AI-generated/
         # unverified in its own reply text.
+        #
+        # Item #70 (this round): a NEW extraction-LLM cascade step runs FIRST,
+        # ahead of sql_fallback - it tries to parse the message into a
+        # build_query() call (dimension/metrics/filters/period), which is
+        # cheaper, more deterministic, and reuses already-verified SQL versus
+        # free-form SQL generation. Only engages when it can extract and
+        # validate something real; any failure/hallucination falls straight
+        # through to sql_fallback below unaffected, so raw-SQL stays the
+        # final last-resort for genuine matrix outliers (tasks/todos, calls/
+        # meetings, d_score, etc. - things build_query() cannot express).
+        try:
+            extraction_result = _extraction_llm_reply(raw_message, message, session)
+        except Exception:
+            logging.getLogger("pace_chatbot.main").exception("_extraction_llm_reply() raised unexpectedly")
+            extraction_result = None
+        if extraction_result is not None:
+            _ext_reply, _ext_rows = extraction_result
+            return ChatResponse(reply=_ext_reply, rows=_ext_rows)
+
         try:
             fallback_result = sql_fallback.answer(raw_message)
         except Exception:

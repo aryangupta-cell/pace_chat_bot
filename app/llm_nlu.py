@@ -561,3 +561,216 @@ def classify(raw_message, timeout=_TIMEOUT_SECONDS):
     if LLM_PROVIDER == "gemini":
         return _classify_gemini(raw_message, timeout)
     return _classify_openai(raw_message, timeout)
+
+
+# ---------------------------------------------------------------------------
+# Item #70 (this round) — NEW, SEPARATE extraction-LLM call.
+#
+# Distinct from classify() above by design (per item #70's own design sketch
+# - "no intent-name indirection"): this call's ONLY job is to extract a
+# {dimension, dimension_name, metrics, filters, period} structure matching
+# queries.build_query()'s real parameter contract, not an intent name. It
+# sits in handle_message()'s cascade strictly AFTER classify() has already
+# found nothing usable, and strictly BEFORE sql_fallback.answer() (per the
+# task instruction that raw-SQL stays the final last-resort for genuine
+# matrix outliers). See app/main.py's call site + SESSION_HANDOFF.md for the
+# exact cascade wiring and the ordering judgment call.
+#
+# OpenAI-only this round (judgment call): the existing classify() call
+# supports both OpenAI and Gemini via LLM_PROVIDER; this new call is wired
+# to OpenAI only for now, since OpenAI is already the deployed default
+# provider and duplicating a full second Gemini code path for an
+# investigation-round feature was judged not worth the added surface area
+# yet. If LLM_PROVIDER=gemini is ever set in production, this new extraction
+# step is a no-op (returns None) and the cascade falls through unaffected -
+# it does NOT break anything, just doesn't fire.
+#
+# Same hard safety contract as classify(): any failure (bad JSON, network
+# error, hallucinated dimension/metric) returns None, never raises.
+# ---------------------------------------------------------------------------
+
+_BQ_DIMENSIONS = ["employee", "rm", "department", "company"]
+
+_BQ_EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "dimension": {"type": "string", "enum": _BQ_DIMENSIONS},
+        "dimension_name": {"type": ["string", "null"], "description": "the employee/RM/department name AS WRITTEN by the user, or null for company-wide / no explicit subject"},
+        "metrics": {"type": "array", "items": {"type": "string"}},
+        "filters": {
+            "type": "object",
+            "properties": {
+                "ps_status": {"type": ["string", "null"], "enum": ["working", "not_working", "any", None]},
+                "visit_status": {"type": ["string", "null"], "enum": ["yes", "no", "any", None]},
+                "work_mode": {"type": ["string", "null"], "enum": ["wfh", "office", None]},
+                "shift_type": {"type": ["string", "null"]},
+            },
+            "required": ["ps_status", "visit_status", "work_mode", "shift_type"],
+            "additionalProperties": False,
+        },
+        "period_phrase": {"type": ["string", "null"], "description": "the period AS WRITTEN by the user (e.g. 'last 3 weeks', 'August', 'yesterday'), or null if no period was named at all - NEVER compute actual dates yourself"},
+    },
+    "required": ["dimension", "dimension_name", "metrics", "filters", "period_phrase"],
+    "additionalProperties": False,
+}
+
+# Compact description of build_query()'s real parameter contract - built from
+# the SAME source of truth (not hand-duplicated) so this can never silently
+# drift from the actual engine.
+def _bq_metric_key_list():
+    from . import queries
+    return sorted(set(queries.BUILD_QUERY_METRICS.keys()) | {"pace_score", "pace_status", "dept_status_60_days_derived"})
+
+
+_BQ_SYSTEM_PROMPT = """You are a structured-extraction front end for an internal HR/attendance
+analytics chatbot called PACE. This is a DIFFERENT job from intent
+classification: your ONLY output is a {{dimension, dimension_name, metrics,
+filters, period_phrase}} structure describing a data query, matching a
+downstream function's real parameter contract. You NEVER answer the
+question, NEVER see real data, and NEVER compute actual calendar dates
+yourself.
+
+dimension: one of "employee", "rm", "department", "company" - what to group
+by. Use "company" only when no specific employee/RM/department is named at
+all (a whole-org question).
+
+dimension_name: the employee/RM/department name AS WRITTEN by the user
+(do not correct spelling, do not guess a full name from a nickname) - or
+null if dimension is "company" or genuinely nothing is named (a follow-up
+referring back to something already discussed).
+
+metrics: a list drawn ONLY from this exact set of keys (pick every metric the
+user is actually asking about; if truly nothing specific is named, return an
+empty list - the caller defaults to pace_score):
+{metric_keys}
+
+Key meanings worth knowing: "pace_status" = Black/Red/Amber/Green category.
+"capped_engagement"/"capped_effectiveness"/"capped_discipline" = the raw
+internal capped sub-metric values (only use these if the user explicitly
+says "capped"). "pace_score_day_level" = a single day's event-level score
+(not the period-aggregate "pace_score"). "dept_score_60_days_precomputed" =
+the ETL-precomputed department score column (only for department
+dimension). "dept_status_60_days_derived" = a derived department-level
+status banding (only for department dimension).
+
+filters: only set a value when the user EXPLICITLY overrides the default -
+otherwise use null for each field (the caller applies the correct defaults):
+  ps_status: "working" | "not_working" | "any" | null
+  visit_status: "yes" | "no" | "any" | null
+  work_mode: "wfh" | "office" | null
+  shift_type: a shift name (e.g. "Overtime (OT)") or "any" | null
+
+period_phrase: the time period AS WRITTEN by the user (e.g. "last 3 weeks",
+"last 2 months", "August", "yesterday", "between 1 Aug and 20 Aug") - or null
+if no period was named at all. NEVER emit an actual ISO date yourself; the
+caller re-parses your phrase through its own date parser.
+
+Respond with JSON matching the given schema only."""
+
+_BQ_FEW_SHOT = [
+    ("what's Rahul's capped engagement", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["capped_engagement"], "filters": {}, "period_phrase": None}),
+    ("what pace status is Accounts department in over the last 3 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 3 weeks"}),
+    ("day level pace score for Priya yesterday", {"dimension": "employee", "dimension_name": "Priya", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "yesterday"}),
+    ("precomputed dept score for SCM", {"dimension": "department", "dimension_name": "SCM", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None}),
+    ("engagement and discipline for Megha Sharma's team last month", {"dimension": "rm", "dimension_name": "Megha Sharma", "metrics": ["engagement_pct", "discipline_pct"], "filters": {}, "period_phrase": "last month"}),
+    ("company wide pace score for August", {"dimension": "company", "dimension_name": None, "metrics": ["pace_score"], "filters": {}, "period_phrase": "August"}),
+]
+
+
+def _bq_stable_instructions():
+    prompt = _BQ_SYSTEM_PROMPT.format(metric_keys=", ".join(_bq_metric_key_list()))
+    lines = []
+    for text, out in _BQ_FEW_SHOT:
+        lines.append(f'User: "{text}"\nJSON: {json.dumps(out)}')
+    return prompt + "\n\nExamples:\n" + "\n".join(lines)
+
+
+def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS):
+    """NEW extraction call (item #70). Returns a dict:
+    {dimension, dimension_name, metrics, filters, period_phrase} or None on
+    any failure/hallucination. `context_hint`, if given, is a short plain-
+    English string describing resolved sticky-context (e.g. "currently
+    discussing department: AI Labs") appended to the input so the LLM can use
+    it WITHOUT being asked to re-derive sticky-context parsing itself - the
+    caller still independently re-resolves the actual name via entities.py,
+    this hint only helps the LLM pick a reasonable dimension_name when the
+    current message names no explicit subject.
+
+    Caller (app/main.py) is responsible for: validating dimension against
+    queries.BUILD_QUERY_DIMENSIONS, validating each metric against the real
+    metric-key set, re-parsing period_phrase through entities.py's own date
+    parsers, and re-resolving dimension_name through
+    entities.extract_employee/department/manager rather than trusting this
+    call's raw name transcription. This function does none of that
+    validation itself - it only talks to the LLM and returns raw (but
+    JSON-schema-validated) extracted fields.
+    """
+    if LLM_PROVIDER == "gemini":
+        # Judgment call (see module docstring above this section): no Gemini
+        # path built this round for the extraction call. Returning None here
+        # is safe — the cascade falls through to the next step unaffected.
+        return None
+
+    client = _get_openai_client()
+    if client is None:
+        return None
+
+    input_text = f'Now extract this message.\nUser: "{raw_message}"'
+    if context_hint:
+        input_text += f"\nContext: {context_hint}"
+    input_text += "\nJSON:"
+
+    t0 = time.time()
+    try:
+        resp = client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=_bq_stable_instructions(),
+            input=input_text,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "pace_build_query_extraction",
+                    "schema": _BQ_EXTRACTION_SCHEMA,
+                    "strict": True,
+                }
+            },
+            reasoning={"effort": "minimal"},
+            timeout=timeout,
+        )
+    except Exception as e:
+        logger.warning("OpenAI extraction call failed (%s) after %.2fs", e, time.time() - t0)
+        return None
+
+    try:
+        data = json.loads(resp.output_text)
+    except Exception:
+        logger.warning("OpenAI extraction returned non-JSON: %r", getattr(resp, "output_text", None))
+        return None
+
+    latency = time.time() - t0
+    usage = getattr(resp, "usage", None)
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    itd = getattr(usage, "input_tokens_details", None)
+    cached_tokens = getattr(itd, "cached_tokens", None) if itd is not None else None
+    logger.info(
+        "OpenAI extract_build_query: %.2fs dimension=%s metrics=%s input_tokens=%s cached_tokens=%s",
+        latency, data.get("dimension"), data.get("metrics"), input_tokens, cached_tokens,
+    )
+    log_usage(
+        path="extract_build_query", provider="openai", model=getattr(resp, "model", OPENAI_MODEL),
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cached_tokens=cached_tokens, latency=latency,
+    )
+
+    if data.get("dimension") not in _BQ_DIMENSIONS:
+        return None
+
+    return {
+        "dimension": data.get("dimension"),
+        "dimension_name": data.get("dimension_name") or None,
+        "metrics": [m for m in (data.get("metrics") or []) if isinstance(m, str)],
+        "filters": {k: v for k, v in (data.get("filters") or {}).items() if v},
+        "period_phrase": data.get("period_phrase") or None,
+        "_latency": latency,
+    }

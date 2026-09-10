@@ -2598,7 +2598,52 @@ BUILD_QUERY_METRICS = {
     # engine. Averaged per employee-day, same treatment as the *_pct metrics
     # above (not summed like the count metrics).
     "productive_minutes": ("avg(coalesce(productive_and_meeting_min,0))", "avg productive minutes"),
+
+    # --- Item #70 gap-fill (this round) -----------------------------------
+    # Raw capped ingredients, exposed as directly queryable metrics in their
+    # own right (previously ONLY reachable buried inside the pace_score
+    # formula below, per item #70 finding #3). Averaged per row in scope,
+    # same treatment as the other *_pct metrics - these are still the
+    # INTERNAL capped 0-1(ish) values, not the uncapped user-facing
+    # percentages (engagement_pct etc.) - deliberately kept as a distinct
+    # metric family, not a rename, per PROJECT_BACKUP_2026-09-09.md's
+    # documented "capped_* is internal only" note.
+    "capped_engagement": ("avg(capped_engagement)", "avg capped engagement (internal)"),
+    "capped_effectiveness": ("avg(capped_effectiveness)", "avg capped effectiveness (internal)"),
+    "capped_discipline": ("avg(capped_discipline)", "avg capped discipline (internal)"),
+
+    # pace_score_day_level: new_pace_score_7_3_event_level, per item #70
+    # finding #2. Distinct from "pace_score" below (which is the
+    # capped-average-first-then-formula-once PERIOD aggregate). This is the
+    # per-row EVENT-LEVEL score column averaged over whatever period/
+    # dimension is requested - for a single-day period this is exactly the
+    # employee_day_summary() day-level score; for a longer period it's an
+    # average of daily event-level scores (a genuinely different number from
+    # "pace_score", not a duplicate - judgment call, see SESSION_HANDOFF.md).
+    "pace_score_day_level": ("avg(new_pace_score_7_3_event_level)", "avg day-level (event) pace score"),
+
+    # dept_score_60_days_precomputed: the ETL-precomputed dept_score_60_days_7_3
+    # column, per item #70 finding #5. Deliberately named distinctly from
+    # "pace_score" (the existing LIVE-RECOMPUTED capped-average score) to
+    # avoid the exact naming-collision bug class documented in
+    # PROJECT_BACKUP_2026-09-09.md (Active-vs-Inactive PACE score collision).
+    # Only meaningful for dimension="department" - it is a department-grain
+    # precomputed column, NOT filtered by the period param (it's already a
+    # fixed rolling-60-day ETL figure), so period is ignored for this metric
+    # specifically (documented, not a bug).
+    "dept_score_60_days_precomputed": ("avg(dept_score_60_days_7_3)", "precomputed dept score (last 60 days, ETL)"),
 }
+
+# pace_status banding thresholds - MUST mirror _bucket_status() above
+# (Black <50, Red 50-64, Amber 65-79, Green >=80) so this stays in sync with
+# the existing status_list()/status_count() family instead of drifting.
+_PACE_STATUS_CASE_SQL = (
+    "case when {score} is null then null "
+    "when {score} < 50 then 'Black' "
+    "when {score} < 65 then 'Red' "
+    "when {score} < 80 then 'Amber' "
+    "else 'Green' end"
+)
 
 BUILD_QUERY_DEFAULT_PERIOD_DAYS = 60
 
@@ -2713,25 +2758,52 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
 
     select_exprs = list(select_cols)
     want_pace_score = "pace_score" in metrics
+    # pace_status (item #70 finding #1): Black/Red/Amber/Green banding of the
+    # SAME live-recomputed capped-average pace_score this engine already
+    # computes for the requested dimension/period/filters - NOT the older
+    # status_list()/status_count() family's "latest single worked_day" CTE
+    # (a structurally different, non-composable code path). This is a
+    # deliberate, documented difference: pace_status here bands the PERIOD
+    # aggregate score for whatever scope was requested, consistent with how
+    # every other build_query() metric behaves.
+    want_pace_status = "pace_status" in metrics
+    # dept_status_60_days_derived (item #70 finding #4): dept_status_60_days
+    # does not exist as a real column anywhere - this DERIVES a department-
+    # level status banding from dept_score_60_days_7_3 using the identical
+    # thresholds _bucket_status()/pace_status use, since no real column
+    # exists. Only meaningful for dimension="department".
+    want_dept_status_derived = "dept_status_60_days_derived" in metrics
     metric_exprs = []
     for m in metrics:
-        if m == "pace_score":
+        if m in ("pace_score", "pace_status", "dept_status_60_days_derived"):
             continue
         if m not in BUILD_QUERY_METRICS:
             raise ValueError(f"build_query: unknown metric {m!r}")
         expr, _ = BUILD_QUERY_METRICS[m]
         metric_exprs.append(f'{expr} as "{m}"')
 
-    if want_pace_score:
+    if want_dept_status_derived:
+        score_expr = "avg(dept_score_60_days_7_3)"
+        metric_exprs.append(
+            f'{_PACE_STATUS_CASE_SQL.format(score=score_expr)} as "dept_status_60_days_derived"'
+        )
+
+    if want_pace_score or want_pace_status:
         # Same capped-average-first-then-formula-once pattern as
         # dept_ranking()/rm_ranking() for metric_key="pace_score" - averaging
         # the 4 capped_* ingredients per group and applying the score formula
         # ONCE, instead of averaging the view's pre-computed per-row score
         # (the Jensen's-inequality bug fixed in commit c1604cb).
-        metric_exprs.append(
+        pace_score_expr = (
             "least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * "
-            'avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as "pace_score"'
+            "avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10))"
         )
+        if want_pace_score:
+            metric_exprs.append(f'{pace_score_expr} as "pace_score"')
+        if want_pace_status:
+            metric_exprs.append(
+                f'{_PACE_STATUS_CASE_SQL.format(score=pace_score_expr)} as "pace_status"'
+            )
         where.append(
             "capped_engagement is not null and capped_effectiveness is not null "
             "and capped_discipline is not null and capped_working_hours is not null"
@@ -2747,7 +2819,14 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     select_parts = [c for c in ([", ".join(select_cols)] if select_cols else []) if c] + \
         ["count(distinct employee_id) as n_employees"] + metric_exprs
     group_by_clause = f"\n        group by {group_cols}" if group_cols else ""
-    order_col = '"pace_score"' if want_pace_score else (f'"{metrics[0]}"' if metrics else "n_employees")
+    if want_pace_score:
+        order_col = '"pace_score"'
+    elif want_dept_status_derived:
+        order_col = '"dept_status_60_days_derived"'
+    elif metrics:
+        order_col = f'"{metrics[0]}"'
+    else:
+        order_col = "n_employees"
     sql = f"""
         select {", ".join(select_parts)}
         from public.pace_1
@@ -2757,6 +2836,38 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     """
     params["limit"] = lim
     return run_query(sql, params)
+
+
+def build_query_day_flags(employee_id, date):
+    """Item #70 finding #6: single-day LC/EL/DH yes/no flags through the
+    build_query() engine, reusing build_query()'s own SQL (not duplicating
+    employee_day_summary()'s query) - for a single-day period the existing
+    sum(coalesce(lc_flag_per_day,0)) etc. metrics collapse to exactly 0 or 1
+    for one employee, so this is a thin convenience wrapper: call
+    build_query(dimension="employee", period=(date,date), name_filter=...)
+    and cast the 3 count metrics to booleans. Returns a dict with
+    employee_id/emp_name/dept_name/lc/el/dh (booleans), or None if the
+    employee has no Standard-shift row that day (same "no row" contract as
+    employee_day_summary())."""
+    rows = build_query(
+        dimension="employee",
+        metrics=["LC", "EL", "DH"],
+        filters={"shift_type": "Standard", "ps_status": "any", "visit_status": "any"},
+        period=(date, date),
+        name_filter=employee_id,
+        limit=1,
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "employee_id": row.get("employee_id"),
+        "emp_name": row.get("emp_name"),
+        "dept_name": row.get("dept_name"),
+        "lc": bool(row.get("LC")),
+        "el": bool(row.get("EL")),
+        "dh": bool(row.get("DH")),
+    }
 
 
 # ---------------------------------------------------------------------------
