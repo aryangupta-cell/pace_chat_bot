@@ -2668,7 +2668,8 @@ def default_period_last_60_days():
 _build_query_default_period = default_period_last_60_days
 
 
-def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None, scope=None):
+def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None, scope=None,
+                 ascending=False):
     """General parametrized engine: SELECT <metrics> GROUP BY <dimension> FROM
     public.pace_1 WHERE <filters> AND <period>.
 
@@ -2676,6 +2677,12 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     metrics: list of BUILD_QUERY_METRICS keys, plus "pace_score" (special-
         cased below to reuse the exact capped-average-first-then-formula-once
         pattern already verified in dept_ranking()/rm_ranking()).
+    ascending: item #73 addition - False (default, unchanged behaviour) sorts
+        the ranking metric descending ("best"/"most"); True sorts ascending
+        ("worst"/"least"), same convention as dept_ranking()/rm_ranking()'s
+        own `ascending` param. Only affects multi-row rankings (no
+        name_filter) - a single name_filter query already collapses to <= 1
+        row regardless of sort direction.
     filters: dict, any of:
         ps_status: "working" (default, ps_worked_flag_day=1) | "not_working" (=0) | "any" (no filter)
         visit_status: "no" (default, visit_flag='No') | "yes" (visit_flag='Yes') | "any"
@@ -2827,11 +2834,12 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         order_col = f'"{metrics[0]}"'
     else:
         order_col = "n_employees"
+    order_dir = "asc" if ascending else "desc"
     sql = f"""
         select {", ".join(select_parts)}
         from public.pace_1
         where {where_clause}{group_by_clause}
-        order by {order_col} desc nulls last
+        order by {order_col} {order_dir} nulls last
         limit %(limit)s
     """
     params["limit"] = lim

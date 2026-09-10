@@ -963,6 +963,50 @@ _BUILD_QUERY_METRIC_PATTERNS = [
     ("productive_minutes", r"\bprod(?:uctive)?\s*(minutes?|mins?)\b|\bproductive\b"),
 ]
 
+# Item #73: generalized capped-vs-percentage business rule for effectiveness/
+# engagement/discipline, shared by every caller that needs it (the
+# build_query() keyword-fallback detector below, the dept_best/dept_worst
+# rule-based handler, and the extraction-LLM cascade's post-validation
+# override) - a single source of truth, not 3 separate hand-rolled checks.
+# The rule (deliberate, non-obvious - see SESSION_HANDOFF.md item #73, do
+# NOT "simplify" this back to naive keyword matching):
+#   "X"                              -> "X_pct"            (normal wording)
+#   "capped X" (no %/percentage)      -> "capped_X"         (raw internal)
+#   "raw capped X"                     -> "capped_X"        (same as above)
+#   "capped X %" / "capped X percentage" -> "X_pct"          (DELIBERATE -
+#       this is NOT a mistake to "fix" back to capped_X)
+_PCT_CAPPED_METRIC_PATTERN = re.compile(
+    r"\b(?:(?P<raw>raw)\s+)?(?:(?P<capped>capped)\s+)?(?P<word>effectiveness|engagement|discipline)\b"
+    r"(?:\s*(?P<pct>%|percent|percentage))?",
+    re.IGNORECASE,
+)
+_PCT_CAPPED_METRIC_MAP = {
+    "effectiveness": ("effectiveness_pct", "capped_effectiveness"),
+    "engagement": ("engagement_pct", "capped_engagement"),
+    "discipline": ("discipline_pct", "capped_discipline"),
+}
+_ALL_PCT_CAPPED_KEYS = {k for pair in _PCT_CAPPED_METRIC_MAP.values() for k in pair}
+
+
+def _detect_pct_capped_metrics(message):
+    """Applies the item #73 business rule documented above to every
+    effectiveness/engagement/discipline mention in `message`. Returns a
+    de-duplicated, order-preserving list of BUILD_QUERY_METRICS-style keys
+    (empty if none of these three words appear at all)."""
+    found = []
+    for m in _PCT_CAPPED_METRIC_PATTERN.finditer(message or ""):
+        word = (m.group("word") or "").lower()
+        pair = _PCT_CAPPED_METRIC_MAP.get(word)
+        if pair is None:
+            continue
+        pct_key, capped_key = pair
+        capped = bool(m.group("capped"))
+        pct = bool(m.group("pct"))
+        key = capped_key if (capped and not pct) else pct_key
+        if key not in found:
+            found.append(key)
+    return found
+
 
 def _detect_build_query_metrics(message):
     """Picks the metric(s) named in `message` from BUILD_QUERY_METRICS + pace_score.
@@ -970,7 +1014,29 @@ def _detect_build_query_metrics(message):
     doing" case) when nothing more specific is named."""
     text_l = (message or "").lower()
     found = []
+    # Item #73: effectiveness/engagement/discipline capped-vs-percentage
+    # business rule - shared normalizer, checked first so its resolved key
+    # (e.g. "capped_effectiveness") wins over the naive substring patterns
+    # below rather than being overridden by them.
+    for key in _detect_pct_capped_metrics(message):
+        if key not in found:
+            found.append(key)
+    # Working hours: percentage-wording must win over the raw-hours pattern
+    # when both match the same phrase (e.g. "working hours percentage") -
+    # item #73 finding: the old working_pct regex only matched a literal
+    # "%" sign right after "working", never the word "percentage", so
+    # "working hours percentage" silently fell through to the raw
+    # working_hours (sum) metric instead of working_pct. Fixed here, in the
+    # shared detector, not a new parallel mechanism.
+    if re.search(r"\bworking hours?\s*(%|percent|percentage)\b", text_l):
+        if "working_pct" not in found:
+            found.append("working_pct")
+    elif re.search(r"\bworking hours\b|\bworked hours\b", text_l):
+        if "working_hours" not in found:
+            found.append("working_hours")
     for key, pat in _BUILD_QUERY_METRIC_PATTERNS:
+        if key in ("engagement_pct", "effectiveness_pct", "discipline_pct", "working_pct", "working_hours"):
+            continue  # handled above
         if re.search(pat, text_l) and key not in found:
             found.append(key)
     return found or ["pace_score"]
@@ -1172,6 +1238,21 @@ def _extraction_llm_reply(raw_message, message, session):
         metrics = _repair_new_vocab_metric(raw_message)
     if not metrics:
         metrics = ["pace_score"]
+    # Item #73: deterministic override for the capped-vs-percentage business
+    # rule - this is a precise, non-obvious mapping (see SESSION_HANDOFF.md
+    # item #73) that must never be left to the LLM's own probabilistic
+    # judgment, same "narrow deterministic check wins over a probabilistic
+    # guess" precedent as _repair_new_vocab_metric() above. Whenever the
+    # RAW message actually names effectiveness/engagement/discipline, the
+    # shared normalizer's resolved key(s) always replace whatever the LLM
+    # guessed for those same 3 concepts - any OTHER metric it also asked
+    # for (e.g. combined with pace_status) is left untouched.
+    _pct_capped_override = _detect_pct_capped_metrics(raw_message)
+    if _pct_capped_override:
+        metrics = [m for m in metrics if m not in _ALL_PCT_CAPPED_KEYS]
+        for _k in _pct_capped_override:
+            if _k not in metrics:
+                metrics.append(_k)
     # dept_status_60_days_derived / dept_score_60_days_precomputed only make
     # sense for dimension="department" - drop them otherwise rather than
     # letting build_query() raise a confusing SQL error downstream.
@@ -2066,12 +2147,12 @@ def _repair_new_vocab_metric(raw_message):
     markers; returns [] (not a default) if nothing matches, deferring to
     the caller's own ["pace_score"] fallback."""
     text_l = (raw_message or "").lower()
-    if re.search(r"\bcapped effectiveness\b", text_l):
-        return ["capped_effectiveness"]
-    if re.search(r"\bcapped engagement\b", text_l):
-        return ["capped_engagement"]
-    if re.search(r"\bcapped discipline\b", text_l):
-        return ["capped_discipline"]
+    # Item #73: delegates to the shared capped-vs-percentage normalizer
+    # instead of the 3 old hardcoded "capped X" -> capped_X branches, which
+    # ignored the "capped X percentage" -> X_pct business rule entirely.
+    _pct_capped = _detect_pct_capped_metrics(raw_message)
+    if _pct_capped:
+        return _pct_capped
     if re.search(r"\bprecomputed\b", text_l) and re.search(r"\bstatus\b", text_l):
         return ["dept_status_60_days_derived"]
     if re.search(r"\bprecomputed\b", text_l):
@@ -2664,13 +2745,37 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         return ChatResponse(reply=format_compare(rows, [d1, d2], format_dept_summary), rows=[r for r in rows if r])
 
     if intent in ("dept_best", "dept_worst", "dept_avg"):
-        metric_key = "pace_score"
         ascending = intent == "dept_worst"
         # Item B: last-60-days default when nothing was named at all (see
         # the _METRIC_INTENTS branch above for the full rationale).
         _dr_month, _dr_date_range = month, None
         if _no_period_named_at_all(message, session):
             _dr_month, _dr_date_range = None, queries.default_period_last_60_days()
+
+        # Item #73: detect an explicitly-named effectiveness/engagement/
+        # discipline metric (with the capped-vs-percentage business rule)
+        # instead of always hardcoding pace_score - reuses the SAME shared
+        # normalizer the build_query() extraction cascade uses
+        # (_detect_pct_capped_metrics), not a new parallel mechanism. Falls
+        # through to the existing pace_score/dept_ranking() path unchanged
+        # whenever no such metric is named (the overwhelmingly common
+        # "which department is doing best overall" case), so this is
+        # additive, not a rewrite of the existing behaviour.
+        _bq_metrics = _detect_pct_capped_metrics(message)
+        if _bq_metrics:
+            bq_metric = _bq_metrics[0]
+            if _dr_date_range is not None:
+                bq_period = _dr_date_range
+            else:
+                _fm = _first_month(_dr_month)
+                bq_period = _month_str_to_range(_fm) if _fm else None
+            rows = queries.build_query("department", [bq_metric], period=bq_period,
+                                        limit=limit, ascending=ascending)
+            label = _BUILD_QUERY_METRIC_LABELS.get(bq_metric, bq_metric)
+            table = _format_build_query_rows(rows, "department", [bq_metric])
+            return ChatResponse(reply=f"Departments ranked by {label}:\n\n{table}", rows=rows)
+
+        metric_key = "pace_score"
         rows = queries.dept_ranking(metric_key, _dr_month, ascending=ascending, limit=limit, date_range=_dr_date_range)
         return ChatResponse(reply=f"Departments ranked by {queries.METRICS[metric_key][1]}:\n\n{format_dept_rows(rows, metric_key)}", rows=rows)
 
@@ -3729,7 +3834,18 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # actually correct for these specific markers - null it out too (same
     # pattern-trust rationale, just applied one step earlier in the
     # pipeline) so the cascade can reach extract_build_query().
-    if rule_intent is not None and _NEW_VOCAB_OVERRIDE_PATTERN.search(message):
+    # Item #73: dept_best/dept_worst are exempted from this nulling - unlike
+    # the ~123 other existing intents, these two were EXTENDED this round
+    # (new explicit patterns in intents.py) specifically to understand this
+    # new vocabulary (capped/percentage-qualified effectiveness/engagement/
+    # discipline) and resolve the real metric themselves, deterministically,
+    # via the shared _detect_pct_capped_metrics() normalizer in their
+    # handler below - nulling them here would incorrectly divert a
+    # correctly-matched "which department has the best/worst X" ranking
+    # question to the LLM extraction cascade or sql_fallback instead of the
+    # now-metric-aware rule-based handler.
+    if (rule_intent is not None and rule_intent not in ("dept_best", "dept_worst")
+            and _NEW_VOCAB_OVERRIDE_PATTERN.search(message)):
         rule_intent = None
 
     # --- New-vocabulary deterministic override (item #72) ------------------

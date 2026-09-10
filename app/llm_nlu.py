@@ -700,8 +700,14 @@ ALWAYS use this (never plain "pace_score") whenever the user's wording is
 about STATUS/BANDING/CATEGORY rather than a numeric score, for ANY
 dimension and ANY period (a single day or a multi-week/month range).
 "capped_engagement"/"capped_effectiveness"/"capped_discipline" = the raw
-internal capped sub-metric values (only use these if the user explicitly
-says "capped"). "pace_score_day_level" = the event-level score, AVERAGED
+internal capped sub-metric values - use these ONLY when the user says
+"capped X" with NO percentage word after it (e.g. "capped effectiveness",
+"raw capped engagement"). IMPORTANT, deliberate business rule: if the user
+says "capped X %" / "capped X percent" / "capped X percentage", use the
+PLAIN "X_pct" metric instead (e.g. "capped effectiveness percentage" ->
+effectiveness_pct, NOT capped_effectiveness) - this is intentional, not a
+mistake to correct. Plain "X" with no "capped" and no "%" word also means
+"X_pct" (e.g. "effectiveness" alone -> effectiveness_pct). "pace_score_day_level" = the event-level score, AVERAGED
 over whatever period is asked — this applies just as much to a multi-day
 period ("last 2 weeks", "last month") as to a single day; it is a
 genuinely different metric from the period-aggregate "pace_score", NOT a
@@ -737,6 +743,10 @@ Respond with JSON matching the given schema only."""
 
 _BQ_FEW_SHOT = [
     ("what's Rahul's capped engagement", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["capped_engagement"], "filters": {}, "period_phrase": None}),
+    # Item #73: the non-obvious "capped X %"/"capped X percentage" -> X_pct
+    # business rule (NOT capped_X) - see the key-meanings paragraph above.
+    ("what's Rahul's capped engagement percentage", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["engagement_pct"], "filters": {}, "period_phrase": None}),
+    ("capped effectiveness % for Billing department", {"dimension": "department", "dimension_name": "Billing", "metrics": ["effectiveness_pct"], "filters": {}, "period_phrase": None}),
     ("what pace status is Accounts department in over the last 3 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 3 weeks"}),
     ("day level pace score for Priya yesterday", {"dimension": "employee", "dimension_name": "Priya", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "yesterday"}),
     ("precomputed dept score for SCM", {"dimension": "department", "dimension_name": "SCM", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None}),

@@ -298,11 +298,26 @@ _DEPT_BEST_PATTERNS = [
     # for the reporting-manager-team sibling of this fix.
     r"\bwhich (dept|department)\b.{0,20}\b(most|highest|best|top)\b.{0,15}\bscore\b",
     r"\b(dept|department)\b.{0,20}\b(most|highest)\b.{0,15}\bscore\b.{0,10}\branking\b",
+    # Item #73: same dimension-explicit ranking phrasing as above, but naming
+    # effectiveness/engagement/discipline/working hours (incl. "capped"/
+    # "percentage" wording) instead of bare "score" - previously this fell
+    # through to the generic fuzzy fallback (which hardcodes pace_score,
+    # silently ignoring the actual metric asked for) or, for "capped"
+    # wording, was disqualified from fuzzy matching entirely by
+    # _FUZZY_NEW_VOCAB_DISQUALIFY_PATTERN. Routing these to dept_best/
+    # dept_worst explicitly (checked well before any fuzzy fallback) lets
+    # the handler in app/main.py resolve the real metric via the shared
+    # _detect_pct_capped_metrics() normalizer instead.
+    r"\bwhich (dept|department)\b.{0,20}\b(most|highest|best|top)\b.{0,30}"
+    r"\b(effectiveness|engagement|discipline|working hours|capped)\b",
 ]
 _DEPT_WORST_PATTERNS = [
     r"\bworst department\b", r"\bbottom department\b", r"\bwhich department is (the )?worst\b",
     r"\bweakest department\b", r"\bwhich department is doing (the )?worst\b",
     r"\bwhich (dept|department)\b.{0,20}\b(least|lowest|worst|bottom)\b.{0,15}\bscore\b",
+    # Item #73: worst-side sibling of the dept_best addition above.
+    r"\bwhich (dept|department)\b.{0,20}\b(least|lowest|worst|bottom)\b.{0,30}"
+    r"\b(effectiveness|engagement|discipline|working hours|capped)\b",
 ]
 
 # Ranking BY reporting-manager ("RM") team - "which RM team has the most/
