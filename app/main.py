@@ -1914,34 +1914,59 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         # file already relies on).
         #
         # Scope resolution mirrors the bottom-of-cascade build_query()
-        # fallback in handle_message() exactly (employee -> department ->
-        # RM -> company-wide), reusing the same extract_employee/
+        # fallback in handle_message() (employee -> department -> RM ->
+        # company-wide), reusing the same extract_employee/
         # extract_department/extract_manager calls and fallback_text
-        # pattern - nothing new invented here. Employee resolution is
-        # checked first only so a message that happens to name both an
-        # individual AND a metric ("avg score for Aryan Gupta") still
-        # resolves to that person's own average rather than being
-        # mis-scoped; the common "avg X in whole company"/"avg X in <dept>"/
-        # "avg X for <RM>'s team" cases never name an individual, so they
-        # fall through correctly to department/RM/company-wide scope.
-        try:
-            avg_emp_id, avg_emp_name = entities.extract_employee(message, fallback_text=fb)
-        except entities.Ambiguous as e:
-            return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
-                                 needs_clarification=True, clarification_options=e.candidates)
+        # pattern - nothing new invented here.
+        #
+        # Exception: when the message explicitly says "team" (e.g. "avg
+        # pace score for Nikhil Kumar's team"), manager resolution is tried
+        # FIRST, ahead of employee. Several real managers in this dataset
+        # are ALSO themselves individual employees (documented elsewhere in
+        # this file, e.g. Nikhil Kumar) or a bare first-name fragment of
+        # "<Name>'s team" can spuriously match/collide with an unrelated
+        # employee's name (confirmed live: "Rahul Yadav's team" ->
+        # extract_employee raised Ambiguous on "Rahul" alone, before ever
+        # reaching manager resolution) - explicit "team" wording is never
+        # ambiguous about intent (it can only mean the named person's team,
+        # never their own personal score), so it must not be shadowed by an
+        # employee-name false-positive. Every other phrasing (no "team"
+        # word - "avg X in whole company"/"avg X in <dept>"/"avg score for
+        # <employee>") keeps the original employee-first order unchanged.
+        wants_team_scope = re.search(r"\bteam\b", message, re.IGNORECASE) is not None
+        avg_emp_id = avg_emp_name = None
+        avg_mgr_id = avg_mgr_name = None
+        if wants_team_scope:
+            try:
+                avg_mgr_id, avg_mgr_name = entities.extract_manager(message, fallback_text=fb)
+            except entities.Ambiguous as e:
+                return ChatResponse(reply=f"Multiple managers match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                                     needs_clarification=True, clarification_options=e.candidates)
+            if not avg_mgr_id:
+                try:
+                    avg_emp_id, avg_emp_name = entities.extract_employee(message, fallback_text=fb)
+                except entities.Ambiguous:
+                    pass  # a bare name-fragment collision on "team" wording - not a real employee lookup, ignore
+        else:
+            try:
+                avg_emp_id, avg_emp_name = entities.extract_employee(message, fallback_text=fb)
+            except entities.Ambiguous as e:
+                return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                                     needs_clarification=True, clarification_options=e.candidates)
+            if not avg_emp_id:
+                try:
+                    avg_mgr_id, avg_mgr_name = entities.extract_manager(message, fallback_text=fb)
+                except entities.Ambiguous:
+                    avg_mgr_id, avg_mgr_name = None, None
         avg_dept_name, avg_dept_candidates = entities.extract_department(message, fallback_text=fb)
-        try:
-            avg_mgr_id, avg_mgr_name = entities.extract_manager(message, fallback_text=fb)
-        except entities.Ambiguous:
-            avg_mgr_id, avg_mgr_name = None, None
         avg_start, avg_end, avg_date_mentioned = entities.extract_date_range(message)
         avg_period = (avg_start, avg_end) if avg_date_mentioned else date_range
-        if avg_emp_id:
+        if avg_mgr_id:
+            reply, rows = build_query_overview_reply("rm", avg_mgr_name, message, period=avg_period, session=session)
+        elif avg_emp_id:
             reply, rows = build_query_overview_reply("employee", avg_emp_id, message, period=avg_period, session=session)
         elif avg_dept_name and not avg_dept_candidates:
             reply, rows = build_query_overview_reply("department", avg_dept_name, message, period=avg_period, session=session)
-        elif avg_mgr_id:
-            reply, rows = build_query_overview_reply("rm", avg_mgr_name, message, period=avg_period, session=session)
         else:
             # No named employee/department/RM at all - "whole company"
             # (explicitly said or simply left unscoped, same convention as
