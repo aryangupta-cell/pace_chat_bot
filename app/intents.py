@@ -1212,6 +1212,29 @@ _FUZZY_REQUIRES_KEYWORD = {
     "status_count": r"\b(black|red|amber|green)\b",
 }
 
+# Item #72: rapidfuzz's token_set_ratio also scores a false-positive match
+# for genuinely NEW vocabulary that happens to share common tokens with an
+# OLD canonical phrase - confirmed live, e.g. "day level pace score for
+# Accounts department over the last 2 weeks" and "precomputed 60 day dept
+# score for Founders Office" both fuzzy-matched emp_pace_score (via shared
+# "pace score" tokens) well above FUZZY_INTENT_THRESHOLD, silently routing
+# to the OLD intent (which has no concept of "day level"/"precomputed" and
+# answers with the wrong metric) before the newer, more precise
+# app/llm_nlu.py extract_build_query() cascade (see app/main.py) ever gets
+# a chance - the exact same "narrow regex beats a broad text-similarity
+# guess" lesson _FUZZY_REQUIRES_KEYWORD above already encodes, applied to
+# the opposite direction (disqualifying the WHOLE fuzzy fallback rather
+# than one specific intent) since none of the existing canonical phrases
+# correctly express these newer, more specific concepts at all.
+_FUZZY_NEW_VOCAB_DISQUALIFY_PATTERN = re.compile(
+    r"\bcapped (engagement|effectiveness|discipline)\b"
+    r"|\b(day|event)[- ]level\b.*\b(pace )?score\b"
+    r"|\b(pace )?score\b.*\b(day|event)[- ]level\b"
+    r"|\bprecomputed\b"
+    r"|\bderived\b.*\b(dept|department)\b.*\bstatus\b",
+    re.IGNORECASE,
+)
+
 
 def _fuzzy_match_intent(text_l):
     # Defense-in-depth (item #63): rapidfuzz's token_set_ratio scores a
@@ -1231,6 +1254,8 @@ def _fuzzy_match_intent(text_l):
     # "least"/"most" lives in main.py's _handle_bare_direction_followup,
     # which runs BEFORE this function is ever reached.)
     if len(text_l.split()) < 2:
+        return None
+    if _FUZZY_NEW_VOCAB_DISQUALIFY_PATTERN.search(text_l):
         return None
     scores = {}
     for intent_name, phrases in _CANONICAL_PHRASES.items():

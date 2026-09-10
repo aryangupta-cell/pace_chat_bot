@@ -3718,6 +3718,20 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     rule_intent = intents.match_intent(message)
     llm_result = llm_nlu.classify(raw_message)
 
+    # Item #72 (see the fuller override comment below): live testing found
+    # this goes deeper than classify() alone - some of these phrasings ALSO
+    # explicit-regex-match an old intent's pattern directly (e.g. "day level
+    # pace score for Accounts department..." matches emp_pace_score's
+    # r"\bpace score (of|for)\b", which normally correctly wins outright
+    # against everything else - see the "General precedence flip" comment
+    # below). None of the ~123 existing intents' patterns were written with
+    # this new vocabulary in mind, so a rule_intent match here is never
+    # actually correct for these specific markers - null it out too (same
+    # pattern-trust rationale, just applied one step earlier in the
+    # pipeline) so the cascade can reach extract_build_query().
+    if rule_intent is not None and _NEW_VOCAB_OVERRIDE_PATTERN.search(message):
+        rule_intent = None
+
     # --- New-vocabulary deterministic override (item #72) ------------------
     # classify()'s system prompt (llm_nlu.py) already instructs the LLM to
     # return "none" for these phrasings (capped_* metrics, scoped/period-
