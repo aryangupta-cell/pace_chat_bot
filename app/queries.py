@@ -2488,3 +2488,42 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     """
     params["limit"] = lim
     return run_query(sql, params)
+
+
+# ---------------------------------------------------------------------------
+# Category N+1 (new, additive) — employee_day_summary(): a single-employee,
+# single-day SNAPSHOT, deliberately a different output shape from every
+# ranking/aggregate function above (no GROUP BY, no population average - one
+# row for one person on one day). Queries public.pace_1 directly (not
+# pace_chatbot_view) for two reasons: (1) it needs new_pace_score_7_3_event_level,
+# the day-level event score, which IS selected on pace_1 but the view only
+# exposes rolling/monthly aggregates of it; (2) shift_type='Standard' is
+# applied explicitly here (same "exactly one row per employee/day" grain
+# guarantee documented in PROJECT_BACKUP_2026-09-09.md §2) rather than relying
+# on the view's baked-in filter, keeping this function self-contained and
+# consistent with the other pace_1-direct functions above (day_compare(),
+# build_query()).
+# ---------------------------------------------------------------------------
+
+def employee_day_summary(employee_id, date):
+    """Returns a single dict (or None if the employee has no Standard-shift
+    row for that day - e.g. leave/absent/OT-only day) with:
+    employee_id, emp_name, dept_name, reporting_manager_name, worked_day,
+    lc (bool), el (bool), dh (bool), pace_score (day-level event score,
+    new_pace_score_7_3_event_level - NOT the rolling 60-day or capped-average
+    aggregate used elsewhere, per the confirmed spec for this feature)."""
+    sql = """
+        select employee_id, emp_name, dept_name, reporting_manager_name,
+               worked_day,
+               coalesce(lc_flag_per_day, 0) > 0 as lc,
+               coalesce(el_flag_per_day, 0) > 0 as el,
+               coalesce(dh_flag_per_day, 0) > 0 as dh,
+               new_pace_score_7_3_event_level as pace_score
+        from public.pace_1
+        where employee_id = %(employee_id)s
+          and worked_day = %(date)s
+          and shift_type = 'Standard'
+        limit 1
+    """
+    rows = run_query(sql, {"employee_id": employee_id, "date": date})
+    return rows[0] if rows else None

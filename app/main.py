@@ -1315,6 +1315,7 @@ _BULK_ALL_EMPLOYEES_PATTERN = re.compile(
 # their individual phrasing (extract_employee still wins there regardless
 # of what team-resolution also happened to find).
 _INDIVIDUAL_EMP_INTENTS = set(_EMP_FIELD_INTENTS) | {
+    "employee_day_summary",
     "emp_attendance_summary", "emp_trend", "emp_trend_2month", "emp_overview",
     "subscore_compare_emp", "subscore_trend_emp", "d_score_trend", "d_score_emp",
     "leave_emp_check", "call_emp", "visit_emp", "wfh_emp",
@@ -1464,6 +1465,46 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     limit = entities.extract_limit(message)
     period_month = None if date_range else month
     fb = raw_message if raw_message and raw_message != message else None
+
+    if intent == "employee_day_summary":
+        # New, additive intent (item #58): single-employee, single-day
+        # SNAPSHOT - a completely different output shape from every ranking/
+        # aggregate branch in this function (one row, one person, one day -
+        # no GROUP BY, no population average). Reuses entities.extract_employee
+        # (same fallback_text pattern as every other employee lookup in this
+        # function) and the new entities.extract_single_date() helper (which
+        # itself reuses extract_date_range()'s existing yesterday/today/
+        # on-date/bare-ISO parsing before falling back to the same bare
+        # "N Month" token scan extract_two_dates() already uses) - no new
+        # date-parsing logic was written from scratch.
+        try:
+            emp_id, emp_name = entities.extract_employee(message, fallback_text=fb)
+        except entities.Ambiguous as e:
+            return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                                 needs_clarification=True, clarification_options=e.candidates)
+        if not emp_id:
+            return ChatResponse(reply="I couldn't find that employee. Could you check the spelling or give the full name?")
+        target_date, date_mentioned = entities.extract_single_date(message)
+        if not date_mentioned:
+            # No explicit date named - default to yesterday, the most recent
+            # day that can possibly have real data (see PROJECT_BACKUP
+            # §2: "today" never has data, by permanent design).
+            target_date = datetime.date.today() - datetime.timedelta(days=1)
+        row = queries.employee_day_summary(emp_id, target_date)
+        if row is None:
+            return ChatResponse(
+                reply=f"No Standard-shift data found for {emp_name} on {target_date} (could be a leave/absent/OT-only day)."
+            )
+        lc = "Yes" if row["lc"] else "No"
+        el = "Yes" if row["el"] else "No"
+        dh = "Yes" if row["dh"] else "No"
+        reply = (
+            f"{row['emp_name']} ({row['employee_id']}) — {row['dept_name']}, reports to {row['reporting_manager_name']}\n"
+            f"Date: {row['worked_day']}\n"
+            f"LC (late-coming): {lc} | EL (early-leaving): {el} | DH (deficient hours): {dh}\n"
+            f"PACE score (day): {_fmt(row['pace_score'])}"
+        )
+        return ChatResponse(reply=reply, rows=[row])
 
     if manager_id and employee_ids is None and intent in ("attendance_best", "attendance_worst"):
         rows = queries.team_attendance_ranking(manager_id, month, worst=(intent == "attendance_worst"))

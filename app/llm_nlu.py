@@ -301,6 +301,43 @@ _FEW_SHOT_EXAMPLES = [
     ("how many days is Rahul excluded for ps not installed", {"intent": "ps_exclude_metric", "entities": {"employee": "Rahul"}, "confidence": 0.75}),
     ("what is the ps working ratio", {"intent": "ps_ratio_info", "entities": {}, "confidence": 0.7}),
     ("what does ps not installed mean", {"intent": "ps_explain", "entities": {}, "confidence": 0.75}),
+    # --- Round (item #58): employee_day_summary (new intent) + broader
+    # matrix coverage for build_query()'s fallback engine.
+    #
+    # These examples are NOT a literal whitelist gpt-5-mini must match
+    # verbatim - they are grounding so it GENERALIZES the underlying pattern
+    # (dimension x metric x filter x period, all independently composable)
+    # to phrasings never seen here. Each block below picks a diverse spread
+    # across {employee, RM, department} x {pace score, sub-scores, raw
+    # counts} x {the 4 filters + their defaults} x {flexible time periods},
+    # not an exhaustive enumeration.
+    #
+    # employee_day_summary: single-employee, single-day snapshot (LC/EL/DH
+    # yes-no + day-level pace score) - a genuinely different SHAPE from every
+    # ranking/aggregate intent above, so it needs its own few-shot anchor.
+    ("give me Aryan Gupta's summary for 4 Sept", {"intent": "employee_day_summary", "entities": {"employee": "Aryan Gupta"}, "confidence": 0.9}),
+    ("Priya's day summary for yesterday", {"intent": "employee_day_summary", "entities": {"employee": "Priya"}, "confidence": 0.85}),
+    ("daily summary for Rahul on 2026-08-15", {"intent": "employee_day_summary", "entities": {"employee": "Rahul"}, "confidence": 0.85}),
+    ("how was Megha Sharma on 12 Aug", {"intent": "employee_day_summary", "entities": {"employee": "Megha Sharma"}, "confidence": 0.8}),
+    ("snapshot for Aman on Sept 3", {"intent": "employee_day_summary", "entities": {"employee": "Aman"}, "confidence": 0.75}),
+    # --- build_query() matrix: bare "how is X doing" (dimension x default
+    # pace_score, default filters, default 60-day period) across all 3
+    # dimensions - proves the same phrasing shape generalizes by dimension.
+    ("how is the CRM department doing", {"intent": "dept_summary", "entities": {"department": "CRM"}, "confidence": 0.8}),
+    ("how is Nikhil Kumar's team performing", {"intent": "team_how_doing", "entities": {"manager": "Nikhil Kumar"}, "confidence": 0.75}),
+    # --- Sub-scores across dimensions, non-default period phrasing.
+    ("engagement score for the SCM department last 3 weeks", {"intent": "dept_avg", "entities": {"department": "SCM", "metric": "engagement", "month": "last 3 weeks"}, "confidence": 0.6}),
+    ("what's the discipline percentage for Nikhil Kumar's team this quarter", {"intent": "team_how_doing", "entities": {"manager": "Nikhil Kumar", "metric": "discipline"}, "confidence": 0.5}),
+    ("effectiveness trend for Ops - Inbound over the last 2 months", {"intent": "full_trend_dept", "entities": {"department": "Ops - Inbound", "metric": "effectiveness"}, "confidence": 0.6}),
+    # --- Raw counts (LC/EL/DH/hours) across dimensions, with a filter override.
+    ("how many late comings in IT-Development excluding visit days", {"intent": "none", "entities": {"department": "IT-Development", "metric": "late_comings"}, "confidence": 0.4}),
+    ("deficient hour days for Priya's team on overtime shift only", {"intent": "none", "entities": {"manager": "Priya", "metric": "deficient_hours"}, "confidence": 0.35}),
+    ("total working hours for Aryan Gupta including wfh days", {"intent": "emp_working_pct", "entities": {"employee": "Aryan Gupta", "metric": "working_hours"}, "confidence": 0.4}),
+    # --- Flexible time-period phrasing (not "this month"/"last week") that
+    # should still resolve to the right intent, period parsing handled
+    # downstream by entities.py, not by the LLM.
+    ("pace score for the whole company over the last 3 weeks", {"intent": "none", "entities": {"metric": "pace_score", "month": "last 3 weeks"}, "confidence": 0.35}),
+    ("how did IT-Development do between 1 Aug and 20 Aug", {"intent": "none", "entities": {"department": "IT-Development", "month": "between 1 Aug and 20 Aug"}, "confidence": 0.35}),
 ]
 
 # ---------------------------------------------------------------------------

@@ -588,6 +588,39 @@ def extract_two_dates(text):
     return None, None, False
 
 
+def extract_single_date(text):
+    """Returns (date, True) for a SINGLE explicit calendar date mentioned in
+    `text` - for the employee-day-summary feature ("give me Aryan's summary
+    for 4 Sept"). Reuses extract_date_range() first (handles "yesterday",
+    "today", "on <date>", bare ISO) - if that returns a single-day range
+    (start == end), use it. Otherwise falls back to the same bare "N Month"/
+    "Month N" (no leading "on") token-scanning regex extract_two_dates() uses,
+    taking just the first date found - covers "for 4 Sept"/"summary 4 Sept"
+    phrasing where neither "on" nor a second date is present. Returns
+    (None, False) if no date is found; callers should default to yesterday
+    (the most recent day with real data - "today" never has data, per
+    PROJECT_BACKUP_2026-09-09.md §2) when nothing is mentioned."""
+    start, end, mentioned = extract_date_range(text)
+    if mentioned and start == end:
+        return start, True
+    if mentioned and start is not None:
+        return start, True  # a range was given; use its start as "the date"
+
+    text_l = text.lower()
+    _months_alt = "|".join(sorted(MONTH_NAMES.keys(), key=len, reverse=True))
+    _strict_month_day_re = (
+        r"(?:(?P<d1>\d{1,2})(?:st|nd|rd|th)?\s+(?P<m1>" + _months_alt + r")\b|"
+        r"\b(?P<m2>" + _months_alt + r")\s+(?P<d2>\d{1,2})(?:st|nd|rd|th)?)"
+    )
+    token_re = re.compile(r"(?:20\d{2}-\d{1,2}-\d{1,2})|(?:" + _strict_month_day_re + r")", re.I)
+    m = token_re.search(text_l)
+    if m:
+        d = _parse_single_date_token(m.group(0))
+        if d is not None:
+            return d, True
+    return None, False
+
+
 def last_4_weeks_periods(today=None):
     """Returns (cur_start, cur_end, prior_start, prior_end) for the
     gainer/loser ranking feature: current = last 4 complete calendar weeks

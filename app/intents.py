@@ -622,6 +622,23 @@ _GAINER_LOSER_PATTERNS = [
     r"\bwho dropped the most\b", r"\bwho improved the most\b",
     r"\bworst perform(er|ance)s?\b", r"\bbest perform(er|ance)s?\b",
 ]
+# New, additive intent: single-employee, single-day SNAPSHOT ("give me
+# [employee]'s summary for [date]"). Deliberately narrow/specific (requires
+# BOTH the word "summary"/"snapshot" AND an actual date token, or the literal
+# "day/daily summary" phrase) so it cannot shadow the existing, much broader
+# emp_overview ("how is X doing"), dept_summary ("department summary"), or
+# emp_attendance_summary ("attendance summary of employee") patterns below -
+# none of which require a date token or the bare word "summary"+date
+# together. Checked FIRST (top of _INTENTS) purely so a future, broader
+# pattern added below can never accidentally shadow this one; it does not
+# need priority over anything since it doesn't overlap by construction.
+_DAY_SUMMARY_PATTERNS = [
+    r"\bday\s+summary\b", r"\bdaily\s+summary\b",
+    r"\bsummary\b.*\b(for|on)\b.*(\d{1,2}(st|nd|rd|th)?\s*(jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|oct\w*|nov\w*|dec\w*)|(jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|oct\w*|nov\w*|dec\w*)\s+\d{1,2}|\d{4}-\d{1,2}-\d{1,2}|\byesterday\b|\btoday\b)",
+    r"\bsnapshot\b.*\b(for|on)\b",
+    r"\bhow was\b.*\bon\b.*(\d{1,2}(st|nd|rd|th)?\s*(jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|oct\w*|nov\w*|dec\w*)|(jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|oct\w*|nov\w*|dec\w*)\s+\d{1,2}|\d{4}-\d{1,2}-\d{1,2}|\byesterday\b)",
+]
+
 _EMP_OVERVIEW_PATTERNS = [
     r"\bhow is\b(?!.*\bmy team\b)(?!.*\bdepartment\b).*\bperforming\b",
     r"\bhow'?s\b(?!.*\bmy team\b).*\bperforming\b",
@@ -830,6 +847,7 @@ _PS_EXPLAIN_PATTERNS = [
 
 
 _INTENTS = [
+    ("employee_day_summary", _DAY_SUMMARY_PATTERNS),
     ("ps_exclude_metric", _PS_EXCLUDE_PATTERNS),
     ("ps_ratio_info", _PS_RATIO_PATTERNS),
     ("ps_explain", _PS_EXPLAIN_PATTERNS),
@@ -1031,6 +1049,7 @@ _CANONICAL_PHRASES = {
     "ot_ranking": ["most overtime hours", "who works the most overtime", "overtime ranking"],
     "full_trend_emp": ["pace score trend", "score trend over time", "month on month score"],
     "gainer_loser_ranking": ["top 10 gainer and loser last 4 weeks", "who improved and declined the most in the last 4 weeks", "top gainers and losers"],
+    "employee_day_summary": ["employee day summary for a date", "daily summary for employee on a date", "give me employee's summary for a date"],
 }
 
 # Intent pairs whose canonical phrases are close enough (share a metric word,
