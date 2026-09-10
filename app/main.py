@@ -835,6 +835,7 @@ _BUILD_QUERY_METRIC_LABELS = {
     "pace_score": "PACE score", "engagement_pct": "engagement %", "effectiveness_pct": "effectiveness %",
     "discipline_pct": "discipline %", "working_pct": "working hours %", "LC": "late-comings",
     "EL": "early leavings", "DH": "deficient-hour days", "working_hours": "total working hours",
+    "productive_minutes": "avg productive minutes",
 }
 
 _BUILD_QUERY_METRIC_PATTERNS = [
@@ -847,6 +848,10 @@ _BUILD_QUERY_METRIC_PATTERNS = [
     ("EL", r"\bearly[- ]?leaving(s)?\b|\bel\b"),
     ("DH", r"\bdeficient[- ]?hour(s)?\b|\bdh\b"),
     ("working_hours", r"\bworking hours\b|\bworked hours\b"),
+    # Added for the average_metric intent - "prod(uctive) minutes/mins" was
+    # previously not detectable by this engine at all (only reachable via
+    # dedicated ranking functions like productive_high/productive_low).
+    ("productive_minutes", r"\bprod(?:uctive)?\s*(minutes?|mins?)\b|\bproductive\b"),
 ]
 
 
@@ -890,7 +895,11 @@ def _detect_build_query_filters(message):
 def _format_build_query_rows(rows, dimension, metrics, name_label=None):
     if not rows:
         return f"No data found for {name_label or 'that scope'} in this period."
-    dim_col = {"employee": "emp_name", "rm": "reporting_manager_name", "department": "dept_name"}[dimension]
+    # "company" has no dimension column at all (build_query() returns one
+    # aggregate row, no GROUP BY) - always formatted via the single-row
+    # name_label branch below, never the multi-row table branch.
+    dim_col = {"employee": "emp_name", "rm": "reporting_manager_name", "department": "dept_name",
+               "company": None}[dimension]
     if len(rows) == 1 and name_label:
         row = rows[0]
         parts = ", ".join(f"{_BUILD_QUERY_METRIC_LABELS[m]}: {_fmt(row.get(m))}" for m in metrics)
@@ -932,18 +941,25 @@ def build_query_overview_reply(dimension, name, message="", period=None, session
     metrics = _detect_build_query_metrics(message)
     filters = _detect_build_query_filters(message)
     wants_list = dimension != "employee" and _WANTS_LIST_PATTERN.search(message or "") is not None
+    # "company" scope has no name at all (no department/RM/employee named) -
+    # label it explicitly rather than printing "None" anywhere in the reply.
+    name_label = name if name else "The whole company"
 
     def _summary_reply():
         rows = queries.build_query(dimension, metrics, filters=filters, period=period, name_filter=name, limit=1)
-        return _format_build_query_rows(rows, dimension, metrics, name_label=name), rows
+        return _format_build_query_rows(rows, dimension, metrics, name_label=name_label), rows
 
     def _list_reply(limit=500):
+        # "company" scope has no OTHER-dimension column to filter on (every
+        # employee is in scope) - pass scope=None instead of ("company", name),
+        # which build_query()'s scope-column lookup doesn't recognize.
+        scope = None if dimension == "company" else (dimension, name)
         rows = queries.build_query("employee", metrics, filters=filters, period=period,
-                                    scope=(dimension, name), limit=limit)
+                                    scope=scope, limit=limit)
         if not rows:
-            return f"No employees found for {name} in this period.", rows
+            return f"No employees found for {name_label} in this period.", rows
         table_reply = _format_build_query_rows(rows, "employee", metrics, name_label=None)
-        return f"{name} — employee list:\n\n{table_reply}", rows
+        return f"{name_label} — employee list:\n\n{table_reply}", rows
 
     if wants_list:
         reply, rows = _list_reply()
@@ -1878,6 +1894,61 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             f"PACE score (day): {_fmt(row['pace_score'])}"
         )
         return ChatResponse(reply=reply, rows=[row])
+
+    if intent == "average_metric":
+        # New, additive intent: a genuine "avg"/"average"/"mean" + metric
+        # [+ optional scope] request that computes ONE aggregate number (or,
+        # if the message explicitly asks for a "list", the per-employee
+        # breakdown behind that number - see build_query_overview_reply's
+        # own wants_list switch), never a ranking/full-list-of-everyone
+        # reply. This is the fix for the root-cause routing bug: a message
+        # like "avg prod minutes in whole company" previously matched NO
+        # rule-based intent at all (confirmed via a direct intents.match_intent()
+        # call before this round), so it fell through to the LLM classifier /
+        # SQL-fallback cascade, which could misroute it into an unrelated
+        # dept_best/dept_avg-style full department-ranking table instead of
+        # ever computing an average. Being a plain rule-based match now
+        # means this always wins BEFORE that LLM/SQL-fallback path is ever
+        # reached (rule-based intents take precedence unconditionally once
+        # non-None - same guarantee every other rule-based intent in this
+        # file already relies on).
+        #
+        # Scope resolution mirrors the bottom-of-cascade build_query()
+        # fallback in handle_message() exactly (employee -> department ->
+        # RM -> company-wide), reusing the same extract_employee/
+        # extract_department/extract_manager calls and fallback_text
+        # pattern - nothing new invented here. Employee resolution is
+        # checked first only so a message that happens to name both an
+        # individual AND a metric ("avg score for Aryan Gupta") still
+        # resolves to that person's own average rather than being
+        # mis-scoped; the common "avg X in whole company"/"avg X in <dept>"/
+        # "avg X for <RM>'s team" cases never name an individual, so they
+        # fall through correctly to department/RM/company-wide scope.
+        try:
+            avg_emp_id, avg_emp_name = entities.extract_employee(message, fallback_text=fb)
+        except entities.Ambiguous as e:
+            return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                                 needs_clarification=True, clarification_options=e.candidates)
+        avg_dept_name, avg_dept_candidates = entities.extract_department(message, fallback_text=fb)
+        try:
+            avg_mgr_id, avg_mgr_name = entities.extract_manager(message, fallback_text=fb)
+        except entities.Ambiguous:
+            avg_mgr_id, avg_mgr_name = None, None
+        avg_start, avg_end, avg_date_mentioned = entities.extract_date_range(message)
+        avg_period = (avg_start, avg_end) if avg_date_mentioned else date_range
+        if avg_emp_id:
+            reply, rows = build_query_overview_reply("employee", avg_emp_id, message, period=avg_period, session=session)
+        elif avg_dept_name and not avg_dept_candidates:
+            reply, rows = build_query_overview_reply("department", avg_dept_name, message, period=avg_period, session=session)
+        elif avg_mgr_id:
+            reply, rows = build_query_overview_reply("rm", avg_mgr_name, message, period=avg_period, session=session)
+        else:
+            # No named employee/department/RM at all - "whole company"
+            # (explicitly said or simply left unscoped, same convention as
+            # every other company-wide default in this file, e.g.
+            # gainer_loser_ranking/day_compare/month_compare).
+            reply, rows = build_query_overview_reply("company", None, message, period=avg_period, session=session)
+        return ChatResponse(reply=reply, rows=rows)
 
     if manager_id and employee_ids is None and intent in ("attendance_best", "attendance_worst"):
         rows = queries.team_attendance_ranking(manager_id, month, worst=(intent == "attendance_worst"))

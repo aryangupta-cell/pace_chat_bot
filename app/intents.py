@@ -875,6 +875,39 @@ _PS_EXPLAIN_PATTERNS = [
 ]
 
 
+# --- "average"/"avg" + metric [+ scope] (new item: genuine aggregate-single-
+# -number intent, not a ranking/list). Registered as the LAST rule-based
+# entry in _INTENTS (checked only after every other, more-specific existing
+# pattern above has already had a chance to match) so it cannot regress any
+# of the many pre-existing "average pace score ..." style phrasings that
+# already route correctly elsewhere (dept_avg's "average pace score by
+# department", the month-wise/trend patterns' "average pace score month
+# wise", avg_tenure's "average tenure", etc. - all of those are checked
+# earlier in this list and win first). It exists specifically to catch the
+# root-cause gap: a message naming "avg"/"average" + a real metric keyword
+# that matches NO other existing rule-based pattern at all previously fell
+# straight through the rule-based cascade to the LLM classifier / SQL
+# fallback, which (confirmed live, e.g. "avg prod minutes in whole company")
+# could silently misroute it into an unrelated department-ranking/list reply
+# instead of ever computing one aggregate number. Being a plain rule-based
+# match here means it now wins BEFORE the LLM/SQL-fallback path is ever
+# reached (rule-based intents always take precedence once non-None), which
+# is the actual routing/precedence fix, not just a bolted-on new function.
+_AVG_METRIC_WORD = (
+    r"pace\s*score|score"
+    r"|engagement|effectiveness|discipline"
+    r"|working\s*(?:hours?|%|percent(?:age)?)"
+    r"|late[- ]?coming(s)?|\blc\b|early[- ]?leaving(s)?|\bel\b"
+    r"|deficient[- ]?hour(s)?|\bdh\b"
+    r"|prod(?:uctive)?\s*(?:minutes?|mins?)"
+    r"|meeting\s*minutes?"
+)
+_AVERAGE_METRIC_PATTERNS = [
+    rf"\b(avg|average|mean)\b.*\b(?:{_AVG_METRIC_WORD})\b",
+    rf"\b(?:{_AVG_METRIC_WORD})\b.*\b(avg|average|mean)\b",
+]
+
+
 _INTENTS = [
     ("employee_day_summary", _DAY_SUMMARY_PATTERNS),
     ("ps_exclude_metric", _PS_EXCLUDE_PATTERNS),
@@ -964,6 +997,21 @@ _INTENTS = [
     ("rm_ranking_worst", _RM_RANKING_WORST_PATTERNS),
     ("dept_count", _DEPT_COUNT_PATTERNS),
     ("dept_summary", _DEPT_SUMMARY_PATTERNS),
+    # Checked BEFORE emp_pace_score/_EMP_FIELD_INTENTS on purpose: those
+    # patterns include very broad triggers like bare "score (of|for)" that
+    # would otherwise swallow "avg pace score for <RM name>'s team" by
+    # resolving <RM name> as an INDIVIDUAL employee (several real managers
+    # in this dataset, e.g. Nikhil Kumar, are also themselves employees -
+    # a known pre-existing ambiguity documented elsewhere in this file) and
+    # returning that person's own personal score instead of computing their
+    # team's average. A message that names "avg"/"average"/"mean" together
+    # with the word "team" is unambiguous - it is never asking for one
+    # individual's score - so it's routed to average_metric here, earlier
+    # than the individual-lookup patterns, while the narrower catch-all
+    # "average_metric" entry at the end of this list still exists for every
+    # non-team-worded average request that no other, more specific pattern
+    # above already claimed.
+    ("average_metric", [rf"\b(avg|average|mean)\b.*\bteam\b", rf"\bteam\b.*\b(avg|average|mean)\b"]),
     ("emp_pace_score", _EMP_PACE_SCORE_PATTERNS),
     ("emp_attendance_summary", _EMP_ATTENDANCE_SUMMARY_PATTERNS),
     ("emp_late_comings", _EMP_LATE_COMINGS_PATTERNS),
@@ -1007,6 +1055,7 @@ _INTENTS = [
     ("attendance_best", _ATTENDANCE_BEST_PATTERNS),
     ("productive_low", _PRODUCTIVE_LOW_PATTERNS),
     ("productive_high", _PRODUCTIVE_HIGH_PATTERNS),
+    ("average_metric", _AVERAGE_METRIC_PATTERNS),
 ]
 
 
@@ -1081,6 +1130,7 @@ _CANONICAL_PHRASES = {
     "gainer_loser_ranking": ["top 10 gainer and loser last 4 weeks", "who improved and declined the most in the last 4 weeks", "top gainers and losers"],
     "month_compare": ["was august better or july", "compare august to july", "august full month vs july full month"],
     "employee_day_summary": ["employee day summary for a date", "daily summary for employee on a date", "give me employee's summary for a date"],
+    "average_metric": ["average pace score in whole company", "avg engagement in a department", "average pace score for a team"],
 }
 
 # Intent pairs whose canonical phrases are close enough (share a metric word,

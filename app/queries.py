@@ -2456,6 +2456,12 @@ BUILD_QUERY_DIMENSIONS = {
     "employee": ("employee_id, emp_name, dept_name", ["employee_id", "emp_name", "dept_name"]),
     "rm": ("reporting_manager_name", ["reporting_manager_name"]),
     "department": ("dept_name", ["dept_name"]),
+    # "company": no GROUP BY at all - every matching row collapses into one
+    # aggregate row, used by the new average_metric intent for a "whole
+    # company" scope (no department/RM/employee named at all). New,
+    # additive - every existing caller still passes "employee"/"rm"/
+    # "department" and is unaffected.
+    "company": (None, []),
 }
 
 # metric key -> (sql aggregate expression against pace_1, human label).
@@ -2471,6 +2477,11 @@ BUILD_QUERY_METRICS = {
     "EL": ("sum(coalesce(el_flag_per_day,0))", "early leavings"),
     "DH": ("sum(coalesce(dh_flag_per_day,0))", "deficient-hour days"),
     "working_hours": ("sum(coalesce(worked_hours,0))", "total working hours"),
+    # Added for the new average_metric intent - raw productive-minutes was
+    # previously only reachable via dedicated functions, not this general
+    # engine. Averaged per employee-day, same treatment as the *_pct metrics
+    # above (not summed like the count metrics).
+    "productive_minutes": ("avg(coalesce(productive_and_meeting_min,0))", "avg productive minutes"),
 }
 
 BUILD_QUERY_DEFAULT_PERIOD_DAYS = 60
@@ -2598,13 +2609,20 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         where_clause = " and ".join(where)
 
     lim = limit or LIMIT
+    # "company" dimension has no group-by column(s) at all (select_cols is
+    # empty, group_cols is None) - every matching row collapses into ONE
+    # aggregate row, so the GROUP BY clause is omitted entirely rather than
+    # grouping by nothing. Every other dimension keeps the original
+    # behaviour unchanged.
+    select_parts = [c for c in ([", ".join(select_cols)] if select_cols else []) if c] + \
+        ["count(distinct employee_id) as n_employees"] + metric_exprs
+    group_by_clause = f"\n        group by {group_cols}" if group_cols else ""
+    order_col = '"pace_score"' if want_pace_score else (f'"{metrics[0]}"' if metrics else "n_employees")
     sql = f"""
-        select {", ".join(select_cols)}, count(distinct employee_id) as n_employees,
-               {", ".join(metric_exprs)}
+        select {", ".join(select_parts)}
         from public.pace_1
-        where {where_clause}
-        group by {group_cols}
-        order by {('"pace_score"' if want_pace_score else (f'"{metrics[0]}"' if metrics else "n_employees"))} desc nulls last
+        where {where_clause}{group_by_clause}
+        order by {order_col} desc nulls last
         limit %(limit)s
     """
     params["limit"] = lim
