@@ -1069,6 +1069,25 @@ _INTENTS = [
     ("productive_low", _PRODUCTIVE_LOW_PATTERNS),
     ("productive_high", _PRODUCTIVE_HIGH_PATTERNS),
     ("average_metric", _AVERAGE_METRIC_PATTERNS),
+    # item #66: generic "give me complete list of <dept/team> employees"
+    # phrasing (no status color word, no day-flag word) used to fuzzy-match
+    # into status_list (see _FUZZY_REQUIRES_KEYWORD above) and, once that was
+    # fixed, fell through to the non-deterministic LLM sql_fallback path
+    # instead of the deterministic build_query()-based roster this project
+    # already has - producing a THIRD, inconsistent population/shape for what
+    # is really just "list the employees in this department/RM-team", the
+    # same query build_query_overview_reply()'s list shape already answers
+    # consistently with its own "how is X doing" summary. Registered LAST
+    # (after every more specific list/status/day-flag pattern above, which
+    # all require their own specific keyword and so still win first) so it
+    # only ever catches the genuinely generic phrasing, and BEFORE the fuzzy
+    # fallback / LLM / sql_fallback cascade in main.py's handle_message(),
+    # same precedence every other rule-based intent already has.
+    ("roster_list", [
+        r"\b(complete |full |entire )?list\b.*\bemployees?\b",
+        r"\bemployees?\b.*\blist\b",
+        r"\blist all employees\b",
+    ]),
 ]
 
 
