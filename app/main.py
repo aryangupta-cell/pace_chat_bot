@@ -3580,21 +3580,43 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         # LLM path (which has no such consistency guarantee and costs real
         # spend). Resolution order mirrors the intent-is-None build_query
         # fallback below exactly (employee -> department -> RM).
-        try:
-            _rl_emp_id, _rl_emp_name = entities.extract_employee(message, fallback_text=raw_message)
-        except entities.Ambiguous as e:
-            return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
-                                 needs_clarification=True, clarification_options=e.candidates)
+        # Same "team" wording -> manager-resolved-first order as item #64's
+        # average_metric (see its comment above) - several managers in this
+        # dataset are ALSO individual employees (e.g. Nikhil Kumar), so
+        # without this, "complete list of <name>'s team employees" would
+        # resolve to that person's own single-row list instead of their
+        # team's roster.
+        _rl_wants_team = re.search(r"\bteam\b", message, re.IGNORECASE) is not None
+        _rl_emp_id = _rl_emp_name = None
+        _rl_mgr_id = _rl_mgr_name = None
+        if _rl_wants_team:
+            try:
+                _rl_mgr_id, _rl_mgr_name = entities.extract_manager(message, fallback_text=raw_message)
+            except entities.Ambiguous as e:
+                return ChatResponse(reply=f"Multiple managers match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                                     needs_clarification=True, clarification_options=e.candidates)
+            if not _rl_mgr_id:
+                try:
+                    _rl_emp_id, _rl_emp_name = entities.extract_employee(message, fallback_text=raw_message)
+                except entities.Ambiguous:
+                    pass  # a bare name-fragment collision on "team" wording - not a real employee lookup, ignore
+        else:
+            try:
+                _rl_emp_id, _rl_emp_name = entities.extract_employee(message, fallback_text=raw_message)
+            except entities.Ambiguous as e:
+                return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                                     needs_clarification=True, clarification_options=e.candidates)
+            if not _rl_emp_id:
+                try:
+                    _rl_mgr_id, _rl_mgr_name = entities.extract_manager(message, fallback_text=raw_message)
+                except entities.Ambiguous:
+                    _rl_mgr_id, _rl_mgr_name = None, None
         _rl_dept_name, _rl_dept_candidates = entities.extract_department(message, fallback_text=raw_message)
         if _rl_dept_candidates:
             return ChatResponse(
                 reply=f"I found multiple matching departments: {', '.join(_rl_dept_candidates)}. Which one did you mean?",
                 needs_clarification=True, clarification_options=_rl_dept_candidates,
             )
-        try:
-            _rl_mgr_id, _rl_mgr_name = entities.extract_manager(message, fallback_text=raw_message)
-        except entities.Ambiguous:
-            _rl_mgr_id, _rl_mgr_name = None, None
         _rl_date_start, _rl_date_end, _rl_date_mentioned = entities.extract_date_range(message)
         _rl_period = (_rl_date_start, _rl_date_end) if _rl_date_mentioned else None
         if _rl_emp_id:
