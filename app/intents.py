@@ -348,6 +348,35 @@ _DAY_COMPARE_PATTERNS = [
     r"\bwhich (was|is|were) more productive\b",
 ]
 
+# --- month-vs-month comparison ("was august better or july", "compare
+# august to july", "august full month and july full month") -----------------
+# Checked BEFORE day_compare (below) so an ordering/precedence question
+# never actually arises in practice, but the two are designed to be
+# mutually exclusive regardless of order: _BARE_MONTH_TOKEN's negative
+# lookaround guard rejects any month name immediately adjacent to a 1- or
+# 2-digit number (with or without a space), which is exactly what every
+# day_compare date token ("4 sept"/"sept 4"/"14 sept") looks like - so a
+# genuine day-level query like "which day was better 4 sept or 7 sept"
+# cannot match these patterns (no bare, digit-free month name is present),
+# and a genuine month-level query like "was august better or july" cannot
+# match day_compare's DATE_TOKEN-based patterns (no digit-adjacent month
+# is present there either). Mirrors entities.extract_two_months()'s own
+# guard exactly, so intent routing and entity extraction agree.
+_BARE_MONTH_TOKEN = r"(?<!\d)(?<!\d\d)(?<!\d\s)(?<!\d\d\s)\b" + _MONTHS_ALT + r"\b(?!\s*\d)"
+_MONTH_COMPARE_PATTERNS = [
+    # "was august better or july" / "is july better than august"
+    r"\b(?:was|is)\b.{0,15}?" + _BARE_MONTH_TOKEN + r".{0,20}?\b(?:better|worse|higher|higher score)\b"
+    r".{0,15}?\b(?:or|than)\b.{0,15}?" + _BARE_MONTH_TOKEN,
+    # "compare august to july" / "compare august with july"
+    r"\bcompare\b.{0,15}?" + _BARE_MONTH_TOKEN + r".{0,15}?\b(?:to|with|vs\.?|versus|and)\b.{0,15}?" + _BARE_MONTH_TOKEN,
+    # "august full month vs july full month" / "...and july full month"
+    _BARE_MONTH_TOKEN + r".{0,15}?\bfull month\b.{0,20}?\b(?:vs\.?|versus|and)\b.{0,20}?"
+    + _BARE_MONTH_TOKEN + r".{0,15}?\bfull month\b",
+    # bare "August vs July" / "August versus July"
+    _BARE_MONTH_TOKEN + r"\b.{0,8}\b(?:vs\.?|versus)\b.{0,8}\b" + _BARE_MONTH_TOKEN,
+    r"\bwhich month\b.{0,30}\b(?:better|worse|higher|higher score)\b",
+]
+
 # --- Category F: attendance specifics ----------------------------------------
 _CHRONIC_LATE_PATTERNS = [
     r"\bchronically late\b", r"\bhabitually late\b",
@@ -876,6 +905,7 @@ _INTENTS = [
     ("ps_worked_emp", _PS_WORKED_EMP_PATTERNS),
     ("ps_worked_ranking", _PS_WORKED_RANKING_PATTERNS),
     ("emp_overview", _EMP_OVERVIEW_PATTERNS),
+    ("month_compare", _MONTH_COMPARE_PATTERNS),
     ("day_compare", _DAY_COMPARE_PATTERNS),
     ("dept_compare", _DEPT_COMPARE_PATTERNS),
     ("team_compare", _TEAM_COMPARE_PATTERNS),
@@ -1049,6 +1079,7 @@ _CANONICAL_PHRASES = {
     "ot_ranking": ["most overtime hours", "who works the most overtime", "overtime ranking"],
     "full_trend_emp": ["pace score trend", "score trend over time", "month on month score"],
     "gainer_loser_ranking": ["top 10 gainer and loser last 4 weeks", "who improved and declined the most in the last 4 weeks", "top gainers and losers"],
+    "month_compare": ["was august better or july", "compare august to july", "august full month vs july full month"],
     "employee_day_summary": ["employee day summary for a date", "daily summary for employee on a date", "give me employee's summary for a date"],
 }
 

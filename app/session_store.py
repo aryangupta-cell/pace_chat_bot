@@ -82,7 +82,7 @@ def get_session(session_id):
 
 
 def push_context(session, dept_name=None, employee_id=None, employee_name=None, month=None,
-                  date_range=None, day_compare_dates=None):
+                  date_range=None, day_compare_dates=None, month_compare_months=None):
     """Record what was EXPLICITLY named in this turn (pass None for anything
     not mentioned this turn - do not pass through an already-inherited
     value, so this only reflects real mentions, not propagated guesses).
@@ -104,6 +104,8 @@ def push_context(session, dept_name=None, employee_id=None, employee_name=None, 
         ctx["date_range"] = date_range
     if day_compare_dates is not None:
         ctx["day_compare_dates"] = day_compare_dates
+    if month_compare_months is not None:
+        ctx["month_compare_months"] = month_compare_months
 
 
 def set_last_list(session, kind, rerun_list=None, rerun_same=None, answer_kind="count",

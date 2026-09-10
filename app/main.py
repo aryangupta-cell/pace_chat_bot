@@ -888,6 +888,83 @@ def _handle_day_compare(message, raw_message, session):
     return ChatResponse(reply=format_day_compare(results, d1, d2, subject_label, filter_footer), rows=results)
 
 
+def _month_label(month_str):
+    """'2026-08' -> 'August 2026' - a readable label for format_day_compare's
+    date1/date2 params, which are printed verbatim ("Comparing X on {date1}
+    vs {date2}:") - reused as-is for month comparison rather than writing a
+    parallel formatter, per the confirmed instruction to reuse the existing
+    comparison response logic wherever it genuinely fits."""
+    try:
+        y, m = month_str.split("-")
+        dt = datetime.date(int(y), int(m), 1)
+        return dt.strftime("%B %Y")
+    except (ValueError, AttributeError):
+        return month_str
+
+
+def _handle_month_compare(message, raw_message, session):
+    """Company-wide (or dept/employee-scoped) month-vs-month comparison -
+    the month-granularity sibling of _handle_day_compare above. Deliberately
+    mirrors that function's structure almost line-for-line (dept/employee
+    resolution, sticky-context fallback, metric detection, population
+    filter, tie-threshold formatting) rather than inventing a parallel
+    shape, per the explicit instruction to reuse as much of the existing
+    day-comparison logic as fits."""
+    fb = raw_message if raw_message and raw_message != message else None
+    m1, m2, found = entities.extract_two_months(message)
+    if not found:
+        # Same sticky-follow-up pattern as day_compare: a same-session
+        # follow-up naming no months ("was it better this time?") reuses
+        # the last month pair explicitly compared this session, if any.
+        ctx_months = session_store.get_recent_context(session, "month_compare_months")
+        if ctx_months:
+            m1, m2 = ctx_months
+        else:
+            return ChatResponse(
+                reply="Which two months would you like me to compare — e.g. \"August vs July\"?"
+            )
+    if m2 < m1:
+        m1, m2 = m2, m1
+
+    session_store.push_context(session, month_compare_months=(m1, m2))
+
+    # Reuses day_compare's own metric-keyword detector/METRICS dict
+    # verbatim - same default (new_pace_score_7_3_event_level, aliased
+    # "pace") and the same explicit-metric-name mapping, per the confirmed
+    # business rule that this feature's default metric follows the exact
+    # same rule as day-vs-day comparison.
+    metric_keys = _day_compare_metrics(message)
+
+    employee_id = None
+    subject_label = "the full company"
+    try:
+        emp_id, emp_name = entities.extract_employee(message, fallback_text=fb)
+    except entities.Ambiguous as e:
+        return ChatResponse(
+            reply=f"I found multiple matching employees: {', '.join(e.candidates)}. Which one did you mean?",
+            needs_clarification=True, clarification_options=e.candidates,
+        )
+    dept_name, dept_candidates = entities.extract_department(message, fallback_text=fb)
+    if dept_candidates:
+        return ChatResponse(
+            reply=f"I found multiple matching departments: {', '.join(dept_candidates)}. Which one did you mean?",
+            needs_clarification=True, clarification_options=dept_candidates,
+        )
+
+    if emp_id:
+        employee_id = emp_id
+        subject_label = emp_name
+        dept_name = None
+    elif dept_name:
+        subject_label = dept_name
+
+    filter_sql, filter_footer = _resolve_population_filter(message)
+    results = queries.month_compare(m1, m2, dept_name=dept_name, employee_id=employee_id,
+                                     metric_keys=metric_keys, filter_sql=filter_sql)
+    label1, label2 = _month_label(m1), _month_label(m2)
+    return ChatResponse(reply=format_day_compare(results, label1, label2, subject_label, filter_footer), rows=results)
+
+
 def format_score_delta_ranking(rows, meta, header_prefix):
     """Table of employees ranked by CURRENT-MONTH-AVG vs PRIOR-MONTH-AVG
     PACE score change (month-over-month) — same MIN_DAYS_FOR_DELTA
@@ -3006,6 +3083,14 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
                 needs_clarification=True,
                 clarification_options=[llm_intent, opposite_of_llm],
             )
+
+    if intent == "month_compare":
+        # Month-vs-month comparison has its own dedicated resolution (see
+        # _handle_month_compare), mirroring day_compare's short-circuit
+        # immediately below for the same reason: the generic dept-extraction/
+        # self-referential/named-manager machinery doesn't know about
+        # two-month comparisons.
+        return _handle_month_compare(message, raw_message, session)
 
     if intent == "day_compare":
         # Day-vs-day / metric comparison has its own dedicated dept/employee

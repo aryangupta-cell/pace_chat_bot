@@ -1491,6 +1491,108 @@ def day_compare(date1, date2, dept_name=None, employee_id=None, metric_keys=None
     return results
 
 
+def month_compare(month1, month2, dept_name=None, employee_id=None, metric_keys=None, filter_sql=None):
+    """Company-wide (or dept/employee-scoped) average comparison of one or
+    more metrics between two full calendar months ('YYYY-MM' strings) -
+    the month-granularity sibling of day_compare() above. Reuses
+    DAY_COMPARE_METRICS for metric labels/defaults and the exact same
+    tie-handling contract (result shape: {metric_key, label, val1, val2,
+    n1, n2}), so main.py's existing format_day_compare() formats this
+    output verbatim - no parallel response formatter was written.
+
+    For metric_key == DEFAULT_DAY_COMPARE_METRIC ("pace"), this uses the
+    SAME capped-average-first-then-formula-once methodology as
+    employee_full_monthly_trend()/dept_ranking()/rm_ranking()/build_query()
+    (Jensen's-inequality fix, see SESSION_HANDOFF.md items #52/#55): the 4
+    capped_* ingredients are averaged across EVERY applicable row for that
+    month at the requested scope (company-wide by default, or narrowed by
+    dept_name/employee_id) FIRST, then the score formula is applied ONCE
+    per month - never averaging a per-row precomputed score. This is a
+    genuinely different aggregation shape from day_compare()'s single-day
+    pace metric (which needs no such correction - a single calendar day
+    has no per-employee multi-day averaging to get wrong), but the exact
+    same fix already proven correct for month-level aggregates elsewhere
+    in this file.
+
+    For every other metric_key, this mirrors day_compare()'s own simple
+    avg(<pct column>) treatment for non-pace metrics, for consistency with
+    the sibling feature rather than introducing a second methodology.
+
+    `filter_sql` is the full population filter, same convention as
+    day_compare()/gainer_loser_ranking() - required; main.py's
+    _resolve_population_filter always supplies one (shift_type='Standard'
+    AND visit_flag='No' AND ps_worked_flag_day=1 by default)."""
+    keys = metric_keys or [DEFAULT_DAY_COMPARE_METRIC]
+    pop_filter = f"and {filter_sql}" if filter_sql else "and shift_type = 'Standard'"
+    months = [month1, month2]
+    results = []
+    for key in keys:
+        if key == "pace":
+            sql = f"""
+                select to_char(worked_day,'YYYY-MM') as mo,
+                       avg(capped_engagement) as avg_e,
+                       avg(capped_effectiveness) as avg_ef,
+                       avg(capped_discipline) as avg_d,
+                       avg(capped_working_hours) as avg_w,
+                       count(*) as n
+                from public.pace_1
+                where to_char(worked_day,'YYYY-MM') = any(%(months)s)
+                  and capped_engagement is not null and capped_effectiveness is not null
+                  and capped_discipline is not null and capped_working_hours is not null
+                  and (%(dept_name)s is null or dept_name = %(dept_name)s)
+                  and (%(employee_id)s is null or employee_id = %(employee_id)s)
+                  {pop_filter}
+                group by 1
+            """
+            params = {"months": months, "dept_name": dept_name, "employee_id": employee_id}
+            rows = run_query(sql, params)
+            by_mo = {r["mo"]: r for r in rows}
+
+            def _score(r):
+                if not r or r["avg_e"] is None:
+                    return None, 0
+                val = min(100, round(
+                    ((float(r["avg_e"]) * float(r["avg_ef"]) * float(r["avg_w"]) * 7)
+                     + (float(r["avg_d"]) * 3)) * 10
+                ))
+                return val, r["n"]
+
+            v1, n1 = _score(by_mo.get(month1))
+            v2, n2 = _score(by_mo.get(month2))
+            label = DAY_COMPARE_METRICS["pace"][1]
+        else:
+            col, label = DAY_COMPARE_METRICS.get(key, DAY_COMPARE_METRICS[DEFAULT_DAY_COMPARE_METRIC])
+            sql = f"""
+                select to_char(worked_day,'YYYY-MM') as mo, avg({col}) as val, count(*) as n
+                from public.pace_1
+                where to_char(worked_day,'YYYY-MM') = any(%(months)s)
+                  and {col} is not null
+                  and (%(dept_name)s is null or dept_name = %(dept_name)s)
+                  and (%(employee_id)s is null or employee_id = %(employee_id)s)
+                  {pop_filter}
+                group by 1
+            """
+            params = {"months": months, "dept_name": dept_name, "employee_id": employee_id}
+            rows = run_query(sql, params)
+            by_mo = {r["mo"]: r for r in rows}
+            r1 = by_mo.get(month1)
+            r2 = by_mo.get(month2)
+            v1 = r1["val"] if r1 else None
+            n1 = r1["n"] if r1 else 0
+            v2 = r2["val"] if r2 else None
+            n2 = r2["n"] if r2 else 0
+
+        results.append({
+            "metric_key": key,
+            "label": label,
+            "val1": v1,
+            "val2": v2,
+            "n1": n1,
+            "n2": n2,
+        })
+    return results
+
+
 # --- Sub-score (engagement/effectiveness/discipline) cross-compare & trend --
 
 SUBSCORES = {

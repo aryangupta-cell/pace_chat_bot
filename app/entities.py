@@ -588,6 +588,52 @@ def extract_two_dates(text):
     return None, None, False
 
 
+def extract_two_months(text):
+    """Finds TWO distinct calendar MONTHS named anywhere in `text`, for the
+    month-vs-month comparison feature ("was august better or july",
+    "compare august to july", "august full month and july full month").
+    Deliberately ignores a month name that is part of a digit-adjacent
+    day-date token (e.g. "4 sept" / "sept 4" / "14th september") via a
+    negative-lookaround guard - those are day-level tokens that
+    extract_two_dates() already owns; a bare month name with no adjacent
+    day digit is the only thing this function claims, so the two features
+    stay mutually exclusive without needing the caller to try one before
+    the other. If an explicit 4-digit year is present anywhere in the text
+    it's applied to BOTH months (a comparison spanning a year boundary,
+    e.g. "december vs january", is out of scope - both months resolve to
+    the same year, a documented limitation). Returns (month1, month2,
+    True) as 'YYYY-MM' strings in order of first appearance, or
+    (None, None, False) if fewer than two distinct months are found."""
+    text_l = text.lower()
+    today = datetime.date.today()
+    year_m = re.search(r"\b(20\d{2})\b", text_l)
+    default_year = int(year_m.group(1)) if year_m else today.year
+
+    _months_alt = "|".join(sorted(MONTH_NAMES.keys(), key=len, reverse=True))
+    # Guard: reject a month token that's immediately adjacent (with or
+    # without a single space) to a 1- or 2-digit number on either side -
+    # that's a day-date token ("4 sept"/"sept 4"/"14 sept"), not a bare
+    # month-name mention. Ordinal suffixes ("4th") are not guarded against
+    # (fixed-width lookbehind only) - a known, narrow limitation.
+    bare_month_re = re.compile(
+        r"(?<!\d)(?<!\d\d)(?<!\d\s)(?<!\d\d\s)\b(" + _months_alt + r")\b(?!\s*\d)",
+        re.I,
+    )
+    found = []
+    for m in bare_month_re.finditer(text_l):
+        num = MONTH_NAMES.get(m.group(1).lower())
+        if num is None:
+            continue
+        month_str = f"{default_year:04d}-{num:02d}"
+        if month_str not in found:
+            found.append(month_str)
+        if len(found) >= 2:
+            break
+    if len(found) >= 2:
+        return found[0], found[1], True
+    return None, None, False
+
+
 def extract_single_date(text):
     """Returns (date, True) for a SINGLE explicit calendar date mentioned in
     `text` - for the employee-day-summary feature ("give me Aryan's summary
