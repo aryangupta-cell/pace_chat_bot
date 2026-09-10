@@ -1170,6 +1170,29 @@ _OPPOSITE_INTENTS = {
 FUZZY_INTENT_THRESHOLD = 82  # conservative: must be a strong, confident match
 FUZZY_OPPOSITE_MARGIN = 8    # if the opposite intent scores within this of the winner, refuse rather than guess
 
+# Bug found while investigating the "how is X doing" vs "complete list of X
+# employees" employee-count mismatch (item #66): a generic "give me complete
+# list of <dept> employees" phrase (NO color word at all) scored 82.35 via
+# token_set_ratio against status_list's own canonical phrase "list black
+# employees" - just over FUZZY_INTENT_THRESHOLD - because token_set_ratio
+# scores heavily on the shared "list"/"employees" tokens alone, same
+# collision CLASS as item #63's bare-word bug but for a multi-word phrase, so
+# the item #63 "refuse fuzzy matches under 2 words" guard doesn't catch it.
+# This silently routed a plain department-roster request into
+# queries.status_list() - a completely different population definition
+# (latest worked_day row per employee, NO period/PS/visit/shift-type
+# filtering at all) than the "how is X doing" summary's build_query() path
+# (last-60-days, PS-working, non-visit, Standard-shift only) - producing two
+# different employee counts for what the user reasonably expects to be the
+# same scope. Fix: intents whose canonical phrases are only meaningful
+# together with a specific keyword (status_list/status_count's color word)
+# must not win a fuzzy match when that keyword is actually absent from the
+# input - disqualified below before the argmax, not just scored normally.
+_FUZZY_REQUIRES_KEYWORD = {
+    "status_list": r"\b(black|red|amber|green)\b",
+    "status_count": r"\b(black|red|amber|green)\b",
+}
+
 
 def _fuzzy_match_intent(text_l):
     # Defense-in-depth (item #63): rapidfuzz's token_set_ratio scores a
@@ -1193,6 +1216,13 @@ def _fuzzy_match_intent(text_l):
     scores = {}
     for intent_name, phrases in _CANONICAL_PHRASES.items():
         scores[intent_name] = max(fuzz.token_set_ratio(text_l, p) for p in phrases)
+
+    # Disqualify intents that require a specific keyword (e.g. status_list's
+    # color word) but the input doesn't actually contain it - see
+    # _FUZZY_REQUIRES_KEYWORD above (item #66).
+    for intent_name, required_pat in _FUZZY_REQUIRES_KEYWORD.items():
+        if intent_name in scores and not re.search(required_pat, text_l):
+            scores[intent_name] = -1
 
     best_intent = max(scores, key=scores.get)
     best_score = scores[best_intent]
