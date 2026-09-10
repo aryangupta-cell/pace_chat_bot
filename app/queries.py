@@ -2324,3 +2324,167 @@ def ps_off_ranking(dept_name, month=None, date_range=None, employee_ids=None, as
     """
     params["limit"] = limit or 10
     return run_query(sql, params)
+
+
+# ---------------------------------------------------------------------------
+# Category N (new, additive) — build_query(): a general parametrized query
+# engine for the ~87 hand-verified intents' fallback path. NOT wired into any
+# existing intent - see app/main.py's routing, which only reaches this after
+# rule-based matching AND the LLM-classification/SQL-fallback cascade both
+# fail to find a real intent (or for bare dimension+overview phrasing with no
+# existing coverage, e.g. the item #56 "how is ai labs doing" bug). Every one
+# of the 87 existing intents keeps using its own hand-written function,
+# unchanged, with priority over this - per the project's standing rule
+# against discarding prior hand-verified work (see SESSION_HANDOFF.md).
+#
+# Always queries public.pace_1 directly (never pace_chatbot_view): every
+# filter this engine supports by default (ps_worked_flag_day, visit_flag,
+# shift_type) lives only on pace_1, same reason metric_ranking_ps_filtered()
+# and the other PS-filtered functions above do the same thing.
+# ---------------------------------------------------------------------------
+
+BUILD_QUERY_DIMENSIONS = {
+    "employee": ("employee_id, emp_name, dept_name", ["employee_id", "emp_name", "dept_name"]),
+    "rm": ("reporting_manager_name", ["reporting_manager_name"]),
+    "department": ("dept_name", ["dept_name"]),
+}
+
+# metric key -> (sql aggregate expression against pace_1, human label).
+# "pace_score" is handled separately below (capped-average-first-then-
+# formula-once, same pattern as dept_ranking()/rm_ranking() - see their
+# docstrings for the Jensen's-inequality bug this avoids).
+BUILD_QUERY_METRICS = {
+    "engagement_pct": ("avg(engagement_pct)", "avg engagement %"),
+    "effectiveness_pct": ("avg(effectiveness_pct)", "avg effectiveness %"),
+    "discipline_pct": ("avg(discipline_pct)", "avg discipline %"),
+    "working_pct": ("avg(working_pct)", "avg working hours %"),
+    "LC": ("sum(coalesce(lc_flag_per_day,0))", "late-comings"),
+    "EL": ("sum(coalesce(el_flag_per_day,0))", "early leavings"),
+    "DH": ("sum(coalesce(dh_flag_per_day,0))", "deficient-hour days"),
+    "working_hours": ("sum(coalesce(worked_hours,0))", "total working hours"),
+}
+
+BUILD_QUERY_DEFAULT_PERIOD_DAYS = 60
+
+
+def _build_query_default_period():
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=BUILD_QUERY_DEFAULT_PERIOD_DAYS - 1)
+    return start, end
+
+
+def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None):
+    """General parametrized engine: SELECT <metrics> GROUP BY <dimension> FROM
+    public.pace_1 WHERE <filters> AND <period>.
+
+    dimension: "employee" | "rm" | "department" - what to group by.
+    metrics: list of BUILD_QUERY_METRICS keys, plus "pace_score" (special-
+        cased below to reuse the exact capped-average-first-then-formula-once
+        pattern already verified in dept_ranking()/rm_ranking()).
+    filters: dict, any of:
+        ps_status: "working" (default, ps_worked_flag_day=1) | "not_working" (=0) | "any" (no filter)
+        visit_status: "no" (default, visit_flag='No') | "yes" (visit_flag='Yes') | "any"
+        work_mode: None (default - no filter) | "wfh" (wfh_status='Work From Home') | "office"
+        shift_type: "Standard" (default) | any other pace_1 shift_type value | "any"
+    period: (start_date, end_date) tuple, or None -> defaults to the last 60
+        days (today inclusive).
+    name_filter: optional exact dept_name / reporting_manager_name / employee_id
+        to scope to one group (e.g. a single department's overview).
+    limit: max rows returned (default LIMIT for a ranking-style call; a
+        single-name_filter call naturally returns <= 1 row regardless).
+
+    Returns a list of dict rows, one per group, each with the dimension's
+    key column(s), `n_employees`, and one column per requested metric
+    (pace_score as `pace_score`, others under their BUILD_QUERY_METRICS key).
+    """
+    if dimension not in BUILD_QUERY_DIMENSIONS:
+        raise ValueError(f"build_query: unknown dimension {dimension!r}")
+    group_cols, select_cols = BUILD_QUERY_DIMENSIONS[dimension]
+
+    filters = dict(filters or {})
+    ps_status = filters.get("ps_status", "working")
+    visit_status = filters.get("visit_status", "no")
+    work_mode = filters.get("work_mode")  # None means "no filter" - matches the confirmed default
+    shift_type = filters.get("shift_type", "Standard")
+
+    where = []
+    params = {}
+    if ps_status == "working":
+        where.append("ps_worked_flag_day = 1")
+    elif ps_status == "not_working":
+        where.append("(ps_worked_flag_day = 0 or ps_worked_flag_day is null)")
+    # ps_status == "any" -> no clause
+
+    if visit_status == "no":
+        where.append("visit_flag = 'No'")
+    elif visit_status == "yes":
+        where.append("visit_flag = 'Yes'")
+    # visit_status == "any" -> no clause
+
+    if work_mode == "wfh":
+        where.append("wfh_status = 'Work From Home'")
+    elif work_mode == "office":
+        where.append("(wfh_status is null or wfh_status <> 'Work From Home')")
+    # work_mode is None -> no clause (confirmed default: no work-mode filter)
+
+    if shift_type and shift_type != "any":
+        where.append("shift_type = %(shift_type)s")
+        params["shift_type"] = shift_type
+
+    if period is None:
+        period = _build_query_default_period()
+    start, end = period
+    where.append("worked_day between %(date_start)s and %(date_end)s")
+    params["date_start"] = start
+    params["date_end"] = end
+
+    if name_filter:
+        col = {"employee": "employee_id", "rm": "reporting_manager_name", "department": "dept_name"}[dimension]
+        where.append(f"{col} = %(name_filter)s")
+        params["name_filter"] = name_filter
+
+    if dimension in ("rm", "department"):
+        col = "reporting_manager_name" if dimension == "rm" else "dept_name"
+        where.append(f"{col} is not null")
+
+    where_clause = " and ".join(where) if where else "true"
+
+    select_exprs = list(select_cols)
+    want_pace_score = "pace_score" in metrics
+    metric_exprs = []
+    for m in metrics:
+        if m == "pace_score":
+            continue
+        if m not in BUILD_QUERY_METRICS:
+            raise ValueError(f"build_query: unknown metric {m!r}")
+        expr, _ = BUILD_QUERY_METRICS[m]
+        metric_exprs.append(f'{expr} as "{m}"')
+
+    if want_pace_score:
+        # Same capped-average-first-then-formula-once pattern as
+        # dept_ranking()/rm_ranking() for metric_key="pace_score" - averaging
+        # the 4 capped_* ingredients per group and applying the score formula
+        # ONCE, instead of averaging the view's pre-computed per-row score
+        # (the Jensen's-inequality bug fixed in commit c1604cb).
+        metric_exprs.append(
+            "least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * "
+            'avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as "pace_score"'
+        )
+        where.append(
+            "capped_engagement is not null and capped_effectiveness is not null "
+            "and capped_discipline is not null and capped_working_hours is not null"
+        )
+        where_clause = " and ".join(where)
+
+    lim = limit or LIMIT
+    sql = f"""
+        select {", ".join(select_cols)}, count(distinct employee_id) as n_employees,
+               {", ".join(metric_exprs)}
+        from public.pace_1
+        where {where_clause}
+        group by {group_cols}
+        order by {('"pace_score"' if want_pace_score else (f'"{metrics[0]}"' if metrics else "n_employees"))} desc nulls last
+        limit %(limit)s
+    """
+    params["limit"] = lim
+    return run_query(sql, params)

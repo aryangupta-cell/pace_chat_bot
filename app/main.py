@@ -600,6 +600,92 @@ def _resolve_population_filter(message):
     return filter_sql, footer
 
 
+_BUILD_QUERY_ALL_METRICS = ["pace_score", "engagement_pct", "effectiveness_pct", "discipline_pct",
+                            "working_pct", "LC", "EL", "DH", "working_hours"]
+_BUILD_QUERY_METRIC_LABELS = {
+    "pace_score": "PACE score", "engagement_pct": "engagement %", "effectiveness_pct": "effectiveness %",
+    "discipline_pct": "discipline %", "working_pct": "working hours %", "LC": "late-comings",
+    "EL": "early leavings", "DH": "deficient-hour days", "working_hours": "total working hours",
+}
+
+_BUILD_QUERY_METRIC_PATTERNS = [
+    ("pace_score", r"\bpace score\b|\bscore\b"),
+    ("engagement_pct", r"\bengagement\b"),
+    ("effectiveness_pct", r"\beffectiveness\b"),
+    ("discipline_pct", r"\bdiscipline\b"),
+    ("working_pct", r"\bworking (%|percent|percentage)\b|\bworking hours %\b"),
+    ("LC", r"\blate[- ]?coming(s)?\b|\blc\b"),
+    ("EL", r"\bearly[- ]?leaving(s)?\b|\bel\b"),
+    ("DH", r"\bdeficient[- ]?hour(s)?\b|\bdh\b"),
+    ("working_hours", r"\bworking hours\b|\bworked hours\b"),
+]
+
+
+def _detect_build_query_metrics(message):
+    """Picks the metric(s) named in `message` from BUILD_QUERY_METRICS + pace_score.
+    Falls back to just ["pace_score"] (the overwhelmingly common "how is X
+    doing" case) when nothing more specific is named."""
+    text_l = (message or "").lower()
+    found = []
+    for key, pat in _BUILD_QUERY_METRIC_PATTERNS:
+        if re.search(pat, text_l) and key not in found:
+            found.append(key)
+    return found or ["pace_score"]
+
+
+def _detect_build_query_filters(message):
+    """Reuses the same override-detection regexes as _resolve_population_filter
+    (ps/visit/shift) plus a WFH/office check, returning a filters dict for
+    queries.build_query() - None for anything not explicitly overridden so
+    build_query's own confirmed defaults (ps_worked_flag_day=1, visit_flag='No',
+    shift_type='Standard', no work-mode filter) apply."""
+    text_l = (message or "").lower()
+    filters = {}
+    if re.search(_PS_NOT_WORKING_PATTERN, text_l):
+        filters["ps_status"] = "not_working"
+    elif re.search(_PS_WORKING_PATTERN, text_l):
+        filters["ps_status"] = "working"
+    if re.search(_VISIT_YES_PATTERN, text_l) and not re.search(_VISIT_NO_PATTERN, text_l):
+        filters["visit_status"] = "yes"
+    elif re.search(_VISIT_NO_PATTERN, text_l):
+        filters["visit_status"] = "no"
+    if re.search(r"\bwfh\b|\bwork(ing)? from home\b|\bremote\b", text_l):
+        filters["work_mode"] = "wfh"
+    if re.search(_OT_PATTERN, text_l):
+        filters["shift_type"] = "Overtime (OT)"
+    elif re.search(_STANDARD_PATTERN, text_l):
+        filters["shift_type"] = "Standard"
+    return filters
+
+
+def _format_build_query_rows(rows, dimension, metrics, name_label=None):
+    if not rows:
+        return f"No data found for {name_label or 'that scope'} in this period."
+    dim_col = {"employee": "emp_name", "rm": "reporting_manager_name", "department": "dept_name"}[dimension]
+    if len(rows) == 1 and name_label:
+        row = rows[0]
+        parts = ", ".join(f"{_BUILD_QUERY_METRIC_LABELS[m]}: {_fmt(row.get(m))}" for m in metrics)
+        return f"{name_label} — {row.get('n_employees')} employee(s)\n{parts}"
+    headers = [dimension.capitalize()] + [_BUILD_QUERY_METRIC_LABELS[m] for m in metrics]
+    data = []
+    for r in rows:
+        data.append([r.get(dim_col)] + [_fmt(r.get(m)) for m in metrics])
+    return _render_table(headers, data)
+
+
+def build_query_overview_reply(dimension, name, message="", period=None):
+    """Shared helper: runs queries.build_query() for a single named
+    employee/RM/department scope and formats a reply - used both by the
+    'how is ai labs doing'-style bug fix (redirecting a failed single-
+    employee lookup to a department/RM overview when the name actually
+    matches a department/RM instead) and by the new general fallback engine
+    in handle_message()."""
+    metrics = _detect_build_query_metrics(message)
+    filters = _detect_build_query_filters(message)
+    rows = queries.build_query(dimension, metrics, filters=filters, period=period, name_filter=name, limit=1)
+    return _format_build_query_rows(rows, dimension, metrics, name_label=name), rows
+
+
 def format_gainer_loser_ranking(gainers, losers, meta, scope_note, directions, filter_footer):
     window_note = (
         f"Current period: {meta['cur_start']} to {meta['cur_end']} vs "
@@ -1571,6 +1657,15 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             _last = session_store.get_last_list(session) if session is not None else None
             _bulk_request = _BULK_ALL_EMPLOYEES_PATTERN.search(message) is not None
             _ranking_context = _last is not None and _last.get("kind") == "ranking"
+            # item #56 fix: same bare department/RM-team overview redirect as
+            # emp_overview below - "score of ai labs dept" resolves no
+            # employee but a dept_name, so answer the department's overview
+            # via build_query() instead of falling through to "couldn't find
+            # that employee". Only fires when neither the bulk-list nor
+            # active-ranking-context branch above already handled it.
+            if dept_name and not (_bulk_request or _ranking_context):
+                reply, rows = build_query_overview_reply("department", dept_name, message, period=date_range)
+                return ChatResponse(reply=reply, rows=rows)
             if _metric_key is not None and (_bulk_request or _ranking_context):
                 rows = queries.metric_ranking(
                     _metric_key, dept_name, month, ascending=False, employee_ids=employee_ids,
@@ -2166,6 +2261,20 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
                                  needs_clarification=True, clarification_options=e.candidates)
         if emp_id is None:
+            # item #56 fix: a bare department/RM-team overview phrase ("how
+            # is ai labs doing", "how is ai labs dept doing") with no keyword
+            # like "department"/"my team" was wrongly caught by
+            # _EMP_OVERVIEW_PATTERNS' name-lookup path and failed here with
+            # "couldn't find that employee" - dept_name is already resolved
+            # above from the same message (entities.extract_department has
+            # no keyword requirement), so redirect to a department overview
+            # via the new build_query() engine instead of failing.
+            if dept_name:
+                reply, rows = build_query_overview_reply("department", dept_name, message, period=date_range)
+                return ChatResponse(reply=reply, rows=rows)
+            if manager_id:
+                reply, rows = build_query_overview_reply("rm", manager_name, message, period=date_range)
+                return ChatResponse(reply=reply, rows=rows)
             return ChatResponse(reply="I couldn't find that employee — please give me their exact full name or employee code.")
         detail = queries.employee_detail(emp_id, month)
         return ChatResponse(reply=format_employee_detail(detail, emp_name), rows=[detail] if detail else [])
@@ -2830,6 +2939,35 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
                 needs_clarification=True,
                 clarification_options=[llm_low_confidence_guess],
             )
+        # ADDITIVE fallback (build_query() engine): only reached when NONE of
+        # the ~87 hand-verified rule-based intents matched, the LLM
+        # classification also found nothing usable, AND the SQL-generation
+        # fallback above produced nothing - i.e. this is strictly lower
+        # priority than every existing intent/path, by construction (all of
+        # them return before reaching here). Covers bare dimension+overview
+        # phrasing with no existing pattern coverage, e.g. a named employee/
+        # department/RM with no recognized metric/ranking keyword at all.
+        try:
+            _bq_emp_id, _bq_emp_name = entities.extract_employee(message, fallback_text=raw_message)
+        except entities.Ambiguous as e:
+            return ChatResponse(reply=f"Multiple employees match that name: {', '.join(e.candidates)}. Which one did you mean?",
+                                 needs_clarification=True, clarification_options=e.candidates)
+        _bq_dept_name, _bq_dept_candidates = entities.extract_department(message, fallback_text=raw_message)
+        try:
+            _bq_mgr_id, _bq_mgr_name = entities.extract_manager(message, fallback_text=raw_message)
+        except entities.Ambiguous:
+            _bq_mgr_id, _bq_mgr_name = None, None
+        _bq_date_start, _bq_date_end, _bq_date_mentioned = entities.extract_date_range(message)
+        _bq_period = (_bq_date_start, _bq_date_end) if _bq_date_mentioned else None
+        if _bq_emp_id:
+            reply, rows = build_query_overview_reply("employee", _bq_emp_id, message, period=_bq_period)
+            return ChatResponse(reply=reply, rows=rows)
+        if _bq_dept_name and not _bq_dept_candidates:
+            reply, rows = build_query_overview_reply("department", _bq_dept_name, message, period=_bq_period)
+            return ChatResponse(reply=reply, rows=rows)
+        if _bq_mgr_id:
+            reply, rows = build_query_overview_reply("rm", _bq_mgr_name, message, period=_bq_period)
+            return ChatResponse(reply=reply, rows=rows)
         return ChatResponse(reply=intents.FALLBACK_MESSAGE)
 
     # Pass the RAW (pre-spellcheck) text as a fallback: dictionary spellcheck
