@@ -1159,6 +1159,18 @@ def _extraction_llm_reply(raw_message, message, session):
     }
     metrics = [m for m in (extracted.get("metrics") or []) if m in valid_metric_keys]
     if not metrics:
+        # Item #72: don't silently default straight to plain pace_score when
+        # the LLM extraction returned an empty metrics list - a raw_message
+        # keyword scan for the same new-vocabulary markers that route here
+        # in the first place (_NEW_VOCAB_OVERRIDE_PATTERN) is a cheap,
+        # deterministic repair that catches exactly the failure mode this
+        # round must eliminate (extraction under-confident about which new
+        # metric key applies -> would otherwise silently answer with the
+        # WRONG metric, "pace_score", rather than the one actually asked
+        # about). Falls through to the plain "pace_score" default below only
+        # if none of these markers are present either.
+        metrics = _repair_new_vocab_metric(raw_message)
+    if not metrics:
         metrics = ["pace_score"]
     # dept_status_60_days_derived / dept_score_60_days_precomputed only make
     # sense for dimension="department" - drop them otherwise rather than
@@ -2041,6 +2053,36 @@ _NEW_VOCAB_OVERRIDE_PATTERN = re.compile(
     r"|\bderived\b.*\b(dept|department)\b.*\bstatus\b",
     re.IGNORECASE,
 )
+
+
+def _repair_new_vocab_metric(raw_message):
+    """Item #72: deterministic keyword-based repair used ONLY when
+    extract_build_query() returned an empty/all-invalid metrics list -
+    cheap last check for the exact new-vocabulary markers
+    _NEW_VOCAB_OVERRIDE_PATTERN is built from, so a message that got here
+    BECAUSE it named one of these new metrics doesn't silently end up
+    answered with the unrelated default "pace_score" instead. Order matters
+    (most specific phrase first) since a message could contain multiple
+    markers; returns [] (not a default) if nothing matches, deferring to
+    the caller's own ["pace_score"] fallback."""
+    text_l = (raw_message or "").lower()
+    if re.search(r"\bcapped effectiveness\b", text_l):
+        return ["capped_effectiveness"]
+    if re.search(r"\bcapped engagement\b", text_l):
+        return ["capped_engagement"]
+    if re.search(r"\bcapped discipline\b", text_l):
+        return ["capped_discipline"]
+    if re.search(r"\bprecomputed\b", text_l) and re.search(r"\bstatus\b", text_l):
+        return ["dept_status_60_days_derived"]
+    if re.search(r"\bprecomputed\b", text_l):
+        return ["dept_score_60_days_precomputed"]
+    if re.search(r"\bderived\b.*\bstatus\b", text_l):
+        return ["dept_status_60_days_derived"]
+    if re.search(r"\b(day|event)[- ]level\b", text_l):
+        return ["pace_score_day_level"]
+    if re.search(r"\bpace status\b|\bstatus banding\b", text_l):
+        return ["pace_status"]
+    return []
 
 # Part 3 ("did you mean X?" cascade) confidence threshold: the LLM's own
 # self-reported `confidence` (0.0-1.0, see llm_nlu.py's _SYSTEM_PROMPT) is

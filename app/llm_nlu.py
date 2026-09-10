@@ -695,14 +695,31 @@ user is actually asking about; if truly nothing specific is named, return an
 empty list - the caller defaults to pace_score):
 {metric_keys}
 
-Key meanings worth knowing: "pace_status" = Black/Red/Amber/Green category.
+Key meanings worth knowing: "pace_status" = Black/Red/Amber/Green category —
+ALWAYS use this (never plain "pace_score") whenever the user's wording is
+about STATUS/BANDING/CATEGORY rather than a numeric score, for ANY
+dimension and ANY period (a single day or a multi-week/month range).
 "capped_engagement"/"capped_effectiveness"/"capped_discipline" = the raw
 internal capped sub-metric values (only use these if the user explicitly
-says "capped"). "pace_score_day_level" = a single day's event-level score
-(not the period-aggregate "pace_score"). "dept_score_60_days_precomputed" =
-the ETL-precomputed department score column (only for department
-dimension). "dept_status_60_days_derived" = a derived department-level
-status banding (only for department dimension).
+says "capped"). "pace_score_day_level" = the event-level score, AVERAGED
+over whatever period is asked — this applies just as much to a multi-day
+period ("last 2 weeks", "last month") as to a single day; it is a
+genuinely different metric from the period-aggregate "pace_score", NOT a
+single-day-only concept. ALWAYS use pace_score_day_level (never plain
+"pace_score") whenever the user's wording contains "day level"/"day-level"/
+"event level"/"event-level" next to "pace score" or "score", regardless of
+how long the period is. "dept_score_60_days_precomputed" = the ETL-
+precomputed department score column (only for department dimension) —
+ALWAYS use this (never plain "pace_score") whenever the user says
+"precomputed". "dept_status_60_days_derived" = a derived department-level
+status banding (only for department dimension) — ALWAYS use this (never
+plain "pace_score") whenever the user asks for department STATUS/BANDING,
+especially if they say "derived".
+
+Do not return an empty metrics list just because you're unsure which exact
+key applies among several plausible ones for the SAME concept (e.g. "day
+level" pace score for a department over 2 weeks) — pick the single best-
+matching key from the list above rather than defaulting to nothing.
 
 filters: only set a value when the user EXPLICITLY overrides the default -
 otherwise use null for each field (the caller applies the correct defaults):
@@ -725,6 +742,9 @@ _BQ_FEW_SHOT = [
     ("precomputed dept score for SCM", {"dimension": "department", "dimension_name": "SCM", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None}),
     ("engagement and discipline for Megha Sharma's team last month", {"dimension": "rm", "dimension_name": "Megha Sharma", "metrics": ["engagement_pct", "discipline_pct"], "filters": {}, "period_phrase": "last month"}),
     ("company wide pace score for August", {"dimension": "company", "dimension_name": None, "metrics": ["pace_score"], "filters": {}, "period_phrase": "August"}),
+    ("day level pace score for Accounts department over the last 2 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "last 2 weeks"}),
+    ("precomputed 60 day dept score for Founders Office", {"dimension": "department", "dimension_name": "Founders Office", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None}),
+    ("pace status for AI Labs over last 30 days", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 30 days"}),
 ]
 
 
