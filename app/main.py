@@ -113,6 +113,97 @@ _VAGUE_LIST_EXPAND_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# --- Bare superlative direction follow-up ("least", "most", "highest",
+# "lowest", ...) right after a ranking (item #63). Matched ONLY when the
+# ENTIRE message (after stripping whitespace/punctuation) is just one of
+# these words - a real sentence that happens to contain "least" (e.g.
+# "least productive employees") is untouched, since this only fires via
+# handle_message's exact-match check below, not a bare \b...\b search.
+# Root cause this exists to fix: a bare direction word matches NOTHING in
+# the rule-based regex patterns (they all require an accompanying metric
+# word), so it fell through to intents._fuzzy_match_intent(), where
+# rapidfuzz's token_set_ratio scores a single contained word as a perfect
+# 100 match against EVERY multi-word canonical phrase that contains it
+# (confirmed: "least" scores 100 against "least productive time",
+# "least engaged", "least wfh days", etc. simultaneously) - Python's
+# max(scores, key=scores.get) then deterministically picks whichever
+# intent happens to be inserted first in _CANONICAL_PHRASES
+# ("productive_low"/"productive_high"), regardless of what the prior
+# ranking's real metric/dimension actually was. This interception runs
+# BEFORE that fuzzy fallback can ever be reached, so it can't misfire this
+# way, and mirrors the ACTUAL prior ranking's metric/dept/employee scope
+# via session_store's rerun_opposite/rerun_same/ascending fields instead.
+_BARE_DIRECTION_LOW = re.compile(r"^(least|lowest|worst|fewest|bottom|smallest)$", re.IGNORECASE)
+_BARE_DIRECTION_HIGH = re.compile(r"^(most|highest|best|top|largest|greatest)$", re.IGNORECASE)
+
+
+def _handle_bare_direction_followup(message, session):
+    """See the comment above _BARE_DIRECTION_LOW/_BARE_DIRECTION_HIGH.
+    Returns a ChatResponse if this message is a bare direction-word
+    follow-up (handled here, one way or another - a correct re-ranked
+    result, a repeat of the same ranking, or a clean clarification), or
+    None if this message isn't shaped like one at all (falls through to
+    normal routing untouched)."""
+    stripped = message.strip().strip("?!.").strip()
+    is_low = _BARE_DIRECTION_LOW.match(stripped) is not None
+    is_high = (not is_low) and _BARE_DIRECTION_HIGH.match(stripped) is not None
+    if not is_low and not is_high:
+        return None
+    if session is None:
+        return ChatResponse(
+            reply="I don't have a prior ranking to flip the direction on — could you ask a ranking question "
+                  "first (e.g. \"top 10 by pace score\"), then say \"least\"/\"most\"?",
+            needs_clarification=True,
+        )
+    last_list = session_store.get_last_list(session)
+    if last_list is None or last_list.get("kind") != "ranking":
+        return ChatResponse(
+            reply="I don't have a prior ranking to flip the direction on — could you ask a ranking question "
+                  "first (e.g. \"top 10 by pace score\"), then say \"least\"/\"most\"?",
+            needs_clarification=True,
+        )
+    requested_ascending = is_low  # low direction == ascending sort (smallest first)
+    last_ascending = last_list.get("ascending")
+    rerun_same = last_list.get("rerun_same") or last_list.get("rerun_list")
+    rerun_opposite = last_list.get("rerun_opposite")
+    if last_ascending is not None and requested_ascending == last_ascending:
+        rerun = rerun_same
+    elif last_ascending is not None:
+        rerun = rerun_opposite
+        if rerun is None:
+            return ChatResponse(
+                reply="I can show that ranking again, but I don't have a way to flip its direction for this "
+                      "metric yet — could you ask a fresh ranking question instead (e.g. \"lowest engagement\")?",
+                needs_clarification=True,
+            )
+    else:
+        # The prior ranking's direction wasn't tracked (an older/未-wired
+        # ranking type) - flipping blind would risk silently repeating the
+        # wrong direction, so ask rather than guess.
+        return ChatResponse(
+            reply="I can show that ranking again, but I'm not sure which direction it was in to flip it — "
+                  "could you ask a fresh ranking question instead (e.g. \"lowest engagement\")?",
+            needs_clarification=True,
+        )
+    reply, rows = rerun()
+    # Whichever closure we just displayed becomes the new "same direction"
+    # (so a repeated bare word just re-shows it), and whichever we DIDN'T
+    # use becomes the new "opposite direction" (so flipping back and forth
+    # keeps working correctly across multiple bare-direction turns in a
+    # row, not just the first flip).
+    if rerun is rerun_opposite:
+        new_rerun_same, new_rerun_opposite = rerun_opposite, rerun_same
+    else:
+        new_rerun_same, new_rerun_opposite = rerun_same, rerun_opposite
+    session_store.set_last_list(
+        session, kind="ranking", rerun_list=new_rerun_same, rerun_same=new_rerun_same,
+        rerun_opposite=new_rerun_opposite,
+        answer_kind="list", ascending=requested_ascending,
+        dept_name=last_list.get("dept_name"), employee_ids=last_list.get("employee_ids"),
+        team_label=last_list.get("team_label"), month=last_list.get("month"), date_range=last_list.get("date_range"),
+    )
+    return ChatResponse(reply=reply, rows=rows)
+
 # A narrower "re-scope only" follow-up ("what about last month", "what about
 # next week") - no explicit ask for names/a list, just a change of time
 # period/department applied to the SAME prior answer, kept in its ORIGINAL
@@ -1802,7 +1893,11 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
                 _rows = queries.attendance_ranking(dept_name, month, worst=False, employee_ids=employee_ids, limit=limit)
                 return f"Best attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
-            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+                _rows = queries.attendance_ranking(dept_name, month, worst=True, employee_ids=employee_ids, limit=limit)
+                return f"Worst attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
+                                         answer_kind="list", ascending=False,
                                          dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Best attendance{scope_note}:\n\n{format_attendance_rows(rows)}", rows=rows)
 
@@ -1812,7 +1907,11 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
                 _rows = queries.attendance_ranking(dept_name, month, worst=True, employee_ids=employee_ids, limit=limit)
                 return f"Worst attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
-            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+                _rows = queries.attendance_ranking(dept_name, month, worst=False, employee_ids=employee_ids, limit=limit)
+                return f"Best attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
+                                         answer_kind="list", ascending=True,
                                          dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Worst attendance{scope_note}:\n\n{format_attendance_rows(rows)}", rows=rows)
 
@@ -1822,7 +1921,11 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
                 _rows = queries.productive_time_ranking(dept_name, month, lowest=False, employee_ids=employee_ids, limit=limit)
                 return f"Most productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
-            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+                _rows = queries.productive_time_ranking(dept_name, month, lowest=True, employee_ids=employee_ids, limit=limit)
+                return f"Least productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
+                                         answer_kind="list", ascending=False,
                                          dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Most productive time{scope_note}:\n\n{format_productive_rows(rows)}", rows=rows)
 
@@ -1832,7 +1935,11 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
                 _rows = queries.productive_time_ranking(dept_name, month, lowest=True, employee_ids=employee_ids, limit=limit)
                 return f"Least productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
-            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+                _rows = queries.productive_time_ranking(dept_name, month, lowest=False, employee_ids=employee_ids, limit=limit)
+                return f"Most productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
+                                         answer_kind="list", ascending=True,
                                          dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Least productive time{scope_note}:\n\n{format_productive_rows(rows)}", rows=rows)
 
@@ -1850,7 +1957,26 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
                                                 limit=limit, reporting_user_id=_rid if employee_ids is None else None)
                 return f"Ranked by {_label}{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_metric_rows(_rows, _metric_key)}", _rows
-            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+            # Direction-flip closure for bare superlative follow-ups
+            # ("least"/"most"/"highest"/"lowest" with nothing else) - see
+            # _handle_bare_direction_followup. Mirrors the SAME metric_key/
+            # scope as the ranking just shown, just with `ascending` flipped,
+            # so "top pace score this month" -> "least" correctly re-ranks
+            # PACE score (not some unrelated metric) in the opposite
+            # direction, instead of falling through to the fuzzy intent
+            # matcher (which previously always misrouted a bare direction
+            # word to "productive_low"/"productive_high" regardless of what
+            # the real prior metric was - see SESSION_HANDOFF.md item #63).
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500,
+                                 _metric_key=metric_key, _ascending=(not ascending), _label=label, _rid=manager_id):
+                _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
+                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None)
+                _dir_word = "lowest" if _ascending else "highest"
+                return (f"Ranked by {_label} ({_dir_word} first)"
+                        f"{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n"
+                        f"{format_metric_rows(_rows, _metric_key)}", _rows)
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
+                                         answer_kind="list", ascending=ascending,
                                          dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range)
         return ChatResponse(reply=f"Ranked by {label}{scope_note}:\n\n{format_metric_rows(rows, metric_key)}", rows=rows)
 
@@ -3098,6 +3224,16 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     _filter_meta_response = _handle_filter_meta_followup(message, session)
     if _filter_meta_response is not None:
         return _filter_meta_response
+
+    # --- Bare superlative direction follow-up ("least", "most", "highest",
+    # "lowest", ...) right after a ranking (item #63) - checked BEFORE intent
+    # classification (both rule-based AND the fuzzy fallback inside
+    # intents.match_intent) so a bare direction word can never be misrouted
+    # by the fuzzy matcher's single-contained-word collision (see the
+    # comment on _BARE_DIRECTION_LOW/_BARE_DIRECTION_HIGH above). ---
+    _bare_direction_response = _handle_bare_direction_followup(message, session)
+    if _bare_direction_response is not None:
+        return _bare_direction_response
 
     # --- LLM-first intent classification (Gemini), with rule-based fallback
     # and safety cross-check ---

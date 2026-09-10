@@ -1109,6 +1109,24 @@ FUZZY_OPPOSITE_MARGIN = 8    # if the opposite intent scores within this of the 
 
 
 def _fuzzy_match_intent(text_l):
+    # Defense-in-depth (item #63): rapidfuzz's token_set_ratio scores a
+    # single word fully CONTAINED in a multi-word canonical phrase as a
+    # perfect 100 ("least" vs. "least productive time" -> 100), and it does
+    # so for EVERY canonical phrase that happens to contain that one word,
+    # not just the intended one - confirmed live, e.g. bare "least" scored
+    # 100 simultaneously against "productive_low", "engagement_low",
+    # "effectiveness_low", "fewest_wfh", and "call_fewest"'s canonical
+    # phrases, with Python's max() then arbitrarily picking whichever
+    # intent happens to be inserted first in _CANONICAL_PHRASES, regardless
+    # of actual conversational context. A single short/common word is
+    # inherently too little signal for a confident fuzzy match, so refuse
+    # to even attempt one below a minimum word count - this makes that
+    # whole collision class structurally impossible here, not just unlikely.
+    # (The correct, context-aware handling for bare direction words like
+    # "least"/"most" lives in main.py's _handle_bare_direction_followup,
+    # which runs BEFORE this function is ever reached.)
+    if len(text_l.split()) < 2:
+        return None
     scores = {}
     for intent_name, phrases in _CANONICAL_PHRASES.items():
         scores[intent_name] = max(fuzz.token_set_ratio(text_l, p) for p in phrases)

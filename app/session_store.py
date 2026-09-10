@@ -125,7 +125,7 @@ def push_context(session, dept_name=None, employee_id=None, employee_name=None, 
 
 def set_last_list(session, kind, rerun_list=None, rerun_same=None, answer_kind="count",
                    dept_name=None, employee_ids=None, team_label=None, month=None,
-                   date_range=None, statuses=None):
+                   date_range=None, statuses=None, rerun_opposite=None, ascending=None):
     """Record the most recent LIST-PRODUCING answer, for resolving vague
     follow-ups ("list them", "who are they", "show me their names") against
     the CORRECT prior answer instead of stale sticky_context or an
@@ -143,6 +143,19 @@ def set_last_list(session, kind, rerun_list=None, rerun_same=None, answer_kind="
     re-scopes (e.g. "what about last month") without asking for names.
     `answer_kind` - 'count' or 'list', whichever shape the ORIGINAL answer
     was, so a pure re-scope follow-up can preserve it.
+    `rerun_opposite` - same zero-default-arg signature as `rerun_list`/
+    `rerun_same`, but re-runs the SAME ranking scope in the OPPOSITE
+    direction (e.g. worst instead of best) - used for a bare superlative
+    follow-up ("least", "most", "highest", "lowest", ...) right after a
+    ranking. `None` when the ranking type has no wired direction-flip (the
+    bare-direction follow-up handler then gives a clean clarification
+    instead of guessing).
+    `ascending` - the actual sort direction (True=lowest-first,
+    False=highest-first, None=not applicable/not tracked) the ORIGINAL
+    answer used, so a bare-direction follow-up can tell whether the
+    requested direction is the SAME as what's already shown (just re-list
+    it) or the OPPOSITE (flip via `rerun_opposite`), instead of blindly
+    flipping every time.
     The remaining kwargs are the filters that produced the original answer,
     stored so a follow-up's explicit re-scoping (a named department/status/
     time period) can override just that one piece rather than starting
@@ -151,7 +164,7 @@ def set_last_list(session, kind, rerun_list=None, rerun_same=None, answer_kind="
         "kind": kind, "rerun_list": rerun_list, "rerun_same": rerun_same,
         "answer_kind": answer_kind, "dept_name": dept_name, "employee_ids": employee_ids,
         "team_label": team_label, "month": month, "date_range": date_range,
-        "statuses": statuses,
+        "statuses": statuses, "rerun_opposite": rerun_opposite, "ascending": ascending,
     }
 
 
