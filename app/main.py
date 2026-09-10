@@ -163,6 +163,12 @@ def _detect_filter_meta_topic(text_l):
     return None
 
 
+def _strip_leading_the(label):
+    """subject_label is sometimes already 'the full company' - avoid a
+    double 'the the ...' when composing a filter-meta-followup label."""
+    return label[4:] if label.lower().startswith("the ") else label
+
+
 def _default_filters_from_message(message):
     """Same override-detection regexes as _resolve_population_filter, but
     returns a structured dict instead of SQL - used to record what was
@@ -1019,7 +1025,7 @@ def _handle_day_compare(message, raw_message, session):
     results = queries.day_compare(d1, d2, dept_name=dept_name, employee_id=employee_id, metric_keys=metric_keys, filter_sql=filter_sql)
     if session is not None:
         session_store.set_last_answer_filters(
-            session, label=f"the {subject_label} comparison ({d1} vs {d2})",
+            session, label=f"the {_strip_leading_the(subject_label)} comparison ({d1} vs {d2})",
             **_default_filters_from_message(message))
     return ChatResponse(reply=format_day_compare(results, d1, d2, subject_label, filter_footer), rows=results)
 
@@ -1100,7 +1106,7 @@ def _handle_month_compare(message, raw_message, session):
     label1, label2 = _month_label(m1), _month_label(m2)
     if session is not None:
         session_store.set_last_answer_filters(
-            session, label=f"the {subject_label} comparison ({label1} vs {label2})",
+            session, label=f"the {_strip_leading_the(subject_label)} comparison ({label1} vs {label2})",
             **_default_filters_from_message(message))
     return ChatResponse(reply=format_day_compare(results, label1, label2, subject_label, filter_footer), rows=results)
 
