@@ -3626,6 +3626,32 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             reply, rows = build_query_overview_reply("department", _rl_dept_name, message, period=_rl_period, session=session)
             return ChatResponse(reply=reply, rows=rows)
         if _rl_mgr_id:
+            # Same universal-access admin-confirmation gate every other
+            # named-manager "team" query in this file goes through (see the
+            # team.resolve_named_person_team() call further below in this
+            # function) - this branch returns early (before that shared
+            # gate), so it must apply the same check itself rather than
+            # silently bypassing it (a real gap found during item #66 live
+            # testing: without this, "list of <universal-access manager>'s
+            # team employees" would answer with a real company-wide-sized
+            # roster instead of the required admin-confirmation prompt).
+            if _rl_wants_team:
+                _rl_ids, _rl_is_universal, _rl_resolved_name, _rl_candidates = team.resolve_named_person_team(_rl_mgr_name)
+                if _rl_candidates:
+                    return ChatResponse(
+                        reply=f"Multiple employees match '{_rl_mgr_name}': {', '.join(_rl_candidates)}. Which one did you mean?",
+                        needs_clarification=True, clarification_options=_rl_candidates,
+                    )
+                if _rl_is_universal:
+                    session["awaiting_admin_confirmation"] = True
+                    session["pending_message"] = message
+                    session["pending_message_raw"] = raw_message
+                    return ChatResponse(
+                        reply=f"{_rl_mgr_name} has admin-level access, so their 'team' would mean essentially the "
+                              f"whole company. Please specify a department instead, or explicitly confirm "
+                              f"(\"yes\" / \"full company\") if you really want a company-wide view.",
+                        needs_clarification=True,
+                    )
             reply, rows = build_query_overview_reply("rm", _rl_mgr_name, message, period=_rl_period, session=session)
             return ChatResponse(reply=reply, rows=rows)
         reply, rows = build_query_overview_reply("company", None, message, period=_rl_period, session=session)
