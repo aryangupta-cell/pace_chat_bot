@@ -2026,6 +2026,22 @@ _DEPT_LEVEL_RANKING_INTENTS = {"dept_best", "dept_worst", "dept_avg", "rm_rankin
 # Gemini's availability/latency/prompt tuning entirely.
 _PRONOUN_PATTERN = re.compile(r"\b(he|she|him|her|his|their|they|them)\b", re.IGNORECASE)
 
+# Item #72: deterministic new-vocabulary override (see handle_message) - a
+# message matching any of these should never be answered by an OLD intent
+# that has no concept of the distinct new metric being asked for. Kept
+# narrow/explicit (same "narrow regex beats probabilistic LLM guess" pattern
+# already established by _ps_override/_gainer_loser_override/etc. above) so
+# it can't false-positive on unrelated questions.
+_NEW_VOCAB_OVERRIDE_PATTERN = re.compile(
+    r"\bcapped (engagement|effectiveness|discipline)\b"
+    r"|\b(day|event)[- ]level\b.*\bpace score\b"
+    r"|\bpace score\b.*\b(day|event)[- ]level\b"
+    r"|\bprecomputed\b.*\b(dept|department)?\s*(score|status)\b"
+    r"|\bpace status\b.*\b(over|for|last|past|this|next)\b.*\b(day|days|week|weeks|month|months)\b"
+    r"|\bderived\b.*\b(dept|department)\b.*\bstatus\b",
+    re.IGNORECASE,
+)
+
 # Part 3 ("did you mean X?" cascade) confidence threshold: the LLM's own
 # self-reported `confidence` (0.0-1.0, see llm_nlu.py's _SYSTEM_PROMPT) is
 # informative but not perfectly calibrated - it's a single model's own guess
@@ -3659,6 +3675,29 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # picked the intent.
     rule_intent = intents.match_intent(message)
     llm_result = llm_nlu.classify(raw_message)
+
+    # --- New-vocabulary deterministic override (item #72) ------------------
+    # classify()'s system prompt (llm_nlu.py) already instructs the LLM to
+    # return "none" for these phrasings (capped_* metrics, scoped/period-
+    # qualified pace status, day-level/event-level pace score, precomputed
+    # dept score) so extract_build_query()'s more precise cascade step gets a
+    # chance - but that's a probabilistic prompt-engineering guardrail, and
+    # live testing (item #72) found classify() still occasionally guesses an
+    # old percentage/status/plain-pace_score intent for these anyway (e.g.
+    # "day level pace score for Accounts department over the last 2 weeks"
+    # -> an old dept intent using the keyword-only _detect_build_query_metrics
+    # detector, which has no entry for pace_score_day_level at all and
+    # silently substitutes plain pace_score - exactly the silent-wrong-metric
+    # failure mode this round is required to eliminate). This regex-based
+    # override is DETERMINISTIC (same pattern-trust rationale as the
+    # existing _ps_override/_gainer_loser_override/etc. above): only fires
+    # when rule_intent is None (never overrides a real rule-based match,
+    # same safety invariant as everywhere else in this function), and simply
+    # discards llm_result so the cascade proceeds to the `intent is None`
+    # branch, giving extract_build_query() the chance the prompt guardrail
+    # alone couldn't reliably guarantee.
+    if rule_intent is None and llm_result is not None and _NEW_VOCAB_OVERRIDE_PATTERN.search(message):
+        llm_result = None
 
     # Pronoun override (see _PRONOUN_PATTERN above): a message referring to a
     # person via "he"/"she"/etc. that the rule-based matcher already resolved
