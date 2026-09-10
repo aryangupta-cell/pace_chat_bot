@@ -121,6 +121,138 @@ _VAGUE_LIST_EXPAND_PATTERN = re.compile(
 # minimize collision with unrelated fresh queries.
 _VAGUE_RESCOPE_PATTERN = re.compile(r"^\s*what about\b", re.IGNORECASE)
 
+# --- Filter/methodology meta-follow-up ("in this have u removed ps not
+# working days?") ---
+# Detects a message that (a) refers back to "this"/"that"/"it" AND (b) asks
+# a filter/methodology question, scoped ONLY to the 4 known population
+# filters (PS status, visit status, shift type, work mode) - see
+# session_store.set_last_answer_filters/get_last_answer_filters and
+# _handle_filter_meta_followup below. Deliberately loose on grammar (the
+# real repro was "in this have u removed ps not working days?") but requires
+# both an exclude/remove/filter/include VERB and a this/that/it REFERENT
+# somewhere in the message, not just either alone - so an unrelated message
+# that happens to contain "this" doesn't get swept in.
+_FILTER_META_SHAPE_PATTERN = re.compile(
+    r"(\b(this|that|it)\b.{0,40}\b(exclud\w*|remov\w*|filter\w*|includ\w*|appl(y|ied)\w*)\b"
+    r"|\b(exclud\w*|remov\w*|filter\w*|includ\w*|appl(y|ied)\w*)\b.{0,40}\b(this|that|it)\b)",
+    re.IGNORECASE,
+)
+
+_FILTER_META_TOPIC_PATTERNS = [
+    ("ps_status", re.compile(r"\bps\b|\bpace\s*sync\b|\boffline\s*attendance\b", re.IGNORECASE)),
+    ("visit_status", re.compile(r"\bvisit(s|ed|ing)?\b", re.IGNORECASE)),
+    ("shift_type", re.compile(r"\bshift(s)?\b|\bstandard\b|\bovertime\b|\bot\s*days?\b", re.IGNORECASE)),
+    ("work_mode", re.compile(r"\bwfh\b|work(ing)? from home|\bremote\b|\bwork\s*mode\b|\boffice\b", re.IGNORECASE)),
+]
+
+_FILTER_META_TOPIC_LABELS = {
+    "ps_status": "PS (offline-attendance-system) working status",
+    "visit_status": "client-visit status",
+    "shift_type": "shift type",
+    "work_mode": "work mode (WFH vs office)",
+}
+
+
+def _detect_filter_meta_topic(text_l):
+    """Returns one of 'ps_status'/'visit_status'/'shift_type'/'work_mode' if
+    the message clearly names one of the 4 known filters, else None (which
+    means: let this fall through to normal routing rather than guessing)."""
+    for topic, pat in _FILTER_META_TOPIC_PATTERNS:
+        if pat.search(text_l):
+            return topic
+    return None
+
+
+def _default_filters_from_message(message):
+    """Same override-detection regexes as _resolve_population_filter, but
+    returns a structured dict instead of SQL - used to record what was
+    ACTUALLY applied to a filter-driven answer (day/month compare,
+    gainer/loser ranking, ...) for later filter-meta follow-ups."""
+    text_l = (message or "").lower()
+    ot = bool(re.search(_OT_PATTERN, text_l))
+    standard = (not ot) and bool(re.search(_STANDARD_PATTERN, text_l))
+    visit_no = bool(re.search(_VISIT_NO_PATTERN, text_l))
+    visit_yes = (not visit_no) and bool(re.search(_VISIT_YES_PATTERN, text_l))
+    ps_not = bool(re.search(_PS_NOT_WORKING_PATTERN, text_l))
+    ps_yes = (not ps_not) and bool(re.search(_PS_WORKING_PATTERN, text_l))
+    wfh = bool(re.search(r"\bwfh\b|work(ing)? from home|\bremote\b", text_l))
+    return {
+        "ps_status": "not_working" if ps_not else "working",
+        "visit_status": "yes" if visit_yes else "no",
+        "shift_type": "ot" if ot else "standard",
+        "work_mode": "wfh" if wfh else None,
+    }
+
+
+def _filter_meta_answer_text(topic, ctx):
+    """Plain yes/no explanation of whether `topic` was applied to the
+    tracked prior answer described by `ctx` (a session_store
+    last_answer_filters dict), plus a recompute offer when it wasn't applied
+    the way a user asking to exclude something would want."""
+    label = ctx["label"]
+    applied = ctx.get(topic)
+    topic_label = _FILTER_META_TOPIC_LABELS[topic]
+
+    if topic == "ps_status":
+        if applied == "working":
+            return (f"Yes — {label} excluded PS-not-working days: only rows where PS was "
+                     f"working (ps_worked_flag_day = 1) were counted.")
+        if applied == "not_working":
+            return (f"The other way round, actually — {label} was restricted to PS-NOT-working "
+                     f"days only (ps_worked_flag_day = 0); PS-working days were the ones excluded.")
+        return (f"No — {label} did not filter on PS status at all; it includes days regardless of "
+                f"whether PS was working or not. Want me to recompute it excluding PS-not-working days?")
+
+    if topic == "visit_status":
+        if applied == "no":
+            return f"Yes — {label} excluded client-visit days (visit_flag = 'No' only)."
+        if applied == "yes":
+            return f"The other way round — {label} was restricted to visit days only (visit_flag = 'Yes')."
+        return (f"No — {label} did not filter on visit status at all; visit and non-visit days are "
+                f"both included. Want me to recompute it excluding visit days?")
+
+    if topic == "shift_type":
+        if applied == "standard":
+            return f"Yes — {label} is restricted to Standard-shift days only."
+        if applied == "ot":
+            return f"That one was restricted to Overtime (OT) days only, not Standard shift."
+        return (f"No — {label} did not restrict by shift type; Standard and Overtime days are both "
+                f"included. Want me to recompute it for Standard shift only?")
+
+    if topic == "work_mode":
+        if applied == "wfh":
+            return f"Yes — {label} was restricted to WFH (work-from-home) days only."
+        return (f"No — {label} did not filter by work mode at all (WFH and office days are both "
+                f"included, since there's no default work-mode filter in this system). Want me to "
+                f"recompute it for one specific work mode?")
+
+    return f"I'm not sure whether {topic_label} was applied to {label} — could you rephrase?"
+
+
+def _handle_filter_meta_followup(message, session):
+    """Intercepts a "did you exclude X in this?" style meta-question about
+    the most recent substantive answer, BEFORE it can be misrouted to an
+    unrelated fresh-query intent. Returns a ChatResponse if handled, else
+    None (meaning: fall through to normal routing)."""
+    text_l = (message or "").lower()
+    if not _FILTER_META_SHAPE_PATTERN.search(text_l):
+        return None
+    topic = _detect_filter_meta_topic(text_l)
+    if topic is None:
+        # Matches the "this/that/it + exclude/filter" shape but doesn't
+        # clearly name one of the 4 known filters (e.g. "why did you say
+        # that", "what does this mean") - out of scope for this round, let
+        # it fall through to normal routing rather than guessing.
+        return None
+    ctx = session_store.get_last_answer_filters(session) if session is not None else None
+    if ctx is None:
+        # Nothing tracked yet this session (fresh session, or the last
+        # substantive answer wasn't one that tracks filter metadata) -
+        # don't fabricate an answer to a meta-question with nothing to
+        # point at.
+        return None
+    return ChatResponse(reply=_filter_meta_answer_text(topic, ctx))
+
 # Explicit scope-BROADENING override ("in the whole company", "overall",
 # "company-wide", "in general", "all departments", "everyone") - a follow-up
 # that carries no list-expand wording of its own but explicitly signals the
@@ -885,6 +1017,10 @@ def _handle_day_compare(message, raw_message, session):
 
     filter_sql, filter_footer = _resolve_population_filter(message)
     results = queries.day_compare(d1, d2, dept_name=dept_name, employee_id=employee_id, metric_keys=metric_keys, filter_sql=filter_sql)
+    if session is not None:
+        session_store.set_last_answer_filters(
+            session, label=f"the {subject_label} comparison ({d1} vs {d2})",
+            **_default_filters_from_message(message))
     return ChatResponse(reply=format_day_compare(results, d1, d2, subject_label, filter_footer), rows=results)
 
 
@@ -962,6 +1098,10 @@ def _handle_month_compare(message, raw_message, session):
     results = queries.month_compare(m1, m2, dept_name=dept_name, employee_id=employee_id,
                                      metric_keys=metric_keys, filter_sql=filter_sql)
     label1, label2 = _month_label(m1), _month_label(m2)
+    if session is not None:
+        session_store.set_last_answer_filters(
+            session, label=f"the {subject_label} comparison ({label1} vs {label2})",
+            **_default_filters_from_message(message))
     return ChatResponse(reply=format_day_compare(results, label1, label2, subject_label, filter_footer), rows=results)
 
 
@@ -2429,6 +2569,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             dept_name, employee_ids=employee_ids, filter_sql=filter_sql, limit=limit, directions=directions
         )
         reply = format_gainer_loser_ranking(gainers, losers, meta, scope_note, directions, filter_footer)
+        if session is not None:
+            session_store.set_last_answer_filters(
+                session, label=f"that gainer/loser ranking{scope_note}",
+                **_default_filters_from_message(message))
         return ChatResponse(reply=reply, rows=gainers + losers)
 
     if intent == "emp_overview":
@@ -2877,6 +3021,16 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         if was_awaiting_individual:
             if emp_id is not None and _WEEKLY_FOLLOWUP_PATTERN.search(message):
                 rows = queries.employee_weekly_pace_trend(emp_id)
+                # employee_weekly_pace_trend only restricts to Standard-shift
+                # rows - it does NOT filter on PS status or visit status at
+                # all (see queries.py docstring) - tracked here (not None,
+                # not "working"/"no") so a later filter meta-follow-up
+                # ("did you remove PS-not-working days from this?") answers
+                # accurately instead of assuming the project-wide defaults.
+                session_store.set_last_answer_filters(
+                    session, label=f"{emp_name}'s week-by-week PACE trend",
+                    ps_status=None, visit_status=None, shift_type="standard",
+                )
                 return ChatResponse(reply=format_weekly_trend(rows, emp_name), rows=rows)
         else:
             if ranking_employee_ids and _WEEKLY_FOLLOWUP_PATTERN.search(message):
@@ -2927,6 +3081,17 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
                   "like the names/list for (e.g. a department, status, or time period)?",
             needs_clarification=True,
         )
+
+    # --- Filter/methodology meta-follow-up ("in this have u removed ps not
+    # working days?") - checked BEFORE intent classification so it can never
+    # be misrouted to an unrelated fresh-query intent (real repro: this
+    # question right after an individual's weekly PACE trend was getting
+    # routed to a completely unrelated company-wide ranking). See
+    # _handle_filter_meta_followup above and
+    # session_store.set_last_answer_filters/get_last_answer_filters. ---
+    _filter_meta_response = _handle_filter_meta_followup(message, session)
+    if _filter_meta_response is not None:
+        return _filter_meta_response
 
     # --- LLM-first intent classification (Gemini), with rule-based fallback
     # and safety cross-check ---

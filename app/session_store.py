@@ -78,6 +78,21 @@ def get_session(session_id):
         # list/count/ranking answer (see main.py's set_last_list() call
         # sites) - single-employee lookups must NEVER overwrite this.
         "last_list": None,
+        # Filter/methodology metadata for the single most-recent SUBSTANTIVE
+        # numeric answer (a trend, comparison, or ranking) - kept separate
+        # from last_list (which is about LIST-shaped follow-ups) and from
+        # sticky_context (which is about filling in missing scope on a NEW
+        # question). Exists to answer a meta/clarifying follow-up about the
+        # answer just given, e.g. "in this have u removed ps not working
+        # days?" right after a weekly PACE trend - see
+        # set_last_answer_filters()/get_last_answer_filters() below and the
+        # filter-meta-followup handling in main.py. Each of ps_status/
+        # visit_status/shift_type/work_mode is one of the actual values
+        # applied to that specific answer (None means that filter was NOT
+        # applied at all to that particular query, which is a real and
+        # meaningful case - e.g. the weekly-trend query only restricts to
+        # Standard-shift rows and does not touch PS/visit status at all).
+        "last_answer_filters": None,
     })
 
 
@@ -146,6 +161,27 @@ def get_last_list(session):
 
 def clear_last_list(session):
     session["last_list"] = None
+
+
+def set_last_answer_filters(session, label, ps_status=None, visit_status=None,
+                             shift_type=None, work_mode=None):
+    """Record the filter/methodology settings actually in effect for the
+    single most-recent substantive numeric answer, so a later meta-question
+    ("did you exclude X in this?") can be answered against the CORRECT prior
+    answer rather than guessed. `label` is a short human-readable description
+    of what that answer was about (e.g. "Rudhi's week-by-week PACE trend").
+    ps_status: 'working' | 'not_working' | None (filter not applied at all).
+    visit_status: 'yes' | 'no' | None. shift_type: 'standard' | 'ot' | None.
+    work_mode: 'wfh' | None. Overwrites whatever was tracked before -
+    deliberately NOT cumulative, since it describes exactly one answer."""
+    session["last_answer_filters"] = {
+        "label": label, "ps_status": ps_status, "visit_status": visit_status,
+        "shift_type": shift_type, "work_mode": work_mode,
+    }
+
+
+def get_last_answer_filters(session):
+    return session.get("last_answer_filters")
 
 
 def get_recent_context(session, field):
