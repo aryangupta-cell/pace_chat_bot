@@ -945,6 +945,11 @@ _BUILD_QUERY_METRIC_LABELS = {
     "capped_effectiveness": "capped effectiveness (internal)", "capped_discipline": "capped discipline (internal)",
     "pace_score_day_level": "avg day-level PACE score", "dept_score_60_days_precomputed": "precomputed dept score (60d)",
     "dept_status_60_days_derived": "derived dept status (60d)",
+    # Item #79 gap-fill (rows 39/40/49, per item #77's plan)
+    "engagement_minutes": "avg engagement minutes", "meeting_minutes": "total meeting minutes",
+    "meeting_count": "total meetings",
+    "tasks_created": "tasks created", "tasks_assigned": "tasks assigned",
+    "todos_created": "todos created", "todos_assigned": "todos assigned",
 }
 
 _BUILD_QUERY_METRIC_PATTERNS = [
@@ -961,6 +966,21 @@ _BUILD_QUERY_METRIC_PATTERNS = [
     # previously not detectable by this engine at all (only reachable via
     # dedicated ranking functions like productive_high/productive_low).
     ("productive_minutes", r"\bprod(?:uctive)?\s*(minutes?|mins?)\b|\bproductive\b"),
+    # Item #79 gap-fill (rows 39/40/49, per item #77's plan): these 6 must be
+    # checked BEFORE the bare "engagement" pattern above in the detection
+    # loop below (see _detect_build_query_metrics - the loop excludes
+    # engagement_pct from re-matching once engagement_minutes is found, the
+    # same "specific wins over bare fallback" precedent as working_pct/
+    # working_hours). No existing bare "meeting"/"task"/"todo" pattern
+    # exists in this list, so meeting_minutes/tasks_*/todos_* have no
+    # collision risk and are added directly.
+    ("engagement_minutes", r"\bengagement\s*minutes?\b"),
+    ("meeting_minutes", r"\bmeeting\s*minutes?\b"),
+    ("meeting_count", r"\bmeeting\s*count\b|\bnumber of meetings\b|\btotal meetings?\b|\bhow many meetings\b"),
+    ("tasks_created", r"\btasks?\s*created\b"),
+    ("tasks_assigned", r"\btasks?\s*assigned\b"),
+    ("todos_created", r"\btodos?\s*created\b"),
+    ("todos_assigned", r"\btodos?\s*assigned\b"),
 ]
 
 # Item #73: generalized capped-vs-percentage business rule for effectiveness/
@@ -977,6 +997,11 @@ _BUILD_QUERY_METRIC_PATTERNS = [
 #       this is NOT a mistake to "fix" back to capped_X)
 _PCT_CAPPED_METRIC_PATTERN = re.compile(
     r"\b(?:(?P<raw>raw)\s+)?(?:(?P<capped>capped)\s+)?(?P<word>effectiveness|engagement|discipline)\b"
+    r"(?!\s*minutes?\b)"  # item #79: "engagement minutes" is a distinct raw-minutes
+    # metric (engagement_minutes), never engagement_pct/capped_engagement - do not
+    # let this shared normalizer swallow it (the exact silent-wrong-metric collision
+    # item #77 found live: "average engagement minutes for X" was returning
+    # engagement_pct instead of engagement_minutes).
     r"(?:\s*(?P<pct>%|percent|percentage))?",
     re.IGNORECASE,
 )
@@ -2227,7 +2252,7 @@ _INDIVIDUAL_EMP_INTENTS = set(_EMP_FIELD_INTENTS) | {
     "emp_attendance_summary", "emp_trend", "emp_trend_2month", "emp_overview",
     "subscore_compare_emp", "subscore_trend_emp", "d_score_trend", "d_score_emp",
     "leave_emp_check", "call_emp", "visit_emp", "wfh_emp",
-    "shift_type_emp", "breakshift_emp", "offline_emp", "meeting_ratio_emp",
+    "shift_type_emp", "breakshift_emp", "offline_emp", "meeting_ratio_emp", "meeting_had_emp",
     "ps_worked_emp",
     # NEW capability 3: single-employee full multi-month trend and the
     # single-employee "what status is X in" lookup are individual-scoped
@@ -3105,7 +3130,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
 
     # --- Category A (new): Leave & absence ---
     if intent in ("leave_emp_check", "call_emp", "visit_emp", "wfh_emp", "d_score_emp",
-                  "shift_type_emp", "breakshift_emp", "offline_emp", "meeting_ratio_emp"):
+                  "shift_type_emp", "breakshift_emp", "offline_emp", "meeting_ratio_emp", "meeting_had_emp"):
         # "beside X"/"except X"/... exclusion (new capability): a query that
         # NAMES an employee but only to exclude them from an otherwise
         # org/dept-wide list ("beside muskan who all did visit yesterday")
@@ -3235,6 +3260,20 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             ratio_str = f"{row['meeting_ratio']*100:.0f}%" if row["meeting_ratio"] is not None else "N/A"
             return ChatResponse(reply=f"{emp_name}{_period_note(month, date_range)}: {row['total_meetings']} meetings, "
                                        f"{row['total_meeting_min']} meeting minutes, meeting/productive-time ratio: {ratio_str}.", rows=[row])
+
+        # Item #79 gap-fill (CSV row 51): "meetings (had any)" - a boolean
+        # derived operation (meeting_count > 0), DISTINCT from the numeric
+        # meeting-count/meeting-minutes metrics above. Reuses the existing
+        # DAY_FLAGS["had_meetings"] infra (day_flag_list scoped to this one
+        # employee via employee_ids) rather than a new SQL formula - the same
+        # infra day_count/day_list already use for the org-wide "who had
+        # meetings" phrasing, just scoped down to a single named employee.
+        if intent == "meeting_had_emp":
+            rows = queries.day_flag_list("had_meetings", employee_ids=[emp_id], month=period_month, date_range=date_range)
+            if not rows:
+                return ChatResponse(reply=f"No, {emp_name} did not have any meetings{_period_note(month, date_range)}.")
+            r = rows[0]
+            return ChatResponse(reply=f"Yes, {emp_name} had meetings on {r['matching_days']} day(s){_period_note(month, date_range)}.", rows=rows)
 
     if intent == "leave_who":
         rows = queries.who_on_leave(dept_name, month=period_month, date_range=date_range, limit=limit)

@@ -587,6 +587,17 @@ _MEETING_RATIO_PATTERNS = [
     r"\bmeeting.{0,10}ratio\b", r"\bmeeting.{0,15}productive.{0,10}(ratio|share)\b",
     r"\bwhat (share|portion|fraction) of time.*meetings\b",
 ]
+# Item #79 gap-fill (CSV row 51): "meetings (had any)" - a boolean yes/no
+# question for ONE named employee, distinct from the numeric "how many
+# meetings did X have" question (meeting_ratio_emp/meeting_count above -
+# neither of those patterns require the word "any", this one does, which is
+# the deliberate distinguishing signal so the two shapes never collide).
+_MEETING_HAD_EMP_PATTERNS = [
+    r"\bdid\b.{0,40}\bhave\s+any\s+meetings?\b",
+    r"\bdoes\b.{0,40}\bhave\s+any\s+meetings?\b",
+    r"\bhas\b.{0,40}\bhad\s+any\s+meetings?\b",
+    r"\bany\s+meetings?\s+for\b",
+]
 
 # --- Category G (new): Quality / d_score -----------------------------------------
 _D_SCORE_RANKING_PATTERNS = [
@@ -929,6 +940,15 @@ _AVG_METRIC_WORD = (
     r"|deficient[- ]?hour(s)?|\bdh\b"
     r"|prod(?:uctive)?\s*(?:minutes?|mins?)"
     r"|meeting\s*minutes?"
+    # Item #79 gap-fill (rows 39/40/49, per item #77's plan): meeting minutes
+    # was already covered above (that's precisely why it was trapped - the
+    # bug was in _BUILD_QUERY_METRIC_PATTERNS, now fixed in app/main.py).
+    # engagement minutes / tasks|todos created|assigned were NOT reachable
+    # here at all, so "average tasks created for X" never even fired this
+    # intent before this addition.
+    r"|engagement\s*minutes?"
+    r"|tasks?\s*(?:created|assigned)"
+    r"|todos?\s*(?:created|assigned)"
 )
 _AVERAGE_METRIC_PATTERNS = [
     rf"\b(avg|average|mean)\b.*\b(?:{_AVG_METRIC_WORD})\b",
@@ -996,6 +1016,7 @@ _INTENTS = [
     ("extension_adherence_ranking", _EXTENSION_ADHERENCE_PATTERNS),
     ("meeting_count_ranking", _MEETING_COUNT_PATTERNS),
     ("meeting_ratio_emp", _MEETING_RATIO_PATTERNS),
+    ("meeting_had_emp", _MEETING_HAD_EMP_PATTERNS),
     ("d_score_trend", _D_SCORE_TREND_PATTERNS),
     ("d_score_ranking", _D_SCORE_RANKING_PATTERNS),
     ("d_score_emp", _D_SCORE_EMP_PATTERNS),

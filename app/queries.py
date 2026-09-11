@@ -2695,6 +2695,39 @@ BUILD_QUERY_METRICS = {
     # fixed rolling-60-day ETL figure), so period is ignored for this metric
     # specifically (documented, not a bug).
     "dept_score_60_days_precomputed": ("avg(dept_score_60_days_7_3)", "precomputed dept score (last 60 days, ETL)"),
+
+    # --- Item #79 gap-fill (rows 39/40/49) --------------------------------
+    # Per item #77's read-only audit (SESSION_HANDOFF.md). engagement_minutes
+    # was completely unwired anywhere in app/*.py - modeled on its raw-minutes
+    # sibling productive_minutes above (averaged per employee-day, not summed).
+    "engagement_minutes": ("avg(coalesce(engagement_minutes,0))", "avg engagement minutes"),
+    # meeting_minutes: reuses the exact sum(coalesce(meeting_in_min,0))
+    # expression already shipped in meeting_minutes_ranking()/
+    # meeting_activity_for_employee() - not a new formula. Key deliberately
+    # named "meeting_minutes" (not the raw column name "meeting_in_min") to
+    # avoid confusion with the pre-existing meeting_min_ranking intent name,
+    # same naming-collision-avoidance precedent as dept_score_60_days_precomputed.
+    "meeting_minutes": ("sum(coalesce(meeting_in_min,0))", "total meeting minutes"),
+    # meeting_count: the raw meeting-count column, distinct from meeting_minutes
+    # (a duration). Not explicitly in item #77's plan but needed so "how many
+    # meetings did X have" (a numeric-count question) is answerable and clearly
+    # distinguishable from the new boolean "had any meetings" day-flag path
+    # (per the coordinator's row-51 requirement) rather than falling through
+    # unrecognized. Same sum(coalesce(...,0)) treatment as meeting_minutes.
+    "meeting_count": ("sum(coalesce(meeting_count,0))", "total meetings"),
+    # tasks_created / tasks_assigned: byte-identical sum(coalesce(...,0))
+    # expressions copied from TASK_METRICS, kept as two SEPARATE keys per
+    # item #77's recommendation - no combined "task_activity" magnitude
+    # metric invented (no existing precedent for that combination anywhere
+    # in the codebase). The boolean "had any task activity" framing stays
+    # exclusively on the existing DAY_FLAGS["completed_tasks"] path.
+    "tasks_created": ("sum(coalesce(tasks_created,0))", "tasks created"),
+    "tasks_assigned": ("sum(coalesce(tasks_assigned,0))", "tasks assigned"),
+    # todos_created / todos_assigned: same gap pattern as tasks_created/
+    # tasks_assigned (CSV rows 42/43), verified present as raw columns but
+    # unwired into BUILD_QUERY_METRICS - same sum(coalesce(...,0)) treatment.
+    "todos_created": ("sum(coalesce(todos_created,0))", "todos created"),
+    "todos_assigned": ("sum(coalesce(todos_assigned,0))", "todos assigned"),
 }
 
 # pace_status banding thresholds - MUST mirror _bucket_status() above

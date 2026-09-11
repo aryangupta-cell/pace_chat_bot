@@ -708,7 +708,20 @@ says "capped X %" / "capped X percent" / "capped X percentage", use the
 PLAIN "X_pct" metric instead (e.g. "capped effectiveness percentage" ->
 effectiveness_pct, NOT capped_effectiveness) - this is intentional, not a
 mistake to correct. Plain "X" with no "capped" and no "%" word also means
-"X_pct" (e.g. "effectiveness" alone -> effectiveness_pct). "pace_score_day_level" = the event-level score, AVERAGED
+"X_pct" (e.g. "effectiveness" alone -> effectiveness_pct).
+"engagement_minutes" = raw minutes figure, a COMPLETELY DIFFERENT metric
+from "engagement_pct" - use it whenever the user says "engagement minutes"
+(the word "minutes" is the deciding signal; plain "engagement" alone always
+means engagement_pct, never engagement_minutes). "meeting_minutes" = total
+meeting minutes (a summed magnitude) - use for "meeting minutes"/"total
+meeting minutes"/"average meeting minutes" wording. "meeting_count" =
+number of meetings (a summed count, distinct from meeting_minutes which is
+a duration) - use for "how many meetings"/"number of meetings"/"meeting
+count" wording. "tasks_created"/"tasks_assigned"/"todos_created"/
+"todos_assigned" = separate summed counts, matching the CSV's raw column
+names exactly - keep them as two separate metrics, never combine
+tasks_created+tasks_assigned into one number.
+"pace_score_day_level" = the event-level score, AVERAGED
 over whatever period is asked — this applies just as much to a multi-day
 period ("last 2 weeks", "last month") as to a single day; it is a
 genuinely different metric from the period-aggregate "pace_score", NOT a
@@ -810,6 +823,14 @@ _BQ_FEW_SHOT = [
     ("what is Aryan Gupta's synergy quotient for last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": [], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": "synergy quotient"}),
     # Item #76: genuinely generic - no specific metric implied, null is correct.
     ("how is Priya doing lately", {"dimension": "employee", "dimension_name": "Priya", "metrics": [], "filters": {}, "period_phrase": "lately", "unrecognized_metric_phrase": None}),
+    # Item #79 gap-fill (rows 39/40/49): engagement_minutes vs engagement_pct,
+    # meeting_minutes vs meeting_count, and the separate tasks/todos counts.
+    ("engagement minutes for Aryan Gupta last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["engagement_minutes"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
+    ("average meeting minutes for Manisha last week", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["meeting_minutes"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
+    ("how many meetings did Aryan Gupta have last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["meeting_count"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
+    ("tasks created for Aryan Gupta last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["tasks_created"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
+    ("tasks assigned for AI Labs department", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["tasks_assigned"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
+    ("todos created and todos assigned for Manisha this month", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["todos_created", "todos_assigned"], "filters": {}, "period_phrase": "this month", "unrecognized_metric_phrase": None}),
 ]
 
 
