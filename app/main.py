@@ -4115,21 +4115,44 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             and _DIMENSION_SCOPE_OVERRIDE_PATTERN.search(message)):
         rule_intent = None
 
-    # Item #79: meeting_min_ranking's own bare "meeting (minutes|time)"
-    # pattern (app/intents.py) is registered earlier in _INTENTS than
-    # average_metric, so it always wins list-order precedence - but it has
-    # NO per-employee-name resolution at all (queries.meeting_minutes_ranking
-    # is dept/employee_ids-ranking only). Live-verified this round: "average
-    # meeting minutes for Manisha last week" matched meeting_min_ranking and
-    # silently returned a company-wide top-10 ranking table, completely
-    # ignoring "Manisha" - exactly the silent-wrong-population failure class
-    # item #76 already fixed for other old intents. Same redirect-not-modify
-    # fix: whenever the message also has avg/average/mean wording, null the
-    # match so average_metric (which now has a real BUILD_QUERY_METRICS
-    # entry for meeting_minutes, per item #79) gets the turn and correctly
-    # resolves the named employee/department/RM/company scope instead.
+    # Item #79 follow-up 2 (this round): the 9798ddd redirect below nulled
+    # rule_intent to None, on the theory that "the cascade" would then pick
+    # up average_metric instead. Live-verified this round that this DIDN'T
+    # actually fix anything: "average meeting minutes for Rudhi" (Rudhi is
+    # a real, unambiguous, single-match employee) still returned the same
+    # company-wide top-10 ranking table. Root cause: intents.match_intent()
+    # returns the FIRST pattern match only (app/intents.py, _INTENTS is a
+    # flat ordered list) - it was never re-invoked here, so nulling
+    # rule_intent to None does NOT retroactively try average_metric's own
+    # pattern. Once rule_intent is None, control falls to
+    # `elif llm_result is not None: intent = llm_intent` a few dozen lines
+    # below - and llm_nlu.py's own few-shot examples explicitly map
+    # "meeting minutes ranking"-shaped phrasing to intent="meeting_min_ranking"
+    # (see FEW_SHOT list), so Gemini's independent guess for this exact
+    # phrasing is ALSO "meeting_min_ranking" essentially every time,
+    # silently reproducing the identical bug via the LLM path instead of the
+    # rule path. The actual fix: since we already know (by construction -
+    # the regex below is checked first) that the message contains the
+    # literal "meeting minutes" wording that _AVG_METRIC_WORD/
+    # _AVERAGE_METRIC_PATTERNS (app/intents.py) recognizes, deterministically
+    # route to "average_metric" directly instead of nulling to None - this
+    # guarantees the correctly-working rule-based handler above (with its
+    # existing extract_employee()/extract_department()/extract_manager()
+    # resolution, including proper entities.Ambiguous clarification
+    # handling - see its handler above) gets the turn regardless of what
+    # either match_intent()'s first-match-wins or the LLM's own classify()
+    # guess would otherwise have picked, since rule_intent-is-not-None wins
+    # outright over the LLM unconditionally (see "General precedence flip"
+    # below). Other meeting_min_ranking phrasings that DON'T literally say
+    # "meeting minutes" (e.g. "time in meetings") aren't covered by
+    # BUILD_QUERY_METRICS at all yet, so those still fall back to nulling to
+    # None (unchanged prior behavior - out of this round's confirmed-repro
+    # scope, see SESSION_HANDOFF.md item #79 follow-up 2).
     if rule_intent == "meeting_min_ranking" and re.search(r"\b(avg|average|mean)\b", message, re.IGNORECASE):
-        rule_intent = None
+        if re.search(r"\bmeeting\s*minutes?\b", message, re.IGNORECASE):
+            rule_intent = "average_metric"
+        else:
+            rule_intent = None
 
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO
