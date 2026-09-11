@@ -660,8 +660,9 @@ _BQ_EXTRACTION_SCHEMA = {
             "additionalProperties": False,
         },
         "period_phrase": {"type": ["string", "null"], "description": "the period AS WRITTEN by the user (e.g. 'last 3 weeks', 'August', 'yesterday'), or null if no period was named at all - NEVER compute actual dates yourself"},
+        "unrecognized_metric_phrase": {"type": ["string", "null"], "description": "set ONLY when the user's wording clearly names a SPECIFIC metric/KPI concept (as written) that does not match anything in the metrics key list - null whenever metrics is non-empty, OR whenever the question is genuinely generic (e.g. 'how is X doing') with no specific metric implied at all"},
     },
-    "required": ["dimension", "dimension_name", "metrics", "filters", "period_phrase"],
+    "required": ["dimension", "dimension_name", "metrics", "filters", "period_phrase", "unrecognized_metric_phrase"],
     "additionalProperties": False,
 }
 
@@ -760,32 +761,55 @@ dimension_name should still be extracted normally (who/what the question is
 about); metrics can be left as an empty list - the caller supplies the 4
 area metrics itself.
 
+unrecognized_metric_phrase: CRITICAL safety field, do not skip. The caller
+NEVER silently guesses plain "pace_score" when you return an empty metrics
+list for a message that named something specific - it either resolves the
+real concept deterministically, or gives the user a controlled "I don't
+recognize that" message instead of a fabricated answer. That distinction
+depends entirely on this field:
+- If metrics is non-empty: leave this null (not applicable).
+- If the question is genuinely GENERIC with no specific metric implied at
+  all (e.g. "how is Aryan doing", "give me Priya's overview"): leave this
+  null - defaulting to pace_score is the correct, expected behavior here.
+- If the user's wording clearly NAMES a specific metric/KPI concept (as
+  written, do not paraphrase it) that does NOT match anything in the
+  metrics key list above (e.g. "synergy quotient", "focus index", "burnout
+  score", "collaboration rating") - set this to that phrase exactly as
+  written, and leave metrics empty. NEVER force it into the closest-sounding
+  real metric key - an unrecognized concept must never silently become
+  pace_score or any other real metric.
+
 Respond with JSON matching the given schema only."""
 
 _BQ_FEW_SHOT = [
-    ("what's Rahul's capped engagement", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["capped_engagement"], "filters": {}, "period_phrase": None}),
+    ("what's Rahul's capped engagement", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["capped_engagement"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
     # Item #73: the non-obvious "capped X %"/"capped X percentage" -> X_pct
     # business rule (NOT capped_X) - see the key-meanings paragraph above.
-    ("what's Rahul's capped engagement percentage", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["engagement_pct"], "filters": {}, "period_phrase": None}),
-    ("capped effectiveness % for Billing department", {"dimension": "department", "dimension_name": "Billing", "metrics": ["effectiveness_pct"], "filters": {}, "period_phrase": None}),
-    ("what pace status is Accounts department in over the last 3 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 3 weeks"}),
-    ("day level pace score for Priya yesterday", {"dimension": "employee", "dimension_name": "Priya", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "yesterday"}),
-    ("precomputed dept score for SCM", {"dimension": "department", "dimension_name": "SCM", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None}),
-    ("engagement and discipline for Megha Sharma's team last month", {"dimension": "rm", "dimension_name": "Megha Sharma", "metrics": ["engagement_pct", "discipline_pct"], "filters": {}, "period_phrase": "last month"}),
-    ("company wide pace score for August", {"dimension": "company", "dimension_name": None, "metrics": ["pace_score"], "filters": {}, "period_phrase": "August"}),
-    ("day level pace score for Accounts department over the last 2 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "last 2 weeks"}),
-    ("precomputed 60 day dept score for Founders Office", {"dimension": "department", "dimension_name": "Founders Office", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None}),
-    ("pace status for AI Labs over last 30 days", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 30 days"}),
+    ("what's Rahul's capped engagement percentage", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["engagement_pct"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
+    ("capped effectiveness % for Billing department", {"dimension": "department", "dimension_name": "Billing", "metrics": ["effectiveness_pct"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
+    ("what pace status is Accounts department in over the last 3 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 3 weeks", "unrecognized_metric_phrase": None}),
+    ("day level pace score for Priya yesterday", {"dimension": "employee", "dimension_name": "Priya", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "yesterday", "unrecognized_metric_phrase": None}),
+    ("precomputed dept score for SCM", {"dimension": "department", "dimension_name": "SCM", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
+    ("engagement and discipline for Megha Sharma's team last month", {"dimension": "rm", "dimension_name": "Megha Sharma", "metrics": ["engagement_pct", "discipline_pct"], "filters": {}, "period_phrase": "last month", "unrecognized_metric_phrase": None}),
+    ("company wide pace score for August", {"dimension": "company", "dimension_name": None, "metrics": ["pace_score"], "filters": {}, "period_phrase": "August", "unrecognized_metric_phrase": None}),
+    ("day level pace score for Accounts department over the last 2 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "last 2 weeks", "unrecognized_metric_phrase": None}),
+    ("precomputed 60 day dept score for Founders Office", {"dimension": "department", "dimension_name": "Founders Office", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
+    ("pace status for AI Labs over last 30 days", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 30 days", "unrecognized_metric_phrase": None}),
     # Item #76 (Phase 3): arbitrary "last N days" period, with/without a
     # qualifying filter word right before "days".
-    ("what is Manisha's pace score for the last 40 days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_score"], "filters": {}, "period_phrase": "last 40 days"}),
-    ("pace status for Manisha for the last 10 WFH days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_status"], "filters": {"work_mode": "wfh"}, "period_phrase": "last 10 WFH days"}),
+    ("what is Manisha's pace score for the last 40 days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_score"], "filters": {}, "period_phrase": "last 40 days", "unrecognized_metric_phrase": None}),
+    ("pace status for Manisha for the last 10 WFH days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_status"], "filters": {"work_mode": "wfh"}, "period_phrase": "last 10 WFH days", "unrecognized_metric_phrase": None}),
     # Item #76: ranking (no specific name at all - dimension_name null).
-    ("which department has the highest discipline this month", {"dimension": "department", "dimension_name": None, "metrics": ["discipline_pct"], "filters": {}, "period_phrase": "this month"}),
-    ("top 5 employees by engagement last week", {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {}, "period_phrase": "last week"}),
+    ("which department has the highest discipline this month", {"dimension": "department", "dimension_name": None, "metrics": ["discipline_pct"], "filters": {}, "period_phrase": "this month", "unrecognized_metric_phrase": None}),
+    ("top 5 employees by engagement last week", {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
     # Item #76: strongest/weakest area (derived - metrics left empty).
-    ("what is Rahul Kanwaria's strongest area", {"dimension": "employee", "dimension_name": "Rahul Kanwaria", "metrics": [], "filters": {}, "period_phrase": None}),
-    ("which area is Ops - Cement weakest in over the last 2 months", {"dimension": "department", "dimension_name": "Ops - Cement", "metrics": [], "filters": {}, "period_phrase": "last 2 months"}),
+    ("what is Rahul Kanwaria's strongest area", {"dimension": "employee", "dimension_name": "Rahul Kanwaria", "metrics": [], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
+    ("which area is Ops - Cement weakest in over the last 2 months", {"dimension": "department", "dimension_name": "Ops - Cement", "metrics": [], "filters": {}, "period_phrase": "last 2 months", "unrecognized_metric_phrase": None}),
+    # Item #76: genuinely unrecognized metric concept - metrics MUST stay
+    # empty, never guessed into pace_score or any other real key.
+    ("what is Aryan Gupta's synergy quotient for last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": [], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": "synergy quotient"}),
+    # Item #76: genuinely generic - no specific metric implied, null is correct.
+    ("how is Priya doing lately", {"dimension": "employee", "dimension_name": "Priya", "metrics": [], "filters": {}, "period_phrase": "lately", "unrecognized_metric_phrase": None}),
 ]
 
 
@@ -884,5 +908,6 @@ def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS
         "metrics": [m for m in (data.get("metrics") or []) if isinstance(m, str)],
         "filters": {k: v for k, v in (data.get("filters") or {}).items() if v},
         "period_phrase": data.get("period_phrase") or None,
+        "unrecognized_metric_phrase": data.get("unrecognized_metric_phrase") or None,
         "_latency": latency,
     }

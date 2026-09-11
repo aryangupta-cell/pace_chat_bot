@@ -1224,6 +1224,19 @@ def _extraction_llm_reply(raw_message, message, session):
         "pace_score", "pace_status", "dept_status_60_days_derived",
     }
     metrics = [m for m in (extracted.get("metrics") or []) if m in valid_metric_keys]
+    # Word order varies in natural phrasing ("Rahul's strongest area" vs
+    # "which area is Rahul weakest in") - check both orders and derive the
+    # direction word from whichever one actually matched. Computed early
+    # (moved up from below, item #76) because the empty-metrics fallback
+    # chain right below needs to know NOT to treat "strongest/weakest area"
+    # phrasing as an unrecognized-metric case - its metrics are SUPPOSED to
+    # be empty at this point (the caller supplies the 4 area metrics itself
+    # further down).
+    _area_dir_match = (
+        re.search(r"\b(strongest|weakest)\b[^.?!]{0,40}\b(?:area|metric|dimension|aspect)\b", raw_message, re.I)
+        or re.search(r"\b(?:area|metric|dimension|aspect)\b[^.?!]{0,40}\b(strongest|weakest)\b", raw_message, re.I)
+    )
+    _area_match = _area_dir_match
     if not metrics:
         # Item #72: don't silently default straight to plain pace_score when
         # the LLM extraction returned an empty metrics list - a raw_message
@@ -1236,6 +1249,25 @@ def _extraction_llm_reply(raw_message, message, session):
         # about). Falls through to the plain "pace_score" default below only
         # if none of these markers are present either.
         metrics = _repair_new_vocab_metric(raw_message)
+    if not metrics and not _area_match:
+        # Item #76 (Phase 3): the LAST safety net before the plain pace_score
+        # default - extract_build_query() now explicitly flags when the
+        # message named a SPECIFIC metric concept it didn't recognize
+        # (unrecognized_metric_phrase), as opposed to a genuinely generic
+        # "how is X doing" question (which correctly still defaults to
+        # pace_score below). Live-verified gap this closes: "what is Aryan
+        # Gupta's synergy quotient for last week" previously silently
+        # answered with his plain PACE score - exactly the fabricated-
+        # specific-number failure mode this project must never produce.
+        _unrecognized = extracted.get("unrecognized_metric_phrase")
+        if _unrecognized:
+            return (
+                f"I don't have a metric called \"{_unrecognized}\" — I can answer about PACE score/status, "
+                "engagement, effectiveness, discipline, working hours, capped engagement/effectiveness/"
+                "discipline, late-comings, early leavings, deficient-hour days, or productive minutes. "
+                "Could you rephrase using one of those?",
+                [],
+            )
     if not metrics:
         metrics = ["pace_score"]
     # Item #73: deterministic override for the capped-vs-percentage business
@@ -1323,17 +1355,10 @@ def _extraction_llm_reply(raw_message, message, session):
 
     # Item #76 (Part B): "<employee/dept/RM>'s strongest/weakest area" - a
     # derived OPERATION (rank the 4 pct sub-metrics for one scope), not a
-    # new queryable column. Detected on the raw message so it composes with
-    # whatever dimension/name/period/filters were already extracted above,
-    # rather than being a new parallel intent.
-    # Word order varies in natural phrasing ("Rahul's strongest area" vs
-    # "which area is Rahul weakest in") - check both orders and derive the
-    # direction word from whichever one actually matched.
-    _area_dir_match = (
-        re.search(r"\b(strongest|weakest)\b[^.?!]{0,40}\b(?:area|metric|dimension|aspect)\b", raw_message, re.I)
-        or re.search(r"\b(?:area|metric|dimension|aspect)\b[^.?!]{0,40}\b(strongest|weakest)\b", raw_message, re.I)
-    )
-    _area_match = _area_dir_match
+    # new queryable column. Detected on the raw message (see _area_match,
+    # computed earlier above) so it composes with whatever dimension/name/
+    # period/filters were already extracted above, rather than being a new
+    # parallel intent.
 
     # Re-resolve dimension_name through the EXISTING fuzzy-safe extraction
     # functions against the ORIGINAL message - never trust the LLM's own
