@@ -1748,6 +1748,95 @@ def _extraction_llm_reply(raw_message, message, session):
     # computed earlier above) so it composes with whatever dimension/name/
     # period/filters were already extracted above, rather than being a new
     # parallel intent.
+    _AREA_METRICS = ["engagement_pct", "effectiveness_pct", "discipline_pct", "working_pct"]
+    _AREA_LABELS = {
+        "engagement_pct": "Engagement", "effectiveness_pct": "Effectiveness",
+        "discipline_pct": "Discipline", "working_pct": "Working hours",
+    }
+    _qc = (session or {}).get("query_context") or {}
+
+    # Item #86 follow-up 4 (part of the K/L/M/N/O chain, step d - "what is
+    # their weakest area" right after a ranking/singular-lookup that
+    # narrowed to a specific employee): this group-pronoun resolution MUST
+    # run BEFORE the name_filter resolution block below, not after it (as
+    # originally placed by item #84). Root cause, live-confirmed this round:
+    # once a department is sticky (e.g. from an earlier turn in the SAME
+    # K/L/M/N/O chain - "which department has the lowest PACE score" ->
+    # "how many employees are in that department" -> "which employee has the
+    # lowest PACE score there"), the name_filter resolution block's own
+    # department branch (`name_filter = dept_name or sticky.get("dept_name")`)
+    # unconditionally fills `name_filter` with that STICKY department the
+    # moment the LLM's own dimension guess is "department" (which it commonly
+    # is for a bare pronoun message with department context in the hint) -
+    # defeating this block's own `not name_filter` gate when it ran AFTER
+    # that resolution, and silently answering with the DEPARTMENT's own
+    # weakest area instead of the specific EMPLOYEE's (live-reproduced:
+    # answered "Customer Success - CPL's weakest area is Engagement" instead
+    # of resolving "their" to the one employee query_context.last_result_ids
+    # actually pointed at). Moved here, before any name_filter resolution
+    # happens at all, so a real query_context employee referent always wins
+    # for this exact pronoun shape - same "structured query_context is
+    # authoritative over sticky_context for a ranking-result pronoun"
+    # precedent item #84 already established for the singular referent block
+    # below, just applied earlier in the pipeline so it can no longer be
+    # shadowed by dept-sticky name_filter resolution.
+    if (_area_match and _qc.get("last_dimension") == "employee" and _qc.get("last_result_ids")
+            and re.search(r"\b(their|them|those)\b", raw_message, re.IGNORECASE)):
+        # Item #84 (failure G): "their weakest areas" right after a ranking
+        # ("5 employees with lowest PACE" -> "what are their weakest
+        # areas?") - resolves "their" against the query_context ranking
+        # this cascade now maintains, and reports EACH employee's own
+        # strongest/weakest area (not a single aggregated scope - "strongest/
+        # weakest area" is inherently per-employee, and there is no existing
+        # multi-employee aggregate version of this operation to reuse).
+        _want_weakest_grp = _area_match.group(1).lower() == "weakest"
+        _direction_grp = "weakest" if _want_weakest_grp else "strongest"
+        _emp_ids = _qc["last_result_ids"][:queries.LIMIT]
+        _group_rows = []
+        _last_eid = None
+        _last_chosen_key = None
+        _last_dept_name = None
+        for _eid in _emp_ids:
+            try:
+                _r = queries.build_query(
+                    "employee", _AREA_METRICS, filters=filters, period=period,
+                    name_filter=_eid, limit=1, latest_n_days=latest_n_days,
+                )
+            except Exception:
+                logging.getLogger("pace_chatbot.main").exception(
+                    "build_query() raised inside extraction-LLM cascade step (group strongest/weakest area)")
+                continue
+            if not _r:
+                continue
+            row = _r[0]
+            present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
+            if not present:
+                continue
+            chosen_key, chosen_val = (min if _want_weakest_grp else max)(present, key=lambda kv: float(kv[1]))
+            _group_rows.append((row.get("emp_name"), _AREA_LABELS[chosen_key], chosen_val))
+            _last_eid, _last_chosen_key, _last_dept_name = _eid, chosen_key, row.get("dept_name")
+        if not _group_rows:
+            return (f"No data found for that group of employees in this period.", [])
+        headers = ["Employee", f"{_direction_grp.capitalize()} area", "Value"]
+        data = [[name, area, f"{_fmt(val)}%"] for name, area, val in _group_rows]
+        reply = f"{_direction_grp.capitalize()} area per employee (from the last ranking shown):\n\n" + _render_table(headers, data)
+        if session is not None and len(_group_rows) == 1 and _last_eid is not None:
+            # Item #86 (failure O): when the "group" collapses to exactly
+            # ONE employee (e.g. a prior turn already narrowed the ranking
+            # to a single department-scoped winner - see the K/L/M/N/O
+            # conversational chain), this answer is effectively the SAME
+            # shape as the singular _area_match branch below, so record the
+            # same query_context/sticky dept_name a follow-up like "was that
+            # area also the weakest for the department overall?" needs - see
+            # _handle_dept_weakest_area_followup.
+            if _last_dept_name:
+                session_store.push_context(session, dept_name=_last_dept_name)
+            session_store.set_query_context(
+                session, last_operation="strongest_weakest", last_dimension="employee",
+                last_result_ids=[_last_eid], ascending=_want_weakest_grp,
+                metric=[_last_chosen_key], period_phrase=extracted.get("period_phrase"),
+            )
+        return reply, []
 
     # Item #84 (failures I/J, item #83 Phase 2 design section 4(iii)): a
     # follow-up naming "them"/"both"/"the two" - referring to TWO entities
@@ -1850,7 +1939,6 @@ def _extraction_llm_reply(raw_message, message, session):
     # already resolved this turn (no name_filter) and the prior answer's
     # dimension matches, so this never overrides an explicit name/ranking
     # request in the CURRENT message.
-    _qc = (session or {}).get("query_context") or {}
     _SINGULAR_RANKED_REFERENT = re.compile(
         r"\bthe (employee|department|person)\b[^.?!]{0,30}\bwith the (lowest|highest|best|worst)\b",
         re.IGNORECASE)
@@ -1906,80 +1994,6 @@ def _extraction_llm_reply(raw_message, message, session):
         # context either) and not a ranking question either - not enough to
         # run a scoped query; fall through.
         return None
-
-    _AREA_METRICS = ["engagement_pct", "effectiveness_pct", "discipline_pct", "working_pct"]
-    _AREA_LABELS = {
-        "engagement_pct": "Engagement", "effectiveness_pct": "Effectiveness",
-        "discipline_pct": "Discipline", "working_pct": "Working hours",
-    }
-
-    # Item #84 (failure G): dimension here is whatever the extraction LLM
-    # guessed from the raw message ALONE - for a pronoun-only follow-up
-    # like "what are their weakest areas?" (no explicit employee/
-    # department mention at all), it has no way to know "their" refers to
-    # the ranked group from the PRIOR turn and typically guesses "company"
-    # by default. query_context.last_dimension (this round's addition) is
-    # the authoritative signal for what the pronoun actually refers to, so
-    # it - not the LLM's context-blind dimension guess - decides whether
-    # this is the group-of-employees case.
-    if (_area_match and not name_filter
-            and _qc.get("last_dimension") == "employee" and _qc.get("last_result_ids")
-            and re.search(r"\b(their|them|those)\b", raw_message, re.IGNORECASE)):
-        # Item #84 (failure G): "their weakest areas" right after a ranking
-        # ("5 employees with lowest PACE" -> "what are their weakest
-        # areas?") - resolves "their" against the query_context ranking
-        # this cascade now maintains, and reports EACH employee's own
-        # strongest/weakest area (not a single aggregated scope - "strongest/
-        # weakest area" is inherently per-employee, and there is no existing
-        # multi-employee aggregate version of this operation to reuse).
-        want_weakest = _area_match.group(1).lower() == "weakest"
-        direction = "weakest" if want_weakest else "strongest"
-        _emp_ids = _qc["last_result_ids"][:queries.LIMIT]
-        _group_rows = []
-        _last_eid = None
-        _last_chosen_key = None
-        _last_dept_name = None
-        for _eid in _emp_ids:
-            try:
-                _r = queries.build_query(
-                    "employee", _AREA_METRICS, filters=filters, period=period,
-                    name_filter=_eid, limit=1, latest_n_days=latest_n_days,
-                )
-            except Exception:
-                logging.getLogger("pace_chatbot.main").exception(
-                    "build_query() raised inside extraction-LLM cascade step (group strongest/weakest area)")
-                continue
-            if not _r:
-                continue
-            row = _r[0]
-            present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
-            if not present:
-                continue
-            chosen_key, chosen_val = (min if want_weakest else max)(present, key=lambda kv: float(kv[1]))
-            _group_rows.append((row.get("emp_name"), _AREA_LABELS[chosen_key], chosen_val))
-            _last_eid, _last_chosen_key, _last_dept_name = _eid, chosen_key, row.get("dept_name")
-        if not _group_rows:
-            return (f"No data found for that group of employees in this period.", [])
-        headers = ["Employee", f"{direction.capitalize()} area", "Value"]
-        data = [[name, area, f"{_fmt(val)}%"] for name, area, val in _group_rows]
-        reply = f"{direction.capitalize()} area per employee (from the last ranking shown):\n\n" + _render_table(headers, data)
-        if session is not None and len(_group_rows) == 1 and _last_eid is not None:
-            # Item #86 (failure O): when the "group" collapses to exactly
-            # ONE employee (e.g. a prior turn already narrowed the ranking
-            # to a single department-scoped winner - see the K/L/M/N/O
-            # conversational chain), this answer is effectively the SAME
-            # shape as the singular _area_match branch below, so record the
-            # same query_context/sticky dept_name a follow-up like "was that
-            # area also the weakest for the department overall?" needs - see
-            # _handle_dept_weakest_area_followup.
-            if _last_dept_name:
-                session_store.push_context(session, dept_name=_last_dept_name)
-            session_store.set_query_context(
-                session, last_operation="strongest_weakest", last_dimension="employee",
-                last_result_ids=[_last_eid], ascending=want_weakest,
-                metric=[_last_chosen_key], period_phrase=extracted.get("period_phrase"),
-            )
-        return reply, []
 
     if _area_match and dimension in ("employee", "department", "rm") and not name_filter:
         # "strongest/weakest area" needs ONE concrete scope (a named entity,
