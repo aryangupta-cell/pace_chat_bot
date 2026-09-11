@@ -1821,6 +1821,50 @@ def format_score_delta_ranking(rows, meta, header_prefix):
     return reply
 
 
+def format_subscore_delta_ranking(rows, meta, header_prefix):
+    """Item #84 (Finding 3 follow-through): the sub-metric (engagement/
+    effectiveness/discipline/working hours) counterpart of
+    format_score_delta_ranking — same shape, same MIN_DAYS_FOR_DELTA
+    reliability gate and partial-month caution note, but for
+    queries.subscore_delta_ranking()'s cur_avg/prev_avg/delta columns
+    instead of the precomputed pace_score_delta column."""
+    header = f"{header_prefix} (this month's avg vs prior month's avg {meta['label']})"
+    if not rows:
+        body = (
+            f"No employees had at least {meta['min_days']} reliable Standard-shift days of data in "
+            f"both this month and {meta['prev_month']} to measure a month-over-month change."
+        )
+        return f"{header}:\n\n{body}"
+
+    if len(rows) == 1:
+        r = rows[0]
+        delta = r["delta"]
+        sign = "+" if delta and delta > 0 else ""
+        body = (
+            f"{r['emp_name']} ({r['dept_name']}) — {sign}{_fmt(delta)} pts "
+            f"(current month avg {_fmt(r['cur_avg'])}%, prior month avg {_fmt(r['prev_avg'])}%)"
+        )
+    else:
+        headers = ["#", "Employee", "Department", "Current month avg", "Prior month avg", "Change (pts)"]
+        data = []
+        for i, r in enumerate(rows, 1):
+            delta = r["delta"]
+            sign = "+" if delta and delta > 0 else ""
+            data.append([
+                i, r["emp_name"], r["dept_name"],
+                f"{_fmt(r['cur_avg'])}%", f"{_fmt(r['prev_avg'])}%", f"{sign}{_fmt(delta)}",
+            ])
+        body = _render_table(headers, data)
+
+    reply = f"{header}:\n\n{body}"
+    if meta["partial_month"]:
+        reply += (
+            "\n\nNote: this month is still in progress, so its average — and therefore this "
+            "ranking — may shift as more days come in."
+        )
+    return reply
+
+
 def format_ranking_weekly_trend(rows, label):
     """Weekly counterpart to format_score_delta_ranking's monthly ranking —
     one row per employee per week, mirroring format_weekly_trend's
@@ -3500,6 +3544,37 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                                          dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range)
         return ChatResponse(reply=reply, rows=rows)
 
+    if intent == "subscore_delta_ranking":
+        # Item #84 (Finding 3): reached via the redirect (see the
+        # rule_intent nulling/redirect block earlier in this function) when
+        # subscore_trend_emp's own pattern matched but no specific employee
+        # is named - i.e. this is actually a company-wide/department-wide
+        # sub-metric-decline ranking, not a single-employee trend lookup.
+        subscore_key = _detect_subscore_key(message, default="engagement", include_working_hours=True)
+        metric_key = {
+            "engagement": "engagement_pct", "effectiveness": "effectiveness_pct",
+            "discipline": "discipline_pct", "working_hours": "working_pct",
+        }[subscore_key]
+        # Direction: "declin*"/"drop*"/"fell"/"worse"/"decreased" -> ascending
+        # (most-negative delta first); "improv*"/"better"/"increased" ->
+        # descending. Defaults to ascending (decline) since that's the
+        # wording that actually triggers this redirect in practice
+        # (_SUBSCORE_TREND_PATTERNS requires improv*/declin* wording).
+        ascending = not re.search(r"\bimprov\w*|better|increas\w*\b", message, re.IGNORECASE)
+        rows, meta = queries.subscore_delta_ranking(
+            metric_key, dept_name=dept_name, employee_ids=employee_ids,
+            month=period_month, date_range=date_range, ascending=ascending, limit=limit,
+        )
+        direction_label = "decline" if ascending else "improvement"
+        reply = format_subscore_delta_ranking(rows, meta, f"Biggest {meta['label']} {direction_label}{scope_note}")
+        if session is not None:
+            session_store.set_last_list(
+                session, kind="ranking", answer_kind="list",
+                dept_name=dept_name, employee_ids=[r["employee_id"] for r in rows] or None,
+                team_label=team_label, month=period_month, date_range=date_range,
+            )
+        return ChatResponse(reply=reply, rows=rows)
+
     if intent == "gainer_loser_ranking":
         filter_sql, filter_footer = _resolve_population_filter(message)
         directions = _gainer_loser_directions(message)
@@ -4220,6 +4295,39 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         "emp_engagement", "emp_discipline", "emp_effectiveness", "emp_working_pct",
     ) and re.search(r"\b(avg|average|mean)\b", message, re.IGNORECASE):
         rule_intent = "average_metric"
+
+    # Item #84 (Finding 3): the SAME collision class as the two blocks
+    # immediately above, in a third old-intent family. _SUBSCORE_TREND_
+    # PATTERNS (intents.py, intent "subscore_trend_emp") matches ANY message
+    # containing an area word (engagement/effectiveness/discipline) followed
+    # later by "improv*"/"declin*" wording, ANYWHERE in the message, with no
+    # requirement that a specific employee actually be named - live-
+    # confirmed this round: "which employees had the biggest engagement
+    # decline vs last month" and "who are the employees whose PACE score has
+    # declined the most compared with the previous month" both matched this
+    # single-employee-only intent, whose handler then tried (and failed) to
+    # resolve "employees"/"the employees whose PACE score" as ONE employee's
+    # name and returned "I couldn't find that employee" instead of ever
+    # attempting the company-/department-wide ranking the question actually
+    # asked for. Same redirect-not-rewrite fix, same rationale: reuse the
+    # SAME entities.extract_employee() resolution the handler itself would
+    # use, and only redirect when it genuinely finds no specific named
+    # employee in the message (a multi-match still lets subscore_trend_emp's
+    # own clarification fire, unchanged - _extract_employee_ctx below would
+    # raise Ambiguous the same way). Redirects to the new
+    # "subscore_delta_ranking" intent (handled above, in the main dispatch),
+    # which reuses queries.subscore_delta_ranking() - a new, generalized
+    # month-over-month sub-metric delta ranking (previously this only
+    # existed for whole-PACE-score deltas via score_drop_ranking/
+    # score_improvement_alltime) rather than guessing at an unsupported
+    # shape.
+    if rule_intent == "subscore_trend_emp":
+        try:
+            _std_emp_id, _ = entities.extract_employee(message, fallback_text=raw_message)
+        except entities.Ambiguous:
+            _std_emp_id = "ambiguous"  # let subscore_trend_emp's own clarification fire, unchanged
+        if not _std_emp_id:
+            rule_intent = "subscore_delta_ranking"
 
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO

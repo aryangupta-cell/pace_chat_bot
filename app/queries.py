@@ -1433,6 +1433,79 @@ def score_improvement_alltime(dept_name=None, employee_ids=None, month=None, lim
     return _score_delta_ranking_monthly(dept_name, employee_ids, resolved_month, ascending=False, limit=limit)
 
 
+# Item #84 (Finding 3 follow-through): generalizes _score_delta_ranking_monthly
+# to an arbitrary sub-metric column (engagement_pct/effectiveness_pct/
+# discipline_pct/working_pct), not just the precomputed pace_score_delta
+# column. score_drop_ranking/score_improvement_alltime above can't be reused
+# directly - there is no precomputed *_delta column for these sub-metrics -
+# so this averages the raw column per employee per month (same shape as
+# BUILD_QUERY_METRICS' own "avg(<col>)" treatment) and computes the delta in
+# SQL, applying the SAME MIN_DAYS_FOR_DELTA reliability gate as the
+# pace_score version so a 1-2 day sample can't produce a misleading swing.
+SUBSCORE_DELTA_COLUMNS = {
+    "engagement_pct": ("engagement_pct", "engagement %"),
+    "effectiveness_pct": ("effectiveness_pct", "effectiveness %"),
+    "discipline_pct": ("discipline_pct", "discipline %"),
+    "working_pct": ("working_pct", "working hours %"),
+}
+
+
+def subscore_delta_ranking(metric_key, dept_name=None, employee_ids=None, month=None,
+                            date_range=None, ascending=True, limit=None):
+    """Ranks employees by CURRENT-MONTH-AVG vs PRIOR-MONTH-AVG of one of the
+    4 pct sub-metrics (engagement/effectiveness/discipline/working hours),
+    most-declined first by default (ascending=True). `metric_key` must be a
+    key of SUBSCORE_DELTA_COLUMNS - callers validate this before calling.
+    `date_range` (like score_drop_ranking) is resolved down to the calendar
+    month its start date falls in when no explicit `month` is given."""
+    if metric_key not in SUBSCORE_DELTA_COLUMNS:
+        raise ValueError(f"subscore_delta_ranking: unknown metric_key {metric_key!r}")
+    col, label = SUBSCORE_DELTA_COLUMNS[metric_key]
+    resolved_month = month
+    if not resolved_month and date_range and date_range[0]:
+        start = date_range[0]
+        resolved_month = f"{start.year:04d}-{start.month:02d}"
+    resolved_month = resolved_month or _current_month()
+    prev_month = _prev_month(resolved_month)
+    lim = limit or LIMIT
+    order = "asc" if ascending else "desc"
+    sql = f"""
+        select employee_id, emp_name, dept_name,
+               sum(case when to_char(worked_day,'YYYY-MM') = %(month)s then 1 else 0 end) as days_current_month,
+               sum(case when to_char(worked_day,'YYYY-MM') = %(prev_month)s then 1 else 0 end) as days_prev_month,
+               avg(case when to_char(worked_day,'YYYY-MM') = %(month)s then {col} end) as cur_avg,
+               avg(case when to_char(worked_day,'YYYY-MM') = %(prev_month)s then {col} end) as prev_avg,
+               avg(case when to_char(worked_day,'YYYY-MM') = %(month)s then {col} end)
+                 - avg(case when to_char(worked_day,'YYYY-MM') = %(prev_month)s then {col} end) as delta
+        from {VIEW}
+        where to_char(worked_day,'YYYY-MM') in (%(month)s, %(prev_month)s)
+          and (%(dept_name)s is null or dept_name = %(dept_name)s)
+          and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+        group by employee_id, emp_name, dept_name
+        having sum(case when to_char(worked_day,'YYYY-MM') = %(month)s then 1 else 0 end) >= %(min_days)s
+           and sum(case when to_char(worked_day,'YYYY-MM') = %(prev_month)s then 1 else 0 end) >= %(min_days)s
+           and avg(case when to_char(worked_day,'YYYY-MM') = %(month)s then {col} end) is not null
+           and avg(case when to_char(worked_day,'YYYY-MM') = %(prev_month)s then {col} end) is not null
+        order by delta {order}
+        limit {lim}
+    """
+    rows = run_query(sql, {
+        "dept_name": dept_name,
+        "employee_ids": employee_ids,
+        "month": resolved_month,
+        "prev_month": prev_month,
+        "min_days": MIN_DAYS_FOR_DELTA,
+    })
+    meta = {
+        "label": label,
+        "prev_month": prev_month,
+        "month": resolved_month,
+        "partial_month": _is_partial_month(resolved_month),
+        "min_days": MIN_DAYS_FOR_DELTA,
+    }
+    return rows, meta
+
+
 def ranking_weekly_pace_trend(employee_ids, num_weeks=4):
     """Week-by-week (ISO Monday-Sunday) new_pace_score_7_3_event_level for a
     SET of employees — the weekly-breakdown counterpart of

@@ -48,12 +48,54 @@ def refresh_entity_cache():
     get_employee_names.cache_clear()
 
 
+_RANKING_DIRECTION_WORD = (
+    r"(?:top|bottom|lowest|highest|best|worst|least|most|worse|better|"
+    r"weakest|strongest|smallest|largest|biggest|greatest)"
+)
+
+
 def extract_limit(text, default=None):
-    """'top 5' / 'bottom 3' / 'top5' -> 5 / 3. Returns default if not present."""
-    m = re.search(r"\b(?:top|bottom)\s*(\d{1,3})\b", text.lower())
+    """Extracts a requested row count near a ranking-direction word.
+
+    Recognizes, in order of specificity:
+    - literal "top N" / "bottom N" (unchanged from the original behavior)
+    - "N employees/departments/... with the lowest/highest/... X"
+    - "N worst/best/lowest/highest/... performers/employees/..."
+    - "give me N ..." / "show me N ..." (a bare requested count, no
+      direction word required, as long as a number is present)
+    - "the lowest/highest/... N" (direction word before the number)
+
+    Returns default if no count can be confidently extracted.
+    """
+    t = text.lower()
+
+    # 1) Original literal "top N" / "bottom N" phrasing (highest confidence).
+    m = re.search(r"\b(?:top|bottom)\s*(\d{1,3})\b", t)
     if m:
         n = int(m.group(1))
         return max(1, min(n, 100))
+
+    # 2) "N <direction-word...>" e.g. "5 lowest", "5 worst performers",
+    #    "3 employees with the highest engagement".
+    m = re.search(r"\b(\d{1,3})\b[^.?!]{0,40}?\b" + _RANKING_DIRECTION_WORD + r"\b", t)
+    if m:
+        n = int(m.group(1))
+        return max(1, min(n, 100))
+
+    # 3) "<direction-word...> N" e.g. "lowest 5", "the highest 3 employees".
+    m = re.search(r"\b" + _RANKING_DIRECTION_WORD + r"\b[^.?!]{0,40}?\b(\d{1,3})\b", t)
+    if m:
+        n = int(m.group(1))
+        return max(1, min(n, 100))
+
+    # 4) "give me N ..." / "show me N ..." — a bare requested count with no
+    #    direction word nearby, only when a ranking-ish request verb is present
+    #    so this doesn't accidentally fire on unrelated numeric mentions.
+    m = re.search(r"\b(?:give|show|list|get)\s+me\s+(\d{1,3})\b", t)
+    if m:
+        n = int(m.group(1))
+        return max(1, min(n, 100))
+
     return default
 
 
