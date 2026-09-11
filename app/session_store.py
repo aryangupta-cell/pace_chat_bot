@@ -93,7 +93,58 @@ def get_session(session_id):
         # meaningful case - e.g. the weekly-trend query only restricts to
         # Standard-shift rows and does not touch PS/visit status at all).
         "last_answer_filters": None,
+        # Item #84 (item #83 Phase 2 design, section 4(iii)): a real
+        # structured conversational-state object, additive alongside (not
+        # replacing) sticky_context/last_list above. Populated by BOTH the
+        # extraction cascade's ranking branch (previously the confirmed gap
+        # - see SESSION_HANDOFF.md item #83/#84) and its singular branch,
+        # so a pronoun follow-up ("their", "the employee with the lowest
+        # score") can resolve deterministically against the actual last
+        # ranking/lookup instead of falling through to a company-wide
+        # default. `last_result_ids` is kept in the SAME order the query
+        # was sorted in (so index 0 is always "the direction it was sorted
+        # toward" - e.g. lowest-first for a rank_bottom answer), which lets
+        # a later "the employee with the lowest/highest X" resolve to the
+        # correct end without re-guessing the sort direction.
+        "query_context": {
+            "last_operation": None,   # "rank_top" | "rank_bottom" | "value" | "strongest_weakest"
+            "last_dimension": None,   # "employee" | "department" | "rm"
+            "last_result_ids": None,  # list, in the SAME order the ranking was sorted
+            "ascending": None,        # True = last_result_ids[0] is the LOWEST
+            "metric": None,           # the metrics list actually used for that answer
+            "period_phrase": None,
+        },
+        # Item #84 (item #83 Phase 2 design, section 4(iii)): up to TWO
+        # named employee/department references, most-recent-first-shifted -
+        # so a follow-up referencing "them"/"the two"/"both" after naming a
+        # SECOND entity in consecutive turns can resolve against BOTH, not
+        # just the single most-recent one (sticky_context's employee_id/
+        # dept_name is a single slot and would silently overwrite the
+        # first entity the moment a second is named). Deliberately just 2
+        # slots (not a general N-entity history) - see push_context()'s
+        # _push_comparison_entity() call for how this is kept in sync.
+        "comparison_entities": {"first": None, "second": None},
     })
+
+
+def _push_comparison_entity(session, entity_type, entity_id, entity_name):
+    """Item #84: keeps the last TWO distinct explicitly-named entities
+    (employee or department) across turns in session["comparison_entities"],
+    so a follow-up referencing "them"/"the two"/"both" after a 2-entity
+    comparison sequence ("...compare them with the employee who had the
+    highest PACE...") can resolve against BOTH, not just the single
+    most-recent one. Called from push_context() below - the SAME call
+    sites that already maintain sticky_context's single dept_name/
+    employee_id slot, so no existing intent handler needs to change.
+    Re-naming the SAME entity again this turn (e.g. two questions in a row
+    about the same person) is a no-op, not a duplicate shift."""
+    slots = session.setdefault("comparison_entities", {"first": None, "second": None})
+    new_entity = {"type": entity_type, "id": entity_id, "name": entity_name}
+    cur_second = slots.get("second")
+    if cur_second and cur_second.get("type") == entity_type and cur_second.get("id") == entity_id:
+        return
+    slots["first"] = slots.get("second")
+    slots["second"] = new_entity
 
 
 def push_context(session, dept_name=None, employee_id=None, employee_name=None, month=None,
@@ -109,8 +160,10 @@ def push_context(session, dept_name=None, employee_id=None, employee_name=None, 
         "month": None, "date_range": None,
     })
     if dept_name is not None:
+        _push_comparison_entity(session, "department", dept_name, dept_name)
         ctx["dept_name"] = dept_name
     if employee_id is not None:
+        _push_comparison_entity(session, "employee", employee_id, employee_name)
         ctx["employee_id"] = employee_id
         ctx["employee_name"] = employee_name
     if month is not None:
@@ -121,6 +174,37 @@ def push_context(session, dept_name=None, employee_id=None, employee_name=None, 
         ctx["day_compare_dates"] = day_compare_dates
     if month_compare_months is not None:
         ctx["month_compare_months"] = month_compare_months
+
+
+def get_comparison_entities(session):
+    """Returns (first, second) - each None or {"type", "id", "name"} - the
+    last two distinct explicitly-named employee/department entities, most-
+    recent in `second`. Used to resolve "them"/"the two"/"both" after a
+    2-entity comparison sequence."""
+    slots = session.get("comparison_entities") or {"first": None, "second": None}
+    return slots.get("first"), slots.get("second")
+
+
+def set_query_context(session, last_operation=None, last_dimension=None, last_result_ids=None,
+                       ascending=None, metric=None, period_phrase=None):
+    """Item #84 (item #83 Phase 2 design): records the structured shape of
+    the single most-recent SUBSTANTIVE ranking/lookup answer produced by the
+    extraction-LLM cascade (app/main.py's _extraction_llm_reply), so a later
+    pronoun follow-up ("their", "the employee with the lowest score") can
+    resolve deterministically - kept separate from last_list (which exists
+    for a different purpose: re-running the SAME query expanded to a full
+    list) and from sticky_context (single dept/employee slot, no ranking-set
+    or sort-direction concept at all). Overwrites unconditionally - this
+    describes exactly the most recent such answer, not a history."""
+    session["query_context"] = {
+        "last_operation": last_operation, "last_dimension": last_dimension,
+        "last_result_ids": last_result_ids, "ascending": ascending,
+        "metric": metric, "period_phrase": period_phrase,
+    }
+
+
+def get_query_context(session):
+    return session.get("query_context")
 
 
 def set_last_list(session, kind, rerun_list=None, rerun_same=None, answer_kind="count",

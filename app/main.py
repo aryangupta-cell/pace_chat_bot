@@ -1441,6 +1441,72 @@ def _extraction_llm_reply(raw_message, message, session):
         name_filter = None
         name_label = "The whole company"
 
+    # Item #84 (failures I/J, item #83 Phase 2 design section 4(iii)): a
+    # follow-up naming "them"/"both"/"the two" - referring to TWO entities
+    # named across the last couple of turns (e.g. "...compare them with the
+    # employee who had the highest PACE..." then "what could explain the
+    # difference, look at LC/EL/DH for both") - resolves against the new
+    # comparison_entities 2-slot tracker (session_store.push_context() now
+    # keeps this in sync automatically) instead of failing or silently
+    # collapsing to just the single most-recent entity the way
+    # sticky_context's one-slot employee_id/dept_name would. Only fires
+    # when nothing was explicitly named THIS turn (no name_filter) and both
+    # tracked entities are the SAME type as the requested dimension.
+    _COMPARISON_PRONOUN = re.compile(r"\b(them|both|the two|either of them)\b", re.IGNORECASE)
+    if (not name_filter and dimension in ("employee", "department")
+            and _COMPARISON_PRONOUN.search(raw_message) and session is not None):
+        _cmp_first, _cmp_second = session_store.get_comparison_entities(session)
+        if (_cmp_first and _cmp_second
+                and _cmp_first.get("type") == dimension and _cmp_second.get("type") == dimension):
+            _cmp_rows = []
+            for _ent in (_cmp_first, _cmp_second):
+                try:
+                    _r = queries.build_query(
+                        dimension, metrics, filters=filters, period=period,
+                        name_filter=_ent["id"], limit=1, latest_n_days=latest_n_days,
+                    )
+                except Exception:
+                    logging.getLogger("pace_chatbot.main").exception(
+                        "build_query() raised inside extraction-LLM cascade step (2-entity comparison)")
+                    continue
+                if _r:
+                    _cmp_rows.append(_r[0])
+            if _cmp_rows:
+                reply = _format_build_query_rows(_cmp_rows, dimension, metrics, name_label=None)
+                return reply, _cmp_rows
+            # Both entities tracked but neither had data - fall through to
+            # the rest of the cascade rather than returning a confusing
+            # empty comparison.
+
+    # Item #84 (failures G/H, item #83 section 1's confirmed conversational-
+    # state gap): a SINGULAR referent right after a ranking answer ("the
+    # employee with the lowest score", "which department had the highest")
+    # should resolve against the query_context this cascade now maintains
+    # (see the set_query_context() calls below), not re-run a fresh
+    # company-wide ranking from scratch. Only applies when nothing else was
+    # already resolved this turn (no name_filter) and the prior answer's
+    # dimension matches, so this never overrides an explicit name/ranking
+    # request in the CURRENT message.
+    _qc = (session or {}).get("query_context") or {}
+    _SINGULAR_RANKED_REFERENT = re.compile(
+        r"\bthe (employee|department|person)\b[^.?!]{0,30}\bwith the (lowest|highest|best|worst)\b",
+        re.IGNORECASE)
+    _m_singular_ref = None if name_filter else _SINGULAR_RANKED_REFERENT.search(raw_message)
+    if (_m_singular_ref and dimension in ("employee", "department")
+            and _qc.get("last_dimension") == dimension and _qc.get("last_result_ids")):
+        want_lowest = _m_singular_ref.group(2).lower() in ("lowest", "worst")
+        ids = _qc["last_result_ids"]
+        qc_ascending = _qc.get("ascending")
+        if qc_ascending is True:
+            idx = 0 if want_lowest else -1
+        elif qc_ascending is False:
+            idx = -1 if want_lowest else 0
+        else:
+            idx = 0
+        if ids:
+            name_filter = ids[idx]
+            name_label = None  # let _format_build_query_rows read the resolved row's own name
+
     # Item #76 (Part B): RANKING operation - dimension in (employee,
     # department, rm) with NO name resolvable at all (nothing named in this
     # message, nothing in sticky context either) used to be a hard fail
@@ -1454,11 +1520,22 @@ def _extraction_llm_reply(raw_message, message, session):
         r"\b(highest|lowest|best|worst|top|bottom|most|least|greatest|smallest|"
         r"largest|highest-scoring|lowest-scoring)\b", re.IGNORECASE)
     _ASCENDING_WORDS = re.compile(r"\b(least|lowest|worst|fewest|bottom|smallest)\b", re.IGNORECASE)
+    # Item #84 (Finding 2): the raw-message regex above remains the
+    # AUTHORITATIVE, deterministic signal (same "narrow deterministic check
+    # wins over a probabilistic guess" precedent as every other override in
+    # this cascade) - but the extraction LLM's own `operation` field
+    # (schema addition this round) is now consulted as an ADDITIONAL signal
+    # for the cases the regex alone can't see, e.g. a ranking phrased with
+    # no superlative WORD at all in English ("5 employees with the lowest
+    # engagement" still matches "lowest" so the regex catches it - but this
+    # also gives the LLM a chance to confirm/extend without ever being able
+    # to override an explicit non-ranking regex read).
+    _op = extracted.get("operation")
     is_ranking = (
         dimension in ("employee", "department", "rm")
         and not name_filter
         and not _area_match
-        and _RANKING_WORDS.search(raw_message) is not None
+        and (_RANKING_WORDS.search(raw_message) is not None or _op in ("rank_top", "rank_bottom"))
     )
 
     if dimension in ("employee", "department", "rm") and not name_filter and not is_ranking:
@@ -1467,17 +1544,56 @@ def _extraction_llm_reply(raw_message, message, session):
         # run a scoped query; fall through.
         return None
 
-    if _area_match and dimension in ("employee", "department", "rm") and not name_filter:
-        # "strongest/weakest area" needs ONE concrete scope (a named entity,
-        # or company-wide) - a bare ranking of "areas" across many
-        # entities isn't a supported shape; fall through rather than guess.
-        return None
-
     _AREA_METRICS = ["engagement_pct", "effectiveness_pct", "discipline_pct", "working_pct"]
     _AREA_LABELS = {
         "engagement_pct": "Engagement", "effectiveness_pct": "Effectiveness",
         "discipline_pct": "Discipline", "working_pct": "Working hours",
     }
+
+    if (_area_match and dimension == "employee" and not name_filter
+            and _qc.get("last_dimension") == "employee" and _qc.get("last_result_ids")
+            and re.search(r"\b(their|them|those)\b", raw_message, re.IGNORECASE)):
+        # Item #84 (failure G): "their weakest areas" right after a ranking
+        # ("5 employees with lowest PACE" -> "what are their weakest
+        # areas?") - resolves "their" against the query_context ranking
+        # this cascade now maintains, and reports EACH employee's own
+        # strongest/weakest area (not a single aggregated scope - "strongest/
+        # weakest area" is inherently per-employee, and there is no existing
+        # multi-employee aggregate version of this operation to reuse).
+        want_weakest = _area_match.group(1).lower() == "weakest"
+        direction = "weakest" if want_weakest else "strongest"
+        _emp_ids = _qc["last_result_ids"][:queries.LIMIT]
+        _group_rows = []
+        for _eid in _emp_ids:
+            try:
+                _r = queries.build_query(
+                    "employee", _AREA_METRICS, filters=filters, period=period,
+                    name_filter=_eid, limit=1, latest_n_days=latest_n_days,
+                )
+            except Exception:
+                logging.getLogger("pace_chatbot.main").exception(
+                    "build_query() raised inside extraction-LLM cascade step (group strongest/weakest area)")
+                continue
+            if not _r:
+                continue
+            row = _r[0]
+            present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
+            if not present:
+                continue
+            chosen_key, chosen_val = (min if want_weakest else max)(present, key=lambda kv: float(kv[1]))
+            _group_rows.append((row.get("emp_name"), _AREA_LABELS[chosen_key], chosen_val))
+        if not _group_rows:
+            return (f"No data found for that group of employees in this period.", [])
+        headers = ["Employee", f"{direction.capitalize()} area", "Value"]
+        data = [[name, area, f"{_fmt(val)}%"] for name, area, val in _group_rows]
+        reply = f"{direction.capitalize()} area per employee (from the last ranking shown):\n\n" + _render_table(headers, data)
+        return reply, []
+
+    if _area_match and dimension in ("employee", "department", "rm") and not name_filter:
+        # "strongest/weakest area" needs ONE concrete scope (a named entity,
+        # or company-wide) - a bare ranking of "areas" across many
+        # entities isn't a supported shape; fall through rather than guess.
+        return None
 
     if _area_match:
         # Force the metrics to exactly the 4 comparable pct sub-metrics,
@@ -1513,8 +1629,15 @@ def _extraction_llm_reply(raw_message, message, session):
         return reply, rows
 
     if is_ranking:
-        limit = entities.extract_limit(raw_message, default=queries.LIMIT)
-        ascending = _ASCENDING_WORDS.search(raw_message) is not None
+        # Item #84 (Finding 1/2): the deterministic raw-message regex
+        # (entities.extract_limit(), now broadened - see entities.py) is
+        # checked FIRST and wins whenever it finds a count; only when it
+        # finds nothing at all do we fall back to the LLM's own `limit`
+        # field (already sanity-clamped 1-100 in llm_nlu.py), then finally
+        # queries.LIMIT - same "narrow deterministic check wins" precedent
+        # as every other field in this cascade.
+        limit = entities.extract_limit(raw_message, default=None) or extracted.get("limit") or queries.LIMIT
+        ascending = _ASCENDING_WORDS.search(raw_message) is not None or _op == "rank_bottom"
         try:
             rows = queries.build_query(dimension, metrics, filters=filters, period=period,
                                         name_filter=None, limit=limit, ascending=ascending,
@@ -1524,6 +1647,29 @@ def _extraction_llm_reply(raw_message, message, session):
                 "build_query() raised inside extraction-LLM cascade step (ranking)")
             return None
         reply = _format_build_query_rows(rows, dimension, metrics, name_label=None)
+        if session is not None:
+            # Item #84 (confirmed root cause of failures G/H/L/M/N, item
+            # #83 section 1): this branch previously never registered ANY
+            # memory of the ranking it just produced - unlike every
+            # rule-based ranking intent elsewhere in this file, which all
+            # call set_last_list()/push_context(). Wired up the same way
+            # here so a later "list them"/"show me their names" follow-up
+            # (last_list) and a pronoun/referent follow-up (query_context)
+            # can both resolve against this answer instead of a stale or
+            # company-wide default.
+            _id_key = {"employee": "employee_id", "department": "dept_name", "rm": "reporting_manager_name"}.get(dimension)
+            _result_ids = [r.get(_id_key) for r in rows if r.get(_id_key) is not None] if _id_key else []
+            session_store.set_last_list(
+                session, kind="ranking", answer_kind="list",
+                dept_name=None, employee_ids=_result_ids if dimension == "employee" else None,
+                team_label=None, month=None, date_range=period, ascending=ascending,
+            )
+            session_store.set_query_context(
+                session,
+                last_operation="rank_bottom" if ascending else "rank_top",
+                last_dimension=dimension, last_result_ids=_result_ids,
+                ascending=ascending, metric=metrics, period_phrase=extracted.get("period_phrase"),
+            )
         return reply, rows
 
     try:
@@ -1538,6 +1684,19 @@ def _extraction_llm_reply(raw_message, message, session):
         session_store.push_context(session, dept_name=name_filter)
     if session is not None and dimension == "employee" and name_filter:
         session_store.push_context(session, employee_id=name_filter, employee_name=name_label)
+    if session is not None and name_filter:
+        # Item #84 (item #83 Phase 2 design, section 4(iii)): the singular
+        # branch previously only ever pushed dept_name/employee_id into
+        # sticky_context, never the metric/period_phrase actually used -
+        # so a pronoun follow-up like "them"/"their" after a single-entity
+        # lookup had no way to recover WHAT was asked, only WHO. Recorded
+        # here too (not just the ranking branch above) so both answer
+        # shapes populate the same structured state.
+        session_store.set_query_context(
+            session, last_operation="value", last_dimension=dimension,
+            last_result_ids=[name_filter], ascending=None,
+            metric=metrics, period_phrase=extracted.get("period_phrase"),
+        )
     return reply, rows
 
 

@@ -661,8 +661,30 @@ _BQ_EXTRACTION_SCHEMA = {
         },
         "period_phrase": {"type": ["string", "null"], "description": "the period AS WRITTEN by the user (e.g. 'last 3 weeks', 'August', 'yesterday'), or null if no period was named at all - NEVER compute actual dates yourself"},
         "unrecognized_metric_phrase": {"type": ["string", "null"], "description": "set ONLY when the user's wording clearly names a SPECIFIC metric/KPI concept (as written) that does not match anything in the metrics key list - null whenever metrics is non-empty, OR whenever the question is genuinely generic (e.g. 'how is X doing') with no specific metric implied at all"},
+        # Item #84 (Finding 2): additive fields - the extraction schema
+        # previously had NO representation for "how many rows" or "is this a
+        # ranking at all", so limit/direction were derived entirely AFTER
+        # extraction from a raw-message regex (entities.extract_limit(),
+        # _RANKING_WORDS/_ASCENDING_WORDS in main.py). Both fields are
+        # nullable/have safe defaults so old behavior is fully preserved
+        # when the model leaves them at their defaults; the caller
+        # (_extraction_llm_reply in main.py) still cross-checks/overrides
+        # both against the SAME deterministic regexes as before - this is
+        # an additional signal, not a replacement for the safety net.
+        "limit": {"type": ["integer", "null"], "description": "the EXACT row count explicitly requested, e.g. 5 for '5 employees with the lowest engagement' or 'give me 5 worst performers' or 'top 5' - null if no explicit count was requested (the caller applies a sensible default)"},
+        "operation": {
+            "type": "string",
+            "enum": ["value", "rank_top", "rank_bottom", "strongest_weakest", "trend"],
+            "description": (
+                "'value': a plain lookup for one named/implied scope, no ranking. "
+                "'rank_top': a multi-row ranking, highest/best first (e.g. 'top 5', 'highest discipline department'). "
+                "'rank_bottom': a multi-row ranking, lowest/worst first (e.g. 'bottom 5', '5 lowest engagement employees'). "
+                "'strongest_weakest': the 'strongest/weakest area' derived comparison across the 4 pct sub-metrics for ONE scope. "
+                "'trend': a month-over-month or period-over-period CHANGE question ('declined', 'improved', 'going up or down') rather than a snapshot value."
+            ),
+        },
     },
-    "required": ["dimension", "dimension_name", "metrics", "filters", "period_phrase", "unrecognized_metric_phrase"],
+    "required": ["dimension", "dimension_name", "metrics", "filters", "period_phrase", "unrecognized_metric_phrase", "limit", "operation"],
     "additionalProperties": False,
 }
 
@@ -792,45 +814,68 @@ depends entirely on this field:
   real metric key - an unrecognized concept must never silently become
   pace_score or any other real metric.
 
+limit: the EXACT row count the user explicitly requested (an integer), e.g.
+5 for "5 employees with the lowest engagement", "give me 5 worst
+performers", or "top 5" - or null if no explicit count was named at all
+(the caller applies a sensible default). Only set this from an actual
+number in the user's wording - never invent one.
+
+operation: one of "value" (a plain lookup for one named/implied scope, no
+ranking), "rank_top" (a multi-row ranking, best/highest first), "rank_bottom"
+(a multi-row ranking, worst/lowest first), "strongest_weakest" (the
+strongest/weakest-area derived comparison described above), or "trend" (a
+month-over-month or period-over-period CHANGE question - "declined",
+"improved", "going up or down" - rather than a snapshot value). Pick
+"rank_top"/"rank_bottom" for the SAME ranking questions described above
+(dimension_name null); pick "value" for anything naming one specific
+employee/department/RM with no superlative wording.
+
 Respond with JSON matching the given schema only."""
 
 _BQ_FEW_SHOT = [
-    ("what's Rahul's capped engagement", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["capped_engagement"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
+    ("what's Rahul's capped engagement", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["capped_engagement"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
     # Item #73: the non-obvious "capped X %"/"capped X percentage" -> X_pct
     # business rule (NOT capped_X) - see the key-meanings paragraph above.
-    ("what's Rahul's capped engagement percentage", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["engagement_pct"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
-    ("capped effectiveness % for Billing department", {"dimension": "department", "dimension_name": "Billing", "metrics": ["effectiveness_pct"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
-    ("what pace status is Accounts department in over the last 3 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 3 weeks", "unrecognized_metric_phrase": None}),
-    ("day level pace score for Priya yesterday", {"dimension": "employee", "dimension_name": "Priya", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "yesterday", "unrecognized_metric_phrase": None}),
-    ("precomputed dept score for SCM", {"dimension": "department", "dimension_name": "SCM", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
-    ("engagement and discipline for Megha Sharma's team last month", {"dimension": "rm", "dimension_name": "Megha Sharma", "metrics": ["engagement_pct", "discipline_pct"], "filters": {}, "period_phrase": "last month", "unrecognized_metric_phrase": None}),
-    ("company wide pace score for August", {"dimension": "company", "dimension_name": None, "metrics": ["pace_score"], "filters": {}, "period_phrase": "August", "unrecognized_metric_phrase": None}),
-    ("day level pace score for Accounts department over the last 2 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "last 2 weeks", "unrecognized_metric_phrase": None}),
-    ("precomputed 60 day dept score for Founders Office", {"dimension": "department", "dimension_name": "Founders Office", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
-    ("pace status for AI Labs over last 30 days", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 30 days", "unrecognized_metric_phrase": None}),
+    ("what's Rahul's capped engagement percentage", {"dimension": "employee", "dimension_name": "Rahul", "metrics": ["engagement_pct"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("capped effectiveness % for Billing department", {"dimension": "department", "dimension_name": "Billing", "metrics": ["effectiveness_pct"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("what pace status is Accounts department in over the last 3 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 3 weeks", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("day level pace score for Priya yesterday", {"dimension": "employee", "dimension_name": "Priya", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "yesterday", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("precomputed dept score for SCM", {"dimension": "department", "dimension_name": "SCM", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("engagement and discipline for Megha Sharma's team last month", {"dimension": "rm", "dimension_name": "Megha Sharma", "metrics": ["engagement_pct", "discipline_pct"], "filters": {}, "period_phrase": "last month", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("company wide pace score for August", {"dimension": "company", "dimension_name": None, "metrics": ["pace_score"], "filters": {}, "period_phrase": "August", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("day level pace score for Accounts department over the last 2 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "last 2 weeks", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("precomputed 60 day dept score for Founders Office", {"dimension": "department", "dimension_name": "Founders Office", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("pace status for AI Labs over last 30 days", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 30 days", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
     # Item #76 (Phase 3): arbitrary "last N days" period, with/without a
     # qualifying filter word right before "days".
-    ("what is Manisha's pace score for the last 40 days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_score"], "filters": {}, "period_phrase": "last 40 days", "unrecognized_metric_phrase": None}),
-    ("pace status for Manisha for the last 10 WFH days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_status"], "filters": {"work_mode": "wfh"}, "period_phrase": "last 10 WFH days", "unrecognized_metric_phrase": None}),
+    ("what is Manisha's pace score for the last 40 days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_score"], "filters": {}, "period_phrase": "last 40 days", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("pace status for Manisha for the last 10 WFH days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_status"], "filters": {"work_mode": "wfh"}, "period_phrase": "last 10 WFH days", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
     # Item #76: ranking (no specific name at all - dimension_name null).
-    ("which department has the highest discipline this month", {"dimension": "department", "dimension_name": None, "metrics": ["discipline_pct"], "filters": {}, "period_phrase": "this month", "unrecognized_metric_phrase": None}),
-    ("top 5 employees by engagement last week", {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
+    ("which department has the highest discipline this month", {"dimension": "department", "dimension_name": None, "metrics": ["discipline_pct"], "filters": {}, "period_phrase": "this month", "unrecognized_metric_phrase": None, "limit": None, "operation": "rank_top"}),
+    ("top 5 employees by engagement last week", {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None, "limit": 5, "operation": "rank_top"}),
+    # Item #84 (Finding 2): limit/operation extracted directly from phrasing
+    # that names neither literal "top"/"bottom" - the deterministic
+    # entities.extract_limit() cross-check (app/entities.py) still overrides
+    # whatever is extracted here, same "narrow deterministic check wins"
+    # precedent as every other field in this schema.
+    ("5 employees with the lowest engagement this month", {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {}, "period_phrase": "this month", "unrecognized_metric_phrase": None, "limit": 5, "operation": "rank_bottom"}),
+    ("give me 5 worst performers", {"dimension": "employee", "dimension_name": None, "metrics": ["pace_score"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None, "limit": 5, "operation": "rank_bottom"}),
     # Item #76: strongest/weakest area (derived - metrics left empty).
-    ("what is Rahul Kanwaria's strongest area", {"dimension": "employee", "dimension_name": "Rahul Kanwaria", "metrics": [], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
-    ("which area is Ops - Cement weakest in over the last 2 months", {"dimension": "department", "dimension_name": "Ops - Cement", "metrics": [], "filters": {}, "period_phrase": "last 2 months", "unrecognized_metric_phrase": None}),
+    ("what is Rahul Kanwaria's strongest area", {"dimension": "employee", "dimension_name": "Rahul Kanwaria", "metrics": [], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("which area is Ops - Cement weakest in over the last 2 months", {"dimension": "department", "dimension_name": "Ops - Cement", "metrics": [], "filters": {}, "period_phrase": "last 2 months", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
     # Item #76: genuinely unrecognized metric concept - metrics MUST stay
     # empty, never guessed into pace_score or any other real key.
-    ("what is Aryan Gupta's synergy quotient for last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": [], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": "synergy quotient"}),
+    ("what is Aryan Gupta's synergy quotient for last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": [], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": "synergy quotient", "limit": None, "operation": "value"}),
     # Item #76: genuinely generic - no specific metric implied, null is correct.
-    ("how is Priya doing lately", {"dimension": "employee", "dimension_name": "Priya", "metrics": [], "filters": {}, "period_phrase": "lately", "unrecognized_metric_phrase": None}),
+    ("how is Priya doing lately", {"dimension": "employee", "dimension_name": "Priya", "metrics": [], "filters": {}, "period_phrase": "lately", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
     # Item #79 gap-fill (rows 39/40/49): engagement_minutes vs engagement_pct,
     # meeting_minutes vs meeting_count, and the separate tasks/todos counts.
-    ("engagement minutes for Aryan Gupta last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["engagement_minutes"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
-    ("average meeting minutes for Manisha last week", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["meeting_minutes"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
-    ("how many meetings did Aryan Gupta have last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["meeting_count"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
-    ("tasks created for Aryan Gupta last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["tasks_created"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None}),
-    ("tasks assigned for AI Labs department", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["tasks_assigned"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None}),
-    ("todos created and todos assigned for Manisha this month", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["todos_created", "todos_assigned"], "filters": {}, "period_phrase": "this month", "unrecognized_metric_phrase": None}),
+    ("engagement minutes for Aryan Gupta last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["engagement_minutes"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("average meeting minutes for Manisha last week", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["meeting_minutes"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("how many meetings did Aryan Gupta have last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["meeting_count"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("tasks created for Aryan Gupta last week", {"dimension": "employee", "dimension_name": "Aryan Gupta", "metrics": ["tasks_created"], "filters": {}, "period_phrase": "last week", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("tasks assigned for AI Labs department", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["tasks_assigned"], "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
+    ("todos created and todos assigned for Manisha this month", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["todos_created", "todos_assigned"], "filters": {}, "period_phrase": "this month", "unrecognized_metric_phrase": None, "limit": None, "operation": "value"}),
 ]
 
 
@@ -923,6 +968,17 @@ def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS
     if data.get("dimension") not in _BQ_DIMENSIONS:
         return None
 
+    _raw_limit = data.get("limit")
+    _limit = None
+    if isinstance(_raw_limit, int) and not isinstance(_raw_limit, bool):
+        # Sanity-clamp exactly like entities.extract_limit() does - never
+        # trust the LLM's own number unbounded.
+        _limit = max(1, min(_raw_limit, 100))
+
+    _operation = data.get("operation")
+    if _operation not in ("value", "rank_top", "rank_bottom", "strongest_weakest", "trend"):
+        _operation = "value"  # hallucinated/missing enum value -> safest default (no ranking assumed)
+
     return {
         "dimension": data.get("dimension"),
         "dimension_name": data.get("dimension_name") or None,
@@ -930,5 +986,7 @@ def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS
         "filters": {k: v for k, v in (data.get("filters") or {}).items() if v},
         "period_phrase": data.get("period_phrase") or None,
         "unrecognized_metric_phrase": data.get("unrecognized_metric_phrase") or None,
+        "limit": _limit,
+        "operation": _operation,
         "_latency": latency,
     }
