@@ -1401,6 +1401,47 @@ def _extraction_llm_reply(raw_message, message, session):
     # period/filters were already extracted above, rather than being a new
     # parallel intent.
 
+    # Item #84 (failures I/J, item #83 Phase 2 design section 4(iii)): a
+    # follow-up naming "them"/"both"/"the two" - referring to TWO entities
+    # named across the last couple of turns (e.g. "...compare them with the
+    # employee who had the highest PACE..." then "what could explain the
+    # difference, look at LC/EL/DH for both") - resolves against the new
+    # comparison_entities 2-slot tracker (session_store.push_context() now
+    # keeps this in sync automatically) instead of failing or silently
+    # collapsing to just the single most-recent entity. Checked BEFORE the
+    # normal name_filter resolution below (entities.extract_employee() has
+    # its OWN, older single-slot pronoun resolution - item #30's "last
+    # discussed employee" - which would otherwise silently resolve "them"
+    # to just ONE person before this code ever got a chance to run; live-
+    # confirmed this round). Only fires when the extraction LLM itself
+    # found no explicit name this turn (dimension_name is null) and both
+    # tracked entities are the SAME type as the requested dimension.
+    _COMPARISON_PRONOUN = re.compile(r"\b(them|both|the two|either of them)\b", re.IGNORECASE)
+    if (not extracted.get("dimension_name") and dimension in ("employee", "department")
+            and _COMPARISON_PRONOUN.search(raw_message) and session is not None):
+        _cmp_first, _cmp_second = session_store.get_comparison_entities(session)
+        if (_cmp_first and _cmp_second
+                and _cmp_first.get("type") == dimension and _cmp_second.get("type") == dimension):
+            _cmp_rows = []
+            for _ent in (_cmp_first, _cmp_second):
+                try:
+                    _r = queries.build_query(
+                        dimension, metrics, filters=filters, period=period,
+                        name_filter=_ent["id"], limit=1, latest_n_days=latest_n_days,
+                    )
+                except Exception:
+                    logging.getLogger("pace_chatbot.main").exception(
+                        "build_query() raised inside extraction-LLM cascade step (2-entity comparison)")
+                    continue
+                if _r:
+                    _cmp_rows.append(_r[0])
+            if _cmp_rows:
+                reply = _format_build_query_rows(_cmp_rows, dimension, metrics, name_label=None)
+                return reply, _cmp_rows
+            # Both entities tracked but neither had data - fall through to
+            # the rest of the cascade (normal name_filter resolution) rather
+            # than returning a confusing empty comparison.
+
     # Re-resolve dimension_name through the EXISTING fuzzy-safe extraction
     # functions against the ORIGINAL message - never trust the LLM's own
     # name transcription directly, same fallback_text pattern used
@@ -1446,43 +1487,6 @@ def _extraction_llm_reply(raw_message, message, session):
     else:  # company
         name_filter = None
         name_label = "The whole company"
-
-    # Item #84 (failures I/J, item #83 Phase 2 design section 4(iii)): a
-    # follow-up naming "them"/"both"/"the two" - referring to TWO entities
-    # named across the last couple of turns (e.g. "...compare them with the
-    # employee who had the highest PACE..." then "what could explain the
-    # difference, look at LC/EL/DH for both") - resolves against the new
-    # comparison_entities 2-slot tracker (session_store.push_context() now
-    # keeps this in sync automatically) instead of failing or silently
-    # collapsing to just the single most-recent entity the way
-    # sticky_context's one-slot employee_id/dept_name would. Only fires
-    # when nothing was explicitly named THIS turn (no name_filter) and both
-    # tracked entities are the SAME type as the requested dimension.
-    _COMPARISON_PRONOUN = re.compile(r"\b(them|both|the two|either of them)\b", re.IGNORECASE)
-    if (not name_filter and dimension in ("employee", "department")
-            and _COMPARISON_PRONOUN.search(raw_message) and session is not None):
-        _cmp_first, _cmp_second = session_store.get_comparison_entities(session)
-        if (_cmp_first and _cmp_second
-                and _cmp_first.get("type") == dimension and _cmp_second.get("type") == dimension):
-            _cmp_rows = []
-            for _ent in (_cmp_first, _cmp_second):
-                try:
-                    _r = queries.build_query(
-                        dimension, metrics, filters=filters, period=period,
-                        name_filter=_ent["id"], limit=1, latest_n_days=latest_n_days,
-                    )
-                except Exception:
-                    logging.getLogger("pace_chatbot.main").exception(
-                        "build_query() raised inside extraction-LLM cascade step (2-entity comparison)")
-                    continue
-                if _r:
-                    _cmp_rows.append(_r[0])
-            if _cmp_rows:
-                reply = _format_build_query_rows(_cmp_rows, dimension, metrics, name_label=None)
-                return reply, _cmp_rows
-            # Both entities tracked but neither had data - fall through to
-            # the rest of the cascade rather than returning a confusing
-            # empty comparison.
 
     # Item #84 (failures G/H, item #83 section 1's confirmed conversational-
     # state gap): a SINGULAR referent right after a ranking answer ("the
