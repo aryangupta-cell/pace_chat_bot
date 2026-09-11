@@ -2550,8 +2550,14 @@ _NEW_VOCAB_OVERRIDE_PATTERN = re.compile(
     # (ranking the 4 pct sub-metrics for one scope) with no equivalent
     # concept in any of the ~123 existing intents; must reach the
     # extraction cascade, never an old ranking/percentage intent.
-    r"|\b(strongest|weakest)\b[^.?!]{0,40}\b(area|metric|dimension|aspect)\b"
-    r"|\b(area|metric|dimension|aspect)\b[^.?!]{0,40}\b(strongest|weakest)\b"
+    # Item #84: plural "areas"/"metrics"/etc. too - the singular-only regex
+    # here had the SAME gap as _area_dir_match above (live-confirmed this
+    # round via failure G's "what are their weakest areas?" follow-up:
+    # since this pattern didn't match, classify()'s own guess was never
+    # discarded, so a confident-but-wrong old-intent guess could win the
+    # turn before extract_build_query() ever got a chance).
+    r"|\b(strongest|weakest)\b[^.?!]{0,40}\b(areas?|metrics?|dimensions?|aspects?)\b"
+    r"|\b(areas?|metrics?|dimensions?|aspects?)\b[^.?!]{0,40}\b(strongest|weakest)\b"
     # Item #79: engagement_minutes/tasks_*/todos_*/meeting_count are new
     # BUILD_QUERY_METRICS entries with NO equivalent concept in any of the
     # ~123 existing intents - live-verified classify() (the LLM intent
