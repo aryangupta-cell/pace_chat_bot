@@ -4182,6 +4182,45 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         else:
             rule_intent = None
 
+    # Item #82: the SAME collision class as the meeting_min_ranking block
+    # immediately above, found in a different old-intent family this round.
+    # _EMP_ENGAGEMENT_PATTERNS/_EMP_DISCIPLINE_PATTERNS/_EMP_EFFECTIVENESS_
+    # PATTERNS/_EMP_WORKING_PCT_PATTERNS (app/intents.py) each include a
+    # broad r"\b<metric> (%|percent|percentage) (of|for)\b" pattern meant
+    # for single-employee lookups ("engagement percentage for Rudhi") - but
+    # that pattern is only a SUBSTRING match, so it also fires on "average
+    # engagement percentage for the whole company" (the substring
+    # "engagement percentage for" is still present), and because these
+    # emp_* intents are registered earlier in intents.py's _INTENTS list
+    # than average_metric (checked first, first-match-wins), they steal the
+    # message before average_metric ever gets a turn. The handler then tries
+    # to resolve "the whole company" as an employee name and fails ("I
+    # couldn't find that employee") instead of ever computing a company-wide
+    # average - the exact silent-wrong-intent failure mode already fixed
+    # once above for meeting_min_ranking. Confirmed via grep across all of
+    # app/intents.py that these four are the only _EMP_*_PATTERNS with this
+    # exact "<metric> (%|percent|percentage) (of|for)" shape colliding with
+    # an _AVG_METRIC_WORD entry (emp_late_comings/emp_early_leavings/
+    # emp_deficient_hours use "of|for" without the %/percent/percentage
+    # wording and are not part of _AVG_METRIC_WORD's own metric-word list,
+    # so they don't collide the same way and are left untouched).
+    # Same fix, same rationale: since we already know (by construction) the
+    # message contains "avg"/"average"/"mean" wording that _AVG_METRIC_WORD/
+    # _AVERAGE_METRIC_PATTERNS recognizes for exactly these four bare metric
+    # words (engagement/effectiveness/discipline/working hours are all
+    # listed in _AVG_METRIC_WORD, app/intents.py), deterministically
+    # redirect to average_metric rather than nulling to None - this
+    # guarantees the correctly-working rule-based handler (with its own
+    # employee -> dept -> RM -> company-wide scope resolution) gets the
+    # turn. A genuine single-employee query with no avg/average/mean wording
+    # ("engagement percentage for Rudhi") never matches this condition and
+    # is completely unaffected - none of these four intents or their
+    # underlying functions are otherwise touched.
+    if rule_intent in (
+        "emp_engagement", "emp_discipline", "emp_effectiveness", "emp_working_pct",
+    ) and re.search(r"\b(avg|average|mean)\b", message, re.IGNORECASE):
+        rule_intent = "average_metric"
+
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO
     # explicit-regex-match an old intent's pattern directly (e.g. "day level
