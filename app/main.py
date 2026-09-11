@@ -3182,7 +3182,11 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                                    f"(across {summary['n_employees']} employees with reliable data).")
 
     if intent == "dept_trend":
-        ascending = "declin" in message.lower()
+        # Item #84: "drop"/"dropped"/"fell"/"decrease*"/"worse" wording (not
+        # just "declin*") also means the descending-delta direction - see
+        # the new dept_trend pattern added in intents.py for the "biggest
+        # pace score drop" phrasing this covers.
+        ascending = re.search(r"\b(declin\w*|drop\w*|fell|decreas\w*|worse)\b", message, re.IGNORECASE) is not None
         rows = queries.dept_delta_ranking(_first_month(month), ascending=ascending, limit=limit or 5)
         if not rows:
             return ChatResponse(reply="Not enough reliable data across departments this month.")

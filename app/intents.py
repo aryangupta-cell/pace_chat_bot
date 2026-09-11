@@ -279,6 +279,19 @@ _DEPT_TREND_PATTERNS = [
     r"\bwhich department is (improving|declining)\b",
     r"\bwhich department is trending (up|down)\b",
     r"\bwhich department is (getting better|getting worse)\b",
+    # Item #84: "which department has the biggest pace score drop this
+    # month" wording - previously matched NO dept_trend pattern at all
+    # (registered BEFORE "declining" in _INTENTS, so this gap let the
+    # message fall through to "declining"'s own FUZZY match instead - see
+    # item #76's _DIMENSION_SCOPE_OVERRIDE_PATTERN fix, which nulls
+    # "declining" for department-scoped phrasing but never guaranteed the
+    # cascade it falls through to would correctly interpret "drop" as a
+    # delta question rather than a snapshot-average ranking; live-
+    # confirmed this round it did not). Matching dept_trend's own regex
+    # directly here avoids that fuzzy/cascade detour entirely and reuses
+    # the already-correct queries.dept_delta_ranking() engine.
+    r"\bwhich department\b[^.?!]{0,40}\b(biggest|largest)\b[^.?!]{0,20}\b(drop|decline|increase|improvement|gain)\b",
+    r"\bwhich department\b[^.?!]{0,40}\b(drop|dropped|declin\w*)\b",
 ]
 
 # --- Category E: department aggregates --------------------------------------
