@@ -14,6 +14,71 @@ LIMIT = 10
 MIN_DAYS_FOR_DELTA = 10
 
 
+# ---------------------------------------------------------------------------
+# Centralized PACE score formula (item #75, Phase 2 of the item #74 audit).
+# Single source of truth for the "filter to Standard-shift rows -> AVG each
+# of the 4 capped_* sub-metrics separately -> apply the score formula ONCE
+# to those averages" calculation. Before this, the exact same SQL fragment
+# was hand-copied across ~11 call sites (metric_ranking, dept_ranking,
+# rm_ranking, employee_weekly_pace_trend, ranking_weekly_pace_trend,
+# _month_avg_status_cte, employee_full_monthly_trend, dept_full_monthly_
+# trend, team_full_monthly_trend, _gainer_loser_cte, PS_FILTERED_METRICS,
+# build_query) - all textually consistent at the time (see item #74), but
+# with nothing enforcing that beyond code comments referencing each other.
+# This is a PURE REFACTOR: every call site below now references one of
+# these two constants instead of its own hand-copied literal, and the
+# golden-validation harness (scripts/golden_validate_pace_score.py,
+# SESSION_HANDOFF.md item #75) proves the computed values are unchanged.
+#
+# NEVER average a precomputed per-row/per-day score across a period instead
+# of using this formula - that is the Jensen's-inequality bug fixed
+# throughout this file's history (see employee_full_monthly_trend's
+# docstring for the concrete example).
+# ---------------------------------------------------------------------------
+
+# Form 1: direct SQL aggregate expression - each avg(capped_*) is computed
+# in-place inside a GROUP BY query. Use this when no CTE has already
+# pre-aggregated the 4 capped sub-metrics into avg_e/avg_ef/avg_d/avg_w
+# columns.
+PACE_SCORE_AGG_SQL = (
+    "least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * "
+    "avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10))"
+)
+
+# Form 2: mathematically identical formula, but reading from already-
+# aggregated avg_e/avg_ef/avg_d/avg_w columns (e.g. produced by a prior CTE)
+# instead of re-computing avg() inline. Callers using this form MUST alias
+# their averaged columns exactly avg_e (capped_engagement), avg_ef (capped_
+# effectiveness), avg_d (capped_discipline), avg_w (capped_working_hours).
+PACE_SCORE_FROM_AVGS_SQL = (
+    "least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10))"
+)
+
+# Qualifying-row rule the PACE formula is defined over, whenever the 4
+# capped_* columns are read directly from public.pace_1 (documentation
+# only - existing call sites already spell this out inline in their own
+# WHERE clauses and are NOT refactored to use this constant, to keep this
+# round's diff to the formula/status expressions only; provided for any
+# NEW call site, e.g. the golden-validation harness, to reuse).
+PACE_SCORE_QUALIFYING_ROWS_SQL = (
+    "shift_type = 'Standard' "
+    "and capped_engagement is not null and capped_effectiveness is not null "
+    "and capped_discipline is not null and capped_working_hours is not null"
+)
+
+
+def pace_status_sql(score_expr):
+    """Centralized status-banding SQL expression (Black <50 / Red 50-64 /
+    Amber 65-79 / Green >=80), applicable to ANY computed score expression -
+    not just the stored 60-day column. Thin, discoverable wrapper around
+    _PACE_STATUS_CASE_SQL (defined later in this file; already the single
+    source of truth for the thresholds - this just gives it a public name
+    alongside the score-formula constants above, needed so a future
+    arbitrary-period PACE status feature has one obvious function to call
+    for both the score AND its status, not just the score)."""
+    return _PACE_STATUS_CASE_SQL.format(score=score_expr)
+
+
 def _prev_month(month_str):
     year, month = (int(x) for x in month_str.split("-"))
     first_of_month = datetime.date(year, month, 1)
@@ -213,7 +278,7 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
         if metric_key == "pace_score":
             sql = f"""
                 select employee_id, emp_name, dept_name,
-                       least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value,
+                       {PACE_SCORE_AGG_SQL} as metric_value,
                        count(*) as days_counted
                 from public.pace_1
                 where worked_day between %(date_start)s and %(date_end)s and shift_type = 'Standard'
@@ -254,7 +319,7 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
         lim = limit or LIMIT
         sql = f"""
             select employee_id, emp_name, dept_name,
-                   least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value,
+                   {PACE_SCORE_AGG_SQL} as metric_value,
                    count(*) as days_counted
             from public.pace_1
             where to_char(worked_day,'YYYY-MM') = %(month)s and shift_type = 'Standard'
@@ -379,11 +444,10 @@ def employee_weekly_pace_trend(employee_id, num_weeks=6):
     docstring) - fixed to the same 3-step aggregation (avg the 4 capped
     sub-metrics across Standard-shift rows in the week, apply the score
     formula once)."""
-    sql = """
+    sql = f"""
         select date_trunc('week', worked_day)::date as week_start,
                (date_trunc('week', worked_day)::date + interval '6 days')::date as week_end,
-               least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7)
-                    + (avg(capped_discipline) * 3)) * 10)) as avg_score,
+               {PACE_SCORE_AGG_SQL} as avg_score,
                count(*) as scored_days
         from public.pace_1
         where employee_id = %(employee_id)s
@@ -530,9 +594,9 @@ def dept_ranking(metric_key, month, ascending=False, limit=None, date_range=None
         order = "asc" if ascending else "desc"
         lim = limit or LIMIT
         if metric_key == "pace_score":
-            sql = """
+            sql = f"""
                 select dept_name, count(distinct employee_id) as n_employees,
-                       least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value
+                       {PACE_SCORE_AGG_SQL} as metric_value
                 from public.pace_1
                 where worked_day between %(date_start)s and %(date_end)s and shift_type = 'Standard'
                   and capped_engagement is not null and capped_effectiveness is not null
@@ -540,7 +604,7 @@ def dept_ranking(metric_key, month, ascending=False, limit=None, date_range=None
                 group by dept_name
                 order by metric_value {order} nulls last
                 limit {lim}
-            """.format(order=order, lim=lim)
+            """
             return run_query(sql, {"date_start": start, "date_end": end})
         expr, _ = METRICS[metric_key]
         sql = f"""
@@ -556,9 +620,9 @@ def dept_ranking(metric_key, month, ascending=False, limit=None, date_range=None
     if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
         order = "asc" if ascending else "desc"
         lim = limit or LIMIT
-        sql = """
+        sql = f"""
             select dept_name, count(distinct employee_id) as n_employees,
-                   least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value
+                   {PACE_SCORE_AGG_SQL} as metric_value
             from public.pace_1
             where to_char(worked_day,'YYYY-MM') = %(month)s and shift_type = 'Standard'
               and capped_engagement is not null and capped_effectiveness is not null
@@ -566,7 +630,7 @@ def dept_ranking(metric_key, month, ascending=False, limit=None, date_range=None
             group by dept_name
             order by metric_value {order} nulls last
             limit {lim}
-        """.format(order=order, lim=lim)
+        """
         return run_query(sql, {"month": month_list[0]})
     expr, _ = METRICS[metric_key]
     order = "asc" if ascending else "desc"
@@ -604,9 +668,9 @@ def rm_ranking(metric_key, month, ascending=False, limit=None, date_range=None):
         order = "asc" if ascending else "desc"
         lim = limit or LIMIT
         if metric_key == "pace_score":
-            sql = """
+            sql = f"""
                 select reporting_manager_name, count(distinct employee_id) as n_employees,
-                       least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value
+                       {PACE_SCORE_AGG_SQL} as metric_value
                 from public.pace_1
                 where worked_day between %(date_start)s and %(date_end)s and shift_type = 'Standard'
                   and capped_engagement is not null and capped_effectiveness is not null
@@ -615,7 +679,7 @@ def rm_ranking(metric_key, month, ascending=False, limit=None, date_range=None):
                 group by reporting_manager_name
                 order by metric_value {order} nulls last
                 limit {lim}
-            """.format(order=order, lim=lim)
+            """
             return run_query(sql, {"date_start": start, "date_end": end})
         expr, _ = METRICS[metric_key]
         sql = f"""
@@ -632,9 +696,9 @@ def rm_ranking(metric_key, month, ascending=False, limit=None, date_range=None):
     if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
         order = "asc" if ascending else "desc"
         lim = limit or LIMIT
-        sql = """
+        sql = f"""
             select reporting_manager_name, count(distinct employee_id) as n_employees,
-                   least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as metric_value
+                   {PACE_SCORE_AGG_SQL} as metric_value
             from public.pace_1
             where to_char(worked_day,'YYYY-MM') = %(month)s and shift_type = 'Standard'
               and capped_engagement is not null and capped_effectiveness is not null
@@ -643,7 +707,7 @@ def rm_ranking(metric_key, month, ascending=False, limit=None, date_range=None):
             group by reporting_manager_name
             order by metric_value {order} nulls last
             limit {lim}
-        """.format(order=order, lim=lim)
+        """
         return run_query(sql, {"month": month_list[0]})
     expr, _ = METRICS[metric_key]
     order = "asc" if ascending else "desc"
@@ -1386,12 +1450,11 @@ def ranking_weekly_pace_trend(employee_ids, num_weeks=4):
     new_pace_score_7_3_event_level."""
     if not employee_ids:
         return []
-    sql = """
+    sql = f"""
         select employee_id, emp_name,
                date_trunc('week', worked_day)::date as week_start,
                (date_trunc('week', worked_day)::date + interval '6 days')::date as week_end,
-               least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7)
-                    + (avg(capped_discipline) * 3)) * 10)) as avg_score,
+               {PACE_SCORE_AGG_SQL} as avg_score,
                count(*) as scored_days
         from public.pace_1
         where employee_id = any(%(employee_ids)s)
@@ -1466,7 +1529,7 @@ def _gainer_loser_cte(dept_name, employee_ids, filter_sql):
         ),
         scored as (
             select employee_id, emp_name, dept_name, period,
-                   least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10)) as score,
+                   {PACE_SCORE_FROM_AVGS_SQL} as score,
                    n
             from agg
         ),
@@ -2129,7 +2192,7 @@ def _month_avg_status_cte(month):
     %(min_days)s`) and dept_name/emp_name grouping are unchanged."""
     return f"""
         select employee_id, emp_name, dept_name,
-               least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10)) as avg_score,
+               {PACE_SCORE_AGG_SQL} as avg_score,
                count(*) as days_counted
         from public.pace_1
         where to_char(worked_day,'YYYY-MM') = %(month)s and shift_type = 'Standard'
@@ -2230,7 +2293,7 @@ def employee_full_monthly_trend(employee_id, metric_key="pace_score"):
     discipline/working_pct/etc.) are unaffected by this fix and keep using
     pace_chatbot_view as before."""
     if metric_key == "pace_score":
-        sql = """
+        sql = f"""
             with per_month as (
                 select to_char(worked_day,'YYYY-MM') as mo,
                        avg(capped_engagement) as avg_e,
@@ -2245,7 +2308,7 @@ def employee_full_monthly_trend(employee_id, metric_key="pace_score"):
                 group by 1
             )
             select mo,
-                   least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10)) as metric_value,
+                   {PACE_SCORE_FROM_AVGS_SQL} as metric_value,
                    days_counted
             from per_month
             order by mo
@@ -2344,7 +2407,7 @@ def dept_full_monthly_trend(dept_name, metric_key="pace_score"):
     bug fix rationale (avg the 4 capped sub-metrics per period, apply the
     score formula once) - same fix applied here, grouped by month."""
     if metric_key == "pace_score":
-        sql = """
+        sql = f"""
             with per_month as (
                 select to_char(worked_day,'YYYY-MM') as mo,
                        avg(capped_engagement) as avg_e,
@@ -2359,7 +2422,7 @@ def dept_full_monthly_trend(dept_name, metric_key="pace_score"):
                 group by 1
             )
             select mo,
-                   least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10)) as metric_value,
+                   {PACE_SCORE_FROM_AVGS_SQL} as metric_value,
                    n_employees
             from per_month
             order by mo
@@ -2380,7 +2443,7 @@ def team_full_monthly_trend(employee_ids, metric_key="pace_score"):
     """See employee_full_monthly_trend's docstring for the 3-step-aggregation
     bug fix rationale - same fix applied here, grouped by month."""
     if metric_key == "pace_score":
-        sql = """
+        sql = f"""
             with per_month as (
                 select to_char(worked_day,'YYYY-MM') as mo,
                        avg(capped_engagement) as avg_e,
@@ -2395,7 +2458,7 @@ def team_full_monthly_trend(employee_ids, metric_key="pace_score"):
                 group by 1
             )
             select mo,
-                   least(100, round(((avg_e * avg_ef * avg_w * 7) + (avg_d * 3)) * 10)) as metric_value,
+                   {PACE_SCORE_FROM_AVGS_SQL} as metric_value,
                    n_employees
             from per_month
             order by mo
@@ -2435,7 +2498,7 @@ PS_OFF_CAVEAT_MIN_DAYS = 3
 PS_OFF_CAVEAT_RATIO = 0.25
 
 PS_FILTERED_METRICS = {
-    "pace_score": ("least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10))", "PACE score"),
+    "pace_score": (PACE_SCORE_AGG_SQL, "PACE score"),
     "engagement": ("avg(engagement_pct)", "engagement %"),
     "effectiveness": ("avg(effectiveness_pct)", "effectiveness %"),
     "discipline": ("avg(discipline_pct)", "discipline %"),
@@ -2792,7 +2855,7 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     if want_dept_status_derived:
         score_expr = "avg(dept_score_60_days_7_3)"
         metric_exprs.append(
-            f'{_PACE_STATUS_CASE_SQL.format(score=score_expr)} as "dept_status_60_days_derived"'
+            f'{pace_status_sql(score_expr)} as "dept_status_60_days_derived"'
         )
 
     if want_pace_score or want_pace_status:
@@ -2800,16 +2863,15 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         # dept_ranking()/rm_ranking() for metric_key="pace_score" - averaging
         # the 4 capped_* ingredients per group and applying the score formula
         # ONCE, instead of averaging the view's pre-computed per-row score
-        # (the Jensen's-inequality bug fixed in commit c1604cb).
-        pace_score_expr = (
-            "least(100, round(((avg(capped_engagement) * avg(capped_effectiveness) * "
-            "avg(capped_working_hours) * 7) + (avg(capped_discipline) * 3)) * 10))"
-        )
+        # (the Jensen's-inequality bug fixed in commit c1604cb). Item #75:
+        # now sourced from the single centralized PACE_SCORE_AGG_SQL constant
+        # instead of its own hand-copied literal.
+        pace_score_expr = PACE_SCORE_AGG_SQL
         if want_pace_score:
             metric_exprs.append(f'{pace_score_expr} as "pace_score"')
         if want_pace_status:
             metric_exprs.append(
-                f'{_PACE_STATUS_CASE_SQL.format(score=pace_score_expr)} as "pace_status"'
+                f'{pace_status_sql(pace_score_expr)} as "pace_status"'
             )
         where.append(
             "capped_engagement is not null and capped_effectiveness is not null "
