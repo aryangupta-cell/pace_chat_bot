@@ -4115,6 +4115,22 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             and _DIMENSION_SCOPE_OVERRIDE_PATTERN.search(message)):
         rule_intent = None
 
+    # Item #79: meeting_min_ranking's own bare "meeting (minutes|time)"
+    # pattern (app/intents.py) is registered earlier in _INTENTS than
+    # average_metric, so it always wins list-order precedence - but it has
+    # NO per-employee-name resolution at all (queries.meeting_minutes_ranking
+    # is dept/employee_ids-ranking only). Live-verified this round: "average
+    # meeting minutes for Manisha last week" matched meeting_min_ranking and
+    # silently returned a company-wide top-10 ranking table, completely
+    # ignoring "Manisha" - exactly the silent-wrong-population failure class
+    # item #76 already fixed for other old intents. Same redirect-not-modify
+    # fix: whenever the message also has avg/average/mean wording, null the
+    # match so average_metric (which now has a real BUILD_QUERY_METRICS
+    # entry for meeting_minutes, per item #79) gets the turn and correctly
+    # resolves the named employee/department/RM/company scope instead.
+    if rule_intent == "meeting_min_ranking" and re.search(r"\b(avg|average|mean)\b", message, re.IGNORECASE):
+        rule_intent = None
+
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO
     # explicit-regex-match an old intent's pattern directly (e.g. "day level
