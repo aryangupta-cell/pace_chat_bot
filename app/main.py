@@ -2661,7 +2661,7 @@ _EXCLUDE_PATTERN = re.compile(r"\b(?:beside|besides|except|excluding|other than)
 _PERIOD_CONTEXT_BLACKLIST = {
     "emp_trend", "emp_trend_2month", "score_drop_ranking", "score_improvement_alltime",
     "d_score_trend", "dept_trend", "team_improving", "status_transitions",
-    "full_trend_emp", "full_trend_dept", "full_trend_team",
+    "full_trend_emp", "full_trend_dept", "full_trend_team", "pace_delta_ranking_cw",
 }
 
 
@@ -3768,6 +3768,60 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             )
         return ChatResponse(reply=reply, rows=rows)
 
+    if intent == "pace_delta_ranking_cw":
+        # Item #85 (follow-up to #84's Finding 3 "full_trend_emp" redirect).
+        # Root cause: #84 redirected no-employee/no-department
+        # "full_trend_emp" fuzzy-matches (e.g. "who are the employees whose
+        # PACE score has declined the most compared with the previous
+        # month") straight to the EXISTING "score_drop_ranking"/
+        # "score_improvement_alltime" intents. Those two intents carry a
+        # SEPARATE, pre-existing business rule (`_implicit_self_ref` below)
+        # that treats ANY no-department match as "my team" and demands the
+        # asker's identity - correct for their own genuine short-form
+        # trigger phrasing ("whose score dropped the most?", genuinely
+        # ambiguous "my team vs company" with no other signal), but WRONG
+        # for this redirect's source phrasing, which always says "employees"
+        # (plural) - a clear company-wide ranking request, exactly the same
+        # class of question as "which employees had the biggest engagement
+        # decline" (item #84's subscore_delta_ranking redirect, which
+        # already bypasses this gate by using its own dedicated intent
+        # name). This is the SAME fix pattern applied to whole-PACE-score
+        # deltas: a dedicated intent name that reuses the existing, already-
+        # correct queries.score_drop_ranking()/score_improvement_alltime()
+        # (both already support dept_name=None, employee_ids=None as a
+        # plain company-wide ranking - no new query code needed) but is
+        # deliberately NOT one of the two names in `_implicit_self_ref`'s
+        # tuple, so it never hits the "my team" identity gate. The redirect
+        # site (below) only sets this intent when neither an employee nor a
+        # department was resolved from the message, so dept_name/
+        # employee_ids are always None here - always a real company-wide
+        # ranking, never a scope this redirect could get wrong.
+        _pdr_ascending = not re.search(r"\bimprov\w*|better|increas\w*\b", message, re.IGNORECASE)
+        if _pdr_ascending:
+            rows, meta = queries.score_drop_ranking(dept_name, employee_ids=employee_ids, month=period_month, date_range=date_range, limit=limit)
+            reply = format_score_delta_ranking(rows, meta, f"Biggest PACE score drop{scope_note}")
+        else:
+            rows, meta = queries.score_improvement_alltime(dept_name, employee_ids=employee_ids, month=period_month, limit=limit)
+            reply = format_score_delta_ranking(rows, meta, f"Most improved{scope_note}")
+        reply += "\n\nWant this broken down by week instead?"
+        if session is not None:
+            session["awaiting_ranking_weekly_breakdown"] = True
+            session["ranking_weekly_breakdown_employee_ids"] = [r["employee_id"] for r in rows] or None
+            session["ranking_weekly_breakdown_label"] = team_label or dept_name or "that scope"
+            session["awaiting_weekly_breakdown"] = False
+            session["weekly_breakdown_employee_id"] = None
+            session["weekly_breakdown_employee_name"] = None
+
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=500, _ascending=_pdr_ascending):
+                if _ascending:
+                    _rows, _meta = queries.score_drop_ranking(dept_name, employee_ids=employee_ids, month=month, date_range=date_range, limit=limit)
+                    return format_score_delta_ranking(_rows, _meta, f"Biggest PACE score drop{_scope_note_generic(team_label, dept_name, month, date_range)} (full list)"), _rows
+                _rows, _meta = queries.score_improvement_alltime(dept_name, employee_ids=employee_ids, month=month, limit=limit)
+                return format_score_delta_ranking(_rows, _meta, f"Most improved{_scope_note_generic(team_label, dept_name, month, date_range)} (full list)"), _rows
+            session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                         dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range)
+        return ChatResponse(reply=reply, rows=rows)
+
     if intent == "gainer_loser_ranking":
         filter_sql, filter_footer = _resolve_population_filter(message)
         directions = _gainer_loser_directions(message)
@@ -4594,11 +4648,29 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # no employee (and no department) is resolvable, this is really a
     # company-/department-wide PACE-SCORE trend ranking (not a sub-metric
     # one - no engagement/effectiveness/discipline word was named, so
-    # subscore_delta_ranking above doesn't apply) - redirect to the
-    # EXISTING score_drop_ranking/score_improvement_alltime intents
-    # (item #74/#75's already-verified precomputed pace_score_delta
-    # ranking), picking direction from the same declin*/drop*/fell vs
-    # improv*/increas* wording used elsewhere in this cascade.
+    # subscore_delta_ranking above doesn't apply).
+    #
+    # Item #85 correction: item #84 originally redirected this to the
+    # EXISTING "score_drop_ranking"/"score_improvement_alltime" intents
+    # directly. Live-confirmed broken: those two intents carry their own
+    # pre-existing `_implicit_self_ref` business rule (further below) that
+    # treats ANY no-department match as "my team" and demands the asker's
+    # identity - correct for their OWN genuine short trigger phrasing
+    # ("whose score dropped the most?"), but wrong here, since this
+    # redirect's source phrasing always says "employees" (plural) - a clear
+    # company-wide ranking request, not a "my team" one. Redirect to the new
+    # "pace_delta_ranking_cw" intent instead (handled above in the main
+    # dispatch) - reuses the exact same queries.score_drop_ranking()/
+    # score_improvement_alltime() calls (item #74/#75's already-verified
+    # precomputed pace_score_delta ranking, both already support a plain
+    # company-wide call with dept_name=None/employee_ids=None - no new query
+    # code needed) but under a dedicated intent name that is deliberately
+    # NOT one of the two names `_implicit_self_ref` checks, so it never hits
+    # the "my team" identity gate - same fix shape as item #84's own
+    # subscore_delta_ranking redirect for the sub-metric case. Direction
+    # (drop vs improve) is picked from the same declin*/drop*/fell vs
+    # improv*/increas* wording used elsewhere in this cascade, now decided
+    # inside the "pace_delta_ranking_cw" handler itself.
     if rule_intent == "full_trend_emp":
         try:
             _fte_emp_id, _ = entities.extract_employee(message, fallback_text=raw_message)
@@ -4606,10 +4678,8 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             _fte_emp_id = "ambiguous"
         _fte_dept_name, _fte_dept_candidates = entities.extract_department(message, fallback_text=raw_message)
         if not _fte_emp_id and not _fte_dept_name and not _fte_dept_candidates:
-            if re.search(r"\b(declin\w*|drop\w*|fell|decreas\w*|worse)\b", message, re.IGNORECASE):
-                rule_intent = "score_drop_ranking"
-            elif re.search(r"\b(improv\w*|increas\w*|better)\b", message, re.IGNORECASE):
-                rule_intent = "score_improvement_alltime"
+            if re.search(r"\b(declin\w*|drop\w*|fell|decreas\w*|worse|improv\w*|increas\w*|better)\b", message, re.IGNORECASE):
+                rule_intent = "pace_delta_ranking_cw"
 
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO
