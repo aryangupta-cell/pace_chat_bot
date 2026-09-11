@@ -69,6 +69,19 @@ def extract_limit(text, default=None):
     """
     t = text.lower()
 
+    # Mask out any "N day(s)/week(s)/month(s)/hour(s)/year(s)" span BEFORE
+    # searching for a row-count number - that N is a PERIOD length, never a
+    # requested row count, even when a ranking-direction word happens to sit
+    # nearby in the same sentence (live-confirmed regression during this
+    # round's own broadening: "which department has the LOWEST pace over
+    # the last 60 working days" was misread as "show 60 rows" by the naive
+    # direction-word-then-number arm below, because "lowest" and "60" are
+    # both present - masking the period span first prevents that).
+    t = re.sub(
+        r"\b\d{1,4}\s*(?:\w+\s+){0,2}(?:day|days|week|weeks|month|months|hour|hours|year|years)\b",
+        " ", t,
+    )
+
     # 1) Original literal "top N" / "bottom N" phrasing (highest confidence).
     m = re.search(r"\b(?:top|bottom)\s*(\d{1,3})\b", t)
     if m:
