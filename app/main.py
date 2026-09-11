@@ -1221,6 +1221,354 @@ def _month_str_to_range(month_str):
     return datetime.date(year, mo, 1), datetime.date(year, mo, last_day)
 
 
+# Item #86: raw-message ranking-direction/superlative regexes, hoisted to
+# module level (previously defined LOCALLY inside _extraction_llm_reply,
+# item #84) so the new multi-clause (Decision 1) and both-ends (Decision 3)
+# handlers below can reuse the EXACT same deterministic direction detection
+# instead of re-inventing it - same "one source of truth" precedent as every
+# other shared detector in this file.
+_RANKING_WORDS = re.compile(
+    r"\b(highest|lowest|best|worst|top|bottom|most|least|greatest|smallest|"
+    r"largest|highest-scoring|lowest-scoring|struggling|driving)\b", re.IGNORECASE)
+_ASCENDING_WORDS = re.compile(
+    r"\b(least|lowest|worst|fewest|bottom|smallest|struggling|worse|declin\w*|drop\w*)\b",
+    re.IGNORECASE)
+
+# Item #86: the 4 comparable pct sub-metrics used by every "strongest/
+# weakest area" computation (item #76/#78's original single-entity version,
+# item #84's per-employee-group version, and item #86's new department-
+# weakest-area conversational follow-up below) - hoisted to module level
+# (previously defined LOCALLY inside _extraction_llm_reply) so the new
+# follow-up handler (which runs as its OWN pre-check in handle_message, not
+# inside _extraction_llm_reply) can share the same one definition.
+_AREA_METRICS = ["engagement_pct", "effectiveness_pct", "discipline_pct", "working_pct"]
+_AREA_LABELS = {
+    "engagement_pct": "Engagement", "effectiveness_pct": "Effectiveness",
+    "discipline_pct": "Discipline", "working_pct": "Working hours",
+}
+
+
+def _resolve_period_and_filters(text, base_filters=None):
+    """Item #86: factored out of _extraction_llm_reply's inline period-
+    parsing block (item #76/#78's latest_n_days/calendar-window cascade,
+    unchanged logic, just given a name so it has exactly ONE implementation)
+    so the new multi-clause (Decision 1) and both-ends (Decision 3) handlers
+    below can reuse the SAME deterministic period parsing instead of a second
+    hand-rolled copy. entities.extract_last_n_days()/extract_date_range()/
+    extract_month() are themselves free-text scanners (confirmed by reading
+    entities.py), so this works identically whether `text` is the LLM's own
+    extracted period_phrase (the original call site) or the raw message
+    directly (the two new call sites - neither goes through
+    llm_nlu.extract_build_query() at all, so there is no separate
+    period_phrase to hand it).
+
+    Returns (period, latest_n_days, filters) - `filters` is `base_filters`
+    merged with any qualifier-implied filter (e.g. "last 10 WFH days" implies
+    work_mode='wfh'), same override semantics as the original inline block.
+    """
+    filters = dict(base_filters or {})
+    period = None
+    latest_n_days = None
+    if not text:
+        return period, latest_n_days, filters
+    n_days, n_qualifier, n_mentioned = entities.extract_last_n_days(text)
+    if n_mentioned:
+        if n_qualifier is None:
+            # Plain calendar window: "last 40 days" -> (today-39, today).
+            _today = datetime.date.today()
+            period = (_today - datetime.timedelta(days=n_days - 1), _today)
+        else:
+            # "last 10 WFH days" etc - qualifying-ROW-count mode.
+            latest_n_days = n_days
+            _qualifier_filter = {
+                "wfh": {"work_mode": "wfh"}, "office": {"work_mode": "office"},
+                "ot": {"shift_type": "Overtime (OT)"}, "standard": {"shift_type": "Standard"},
+                "visit": {"visit_status": "yes"},
+                "ps_working": {"ps_status": "working"}, "ps_not_working": {"ps_status": "not_working"},
+                "non_working": {"ps_status": "not_working"},
+            }.get(n_qualifier)
+            if _qualifier_filter:
+                filters.update(_qualifier_filter)
+    else:
+        d_start, d_end, mentioned = entities.extract_date_range(text)
+        if mentioned:
+            period = (d_start, d_end)
+        else:
+            month_str, mentioned_m = entities.extract_month(text, default_to_current=False)
+            if mentioned_m and month_str:
+                period = _month_str_to_range(month_str)
+    return period, latest_n_days, filters
+
+
+def _handle_driving_performance(raw_message, message, session):
+    """Item #86, Decision 1 (SESSION_HANDOFF.md item #83 failure B's
+    ambiguity, resolved per the user's explicit answer): "which department
+    has the highest/lowest <ranking>, and which employees are driving that
+    performance" - the first real instance of item #83's "one message, two
+    dependent queries" pattern. Item #84 did not build any general multi-
+    step/secondary-query plumbing (confirmed by reading _extraction_llm_reply
+    in full - it is a single dispatch producing exactly one build_query()
+    call), so this is kept narrowly scoped to this exact shape, per the
+    task's instruction, rather than a general planner.
+
+    Step 1: resolve the department-level winner/loser (plain build_query()
+    department ranking, name_filter=None, limit=1 - the SAME call shape the
+    normal is_ranking branch already uses for a department ranking).
+    Step 2: rank employees WITHIN that one department by PACE score, using
+    build_query()'s own scope=("department", <name>) mechanism - the exact
+    same department-scoped employee-ranking mechanism build_query_overview_reply()
+    already uses for a department's employee roster (queries.py line ~2889's
+    own docstring). No new SQL/ranking logic is written here at all - both
+    steps are plain queries.build_query() calls.
+
+    Per the user's Decision 1 (verbatim): "the highest-performing employees
+    WITHIN the identified department, ranked by PACE score" - NOT month-over-
+    month improvement, NOT deviation-from-company-average (both explicitly
+    rejected). The employee-ranking DIRECTION mirrors the department-ranking
+    direction (best department -> top scorers; worst department ->
+    struggling/lowest scorers), decided from the SAME _ASCENDING_WORDS regex
+    used for the department clause itself - "struggling" is included in that
+    regex specifically for this handler's own test phrasing ("worst
+    department...who's struggling there").
+
+    Returns (reply, rows) on success, or None to let the caller fall back to
+    the pre-existing 3-way clarification (extraction failure, no resolvable
+    department, or the message doesn't actually carry the "which department"
+    half of this shape at all - never guessed at).
+    """
+    # Requires an explicit "department" mention - this handler is scoped
+    # EXACTLY to "which department has X, and which employees are driving
+    # that" (per the task's explicit scoping instruction), not any other
+    # "who is driving performance"-shaped question (e.g. a single employee's
+    # own performance, which has no department-ranking first clause to run).
+    if not re.search(r"\bdepartments?\b", raw_message, re.IGNORECASE):
+        return None
+
+    metrics = _detect_build_query_metrics(raw_message)
+    filters = _detect_build_query_filters(raw_message)
+    period, latest_n_days, filters = _resolve_period_and_filters(raw_message, filters)
+    ascending = _ASCENDING_WORDS.search(raw_message) is not None
+
+    try:
+        dept_rows = queries.build_query(
+            "department", metrics, filters=filters, period=period,
+            name_filter=None, limit=1, ascending=ascending, latest_n_days=latest_n_days,
+        )
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception(
+            "build_query() raised inside _handle_driving_performance (department step)")
+        return None
+    if not dept_rows:
+        return ("No department data found for that period.", [])
+    dept_name = dept_rows[0].get("dept_name")
+    if not dept_name:
+        return None
+
+    emp_limit = entities.extract_limit(raw_message, default=None) or 5
+    try:
+        emp_rows = queries.build_query(
+            "employee", ["pace_score"], filters=filters, period=period,
+            scope=("department", dept_name), limit=emp_limit, ascending=ascending,
+            latest_n_days=latest_n_days,
+        )
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception(
+            "build_query() raised inside _handle_driving_performance (employee step)")
+        return None
+
+    dept_reply = _format_build_query_rows(dept_rows, "department", metrics, name_label=dept_name)
+    if not emp_rows:
+        emp_section = f"No employee-level data found for {dept_name} in this period."
+    else:
+        emp_table = _format_build_query_rows(emp_rows, "employee", ["pace_score"], name_label=None)
+        direction_label = "struggling the most" if ascending else "driving that performance"
+        emp_section = f"Employees {direction_label} in {dept_name} (ranked by PACE score):\n\n{emp_table}"
+    reply = f"{dept_reply}\n\n{emp_section}"
+
+    if session is not None:
+        session_store.push_context(session, dept_name=dept_name)
+        _emp_ids = [r.get("employee_id") for r in emp_rows if r.get("employee_id") is not None]
+        session_store.set_query_context(
+            session, last_operation="rank_bottom" if ascending else "rank_top",
+            last_dimension="employee", last_result_ids=_emp_ids, ascending=ascending,
+            metric=["pace_score"], period_phrase=None,
+        )
+    return reply, dept_rows + emp_rows
+
+
+def _format_rank_both_ends(lowest, highest, dimension, metrics):
+    """Item #86, Decision 3 ("highest AND lowest" as its own `rank_both_ends`
+    operation, resolving item #83 failure D's row-count ambiguity per the
+    user's explicit confirmation): formats the single lowest and single
+    highest row of an already-filtered/period-scoped ranking as an explicit
+    2-row table (a leading "Which" column labels each row Highest/Lowest so
+    the direction is never ambiguous from row order alone), reusing
+    _render_table/_BUILD_QUERY_METRIC_LABELS/_fmt_bq exactly as every other
+    build_query() answer in this file - no separate formatting logic
+    invented for this operation."""
+    dim_col = {"employee": "emp_name", "rm": "reporting_manager_name", "department": "dept_name"}.get(dimension)
+    if lowest is highest or (dim_col and lowest.get(dim_col) == highest.get(dim_col)):
+        # Filtered population collapsed to exactly one row - highest and
+        # lowest are the same entity; say so plainly rather than printing a
+        # confusing duplicate 2-row table.
+        table = _format_build_query_rows([lowest], dimension, metrics, name_label=None)
+        return (
+            "Only one entity matched this filtered population, so it's both the highest and the lowest:\n\n"
+            + table
+        )
+    headers = ["Which", dimension.capitalize()] + [_BUILD_QUERY_METRIC_LABELS[m] for m in metrics]
+    data = [
+        ["Highest", highest.get(dim_col)] + [_fmt_bq(highest.get(m), m) for m in metrics],
+        ["Lowest", lowest.get(dim_col)] + [_fmt_bq(lowest.get(m), m) for m in metrics],
+    ]
+    table = _render_table(headers, data)
+    return f"Highest and lowest in this filtered population:\n\n{table}"
+
+
+def _handle_rank_both_ends(raw_message, message, session):
+    """Item #86, Decision 3: "highest AND lowest" in one question (e.g. "who
+    has the highest and lowest PACE among WFH employees"), implemented as
+    its own new operation (`rank_both_ends`), not an extension of a normal
+    top-N ranking, per the user's explicit confirmation. Runs the EXISTING
+    filtered/period-aware ranking logic ONCE (queries.build_query(), the
+    same engine and filter/period resolution as every other ranking path in
+    this file - no duplicate SQL/ranking logic), takes the top-1 and
+    bottom-1 of that SAME filtered population (not two separately-filtered
+    queries), and formats both with PACE score AND PACE status (reusing
+    queries.pace_status_sql() via build_query()'s own "pace_status" metric
+    key - the item #75 status-banding logic, never recomputed here).
+
+    Dimension defaults to "employee" (every one of this round's test
+    phrasings asks about employees); a literal "which department(s) has/
+    have..." shape switches to dimension="department"; a specific named
+    department mentioned anywhere else in the message (and unambiguous) is
+    applied as a department SCOPE filter on the employee ranking instead
+    (build_query()'s own scope=("department", ...) mechanism, the same one
+    _handle_driving_performance()/build_query_overview_reply() already use).
+
+    Returns (reply, rows) on success, or None to let the caller fall back to
+    the pre-existing "which would you like" clarification (no data found for
+    the filtered population, or build_query() itself raised)."""
+    dimension = "employee"
+    scope = None
+    if re.search(r"\bwhich departments?\b|\bdepartments? (?:has|have)\b|\bdepartment ranking\b",
+                 raw_message, re.IGNORECASE):
+        dimension = "department"
+    else:
+        dept_name, candidates = entities.extract_department(raw_message, fallback_text=raw_message)
+        if dept_name and not candidates:
+            scope = ("department", dept_name)
+
+    metrics = _detect_build_query_metrics(raw_message)
+    # Always show PACE score AND PACE status for both returned rows, per
+    # Decision 3's explicit requirement - regardless of what other metric
+    # (if any) was also named.
+    if "pace_score" not in metrics:
+        metrics = ["pace_score"] + metrics
+    if "pace_status" not in metrics:
+        metrics = metrics + ["pace_status"]
+    filters = _detect_build_query_filters(raw_message)
+    period, latest_n_days, filters = _resolve_period_and_filters(raw_message, filters)
+
+    try:
+        rows = queries.build_query(
+            dimension, metrics, filters=filters, period=period, name_filter=None,
+            scope=scope, limit=100000, ascending=True, latest_n_days=latest_n_days,
+        )
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception(
+            "build_query() raised inside _handle_rank_both_ends")
+        return None
+    if not rows:
+        return ("No data found for that filtered population in this period.", [])
+
+    lowest = rows[0]
+    highest = rows[-1]
+    reply = _format_rank_both_ends(lowest, highest, dimension, metrics)
+
+    if session is not None:
+        dim_col = {"employee": "employee_id", "rm": "reporting_manager_name",
+                   "department": "dept_name"}.get(dimension)
+        _result_ids = [r.get(dim_col) for r in (lowest, highest) if dim_col and r.get(dim_col) is not None]
+        session_store.set_query_context(
+            session, last_operation="rank_both_ends", last_dimension=dimension,
+            last_result_ids=_result_ids, ascending=True, metric=metrics, period_phrase=None,
+        )
+        if dimension == "employee" and scope:
+            session_store.push_context(session, dept_name=scope[1])
+    return reply, [lowest, highest]
+
+
+# Item #86, failure O (item #83 section 5's "strongest/weakest area at
+# DEPARTMENT grain" ambiguity, now unblocked by Decision 2 - CONFIRMED as
+# the existing item #76/#78 department-level average-of-the-4-pct-sub-
+# metrics mechanism, no calculation change needed): "was that area also the
+# weakest area for the department overall?" right after a single employee's
+# own weakest/strongest-area answer.
+_DEPT_AREA_FOLLOWUP_PATTERN = re.compile(
+    r"\bthat area\b[^.?!]{0,80}\b(?:department|team)\b[^.?!]{0,40}\boverall\b"
+    r"|\b(?:department|team)\b[^.?!]{0,40}\boverall\b[^.?!]{0,80}\bthat area\b",
+    re.IGNORECASE)
+
+
+def _handle_dept_weakest_area_followup(raw_message, session):
+    """Item #86, failure O: resolves "that area" (the employee's own
+    strongest/weakest area, found in the immediately preceding turn) and
+    "the department" (that employee's own department, carried into sticky
+    context by the singular _area_match branch / its 1-employee "group"
+    variant in _extraction_llm_reply - see the push_context() calls added
+    there this round) from conversational state, then runs the EXISTING,
+    UNCHANGED department-level strongest/weakest-area calculation (item #76/
+    #78's _area_match mechanism, dimension="department" - the average of the
+    4 pct sub-metrics across the department, confirmed as the correct
+    definition per Decision 2) and reports whether it matches the employee's
+    own weakest/strongest area.
+
+    Returns (reply, rows) or None to fall through to the normal cascade
+    (nothing to resolve - nothing tracked yet, or the tracked answer wasn't
+    a single-employee strongest/weakest-area result)."""
+    if session is None or not _DEPT_AREA_FOLLOWUP_PATTERN.search(raw_message or ""):
+        return None
+    qc = session_store.get_query_context(session) or {}
+    if qc.get("last_operation") != "strongest_weakest" or qc.get("last_dimension") != "employee":
+        return None
+    emp_ids = qc.get("last_result_ids") or []
+    emp_metric = (qc.get("metric") or [None])[0]
+    if not emp_ids or emp_metric not in _AREA_METRICS:
+        return None
+    dept_name = session_store.get_recent_context(session, "dept_name")
+    if not dept_name:
+        return None
+    try:
+        dept_rows = queries.build_query("department", _AREA_METRICS, filters={}, period=None,
+                                         name_filter=dept_name, limit=1)
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception(
+            "build_query() raised inside _handle_dept_weakest_area_followup")
+        return None
+    if not dept_rows:
+        return (f"No department-level data found for {dept_name} in this period.", [])
+    row = dept_rows[0]
+    present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
+    if not present:
+        return (f"No department-level data found for {dept_name} in this period.", [])
+    dept_weak_key, dept_weak_val = min(present, key=lambda kv: float(kv[1]))
+    emp_label = _AREA_LABELS.get(emp_metric, emp_metric)
+    dept_label = _AREA_LABELS.get(dept_weak_key, dept_weak_key)
+    if dept_weak_key == emp_metric:
+        reply = (
+            f"Yes — {dept_label} ({_fmt(dept_weak_val)}%) is also {dept_name}'s own weakest area overall, "
+            "the same as that employee's."
+        )
+    else:
+        reply = (
+            f"No — {dept_name}'s own weakest area overall is {dept_label} ({_fmt(dept_weak_val)}%), "
+            f"not {emp_label} (that employee's own weakest area).\n"
+            "All 4 areas (department average): " + ", ".join(f"{_AREA_LABELS[k]} {_fmt(v)}%" for k, v in present)
+        )
+    return reply, dept_rows
+
+
 def _extraction_llm_reply(raw_message, message, session):
     """Item #70: the new extraction-LLM cascade step. Called only when both
     the rule-based matcher and llm_nlu.classify() found nothing usable
@@ -1588,6 +1936,9 @@ def _extraction_llm_reply(raw_message, message, session):
         direction = "weakest" if want_weakest else "strongest"
         _emp_ids = _qc["last_result_ids"][:queries.LIMIT]
         _group_rows = []
+        _last_eid = None
+        _last_chosen_key = None
+        _last_dept_name = None
         for _eid in _emp_ids:
             try:
                 _r = queries.build_query(
@@ -1606,11 +1957,28 @@ def _extraction_llm_reply(raw_message, message, session):
                 continue
             chosen_key, chosen_val = (min if want_weakest else max)(present, key=lambda kv: float(kv[1]))
             _group_rows.append((row.get("emp_name"), _AREA_LABELS[chosen_key], chosen_val))
+            _last_eid, _last_chosen_key, _last_dept_name = _eid, chosen_key, row.get("dept_name")
         if not _group_rows:
             return (f"No data found for that group of employees in this period.", [])
         headers = ["Employee", f"{direction.capitalize()} area", "Value"]
         data = [[name, area, f"{_fmt(val)}%"] for name, area, val in _group_rows]
         reply = f"{direction.capitalize()} area per employee (from the last ranking shown):\n\n" + _render_table(headers, data)
+        if session is not None and len(_group_rows) == 1 and _last_eid is not None:
+            # Item #86 (failure O): when the "group" collapses to exactly
+            # ONE employee (e.g. a prior turn already narrowed the ranking
+            # to a single department-scoped winner - see the K/L/M/N/O
+            # conversational chain), this answer is effectively the SAME
+            # shape as the singular _area_match branch below, so record the
+            # same query_context/sticky dept_name a follow-up like "was that
+            # area also the weakest for the department overall?" needs - see
+            # _handle_dept_weakest_area_followup.
+            if _last_dept_name:
+                session_store.push_context(session, dept_name=_last_dept_name)
+            session_store.set_query_context(
+                session, last_operation="strongest_weakest", last_dimension="employee",
+                last_result_ids=[_last_eid], ascending=want_weakest,
+                metric=[_last_chosen_key], period_phrase=extracted.get("period_phrase"),
+            )
         return reply, []
 
     if _area_match and dimension in ("employee", "department", "rm") and not name_filter:
@@ -1650,6 +2018,27 @@ def _extraction_llm_reply(raw_message, message, session):
             session_store.push_context(session, dept_name=name_filter)
         if session is not None and dimension == "employee" and name_filter:
             session_store.push_context(session, employee_id=name_filter, employee_name=name_label)
+            # Item #86 (failure O, item #83 section 5's Decision-2-unblocked
+            # ambiguity): also carry the employee's OWN department forward
+            # as sticky dept context - build_query()'s "employee" dimension
+            # always selects dept_name alongside emp_name (BUILD_QUERY_DIMENSIONS),
+            # so this is free from the row already fetched, no extra query.
+            # Needed so a later "...for the department overall?" follow-up
+            # (see _handle_dept_weakest_area_followup below) can resolve
+            # "the department" without the user re-naming it.
+            if row.get("dept_name"):
+                session_store.push_context(session, dept_name=row.get("dept_name"))
+        if session is not None:
+            # Item #86 (failure O): records WHICH area/direction this single-
+            # entity answer found, so a follow-up like "was that area also
+            # the weakest for the department overall?" can resolve "that
+            # area" deterministically instead of re-guessing it from the raw
+            # follow-up text (which names no metric at all).
+            session_store.set_query_context(
+                session, last_operation="strongest_weakest", last_dimension=dimension,
+                last_result_ids=[name_filter] if name_filter else [],
+                ascending=want_weakest, metric=[chosen_key], period_phrase=extracted.get("period_phrase"),
+            )
         return reply, rows
 
     if is_ranking:
@@ -1662,10 +2051,37 @@ def _extraction_llm_reply(raw_message, message, session):
         # as every other field in this cascade.
         limit = entities.extract_limit(raw_message, default=None) or extracted.get("limit") or queries.LIMIT
         ascending = _ASCENDING_WORDS.search(raw_message) is not None or _op == "rank_bottom"
+        # Item #86 (failure M, part of the K/L/M/N/O conversational chain):
+        # an employee-level ranking phrased as "...there"/"...in that
+        # department"/"...in the department" right after a department is
+        # already in sticky scope should be SCOPED to that one department
+        # (build_query()'s own scope=(...) mechanism - the same one
+        # _handle_driving_performance()/build_query_overview_reply() already
+        # use), not a fresh company-wide ranking. Deliberately narrow - only
+        # fires for dimension="employee" with an explicit referential word,
+        # never silently applies sticky dept scope to an unrelated ranking.
+        _rank_scope = None
+        if dimension == "employee" and sticky.get("dept_name") and re.search(
+                r"\bthere\b|\bin that department\b|\bin the department\b", raw_message, re.IGNORECASE):
+            _rank_scope = ("department", sticky["dept_name"])
+        # Item #86 (failure M): "which employee/department has/had the
+        # lowest/highest X (there)?" asks for ONE entity, not a ranked
+        # table - collapse to limit=1 for this specific singular phrasing
+        # shape (distinct from the plain "top N"/"5 lowest" ranking shape
+        # _RANKING_WORDS already covers, and from the EXISTING
+        # _SINGULAR_RANKED_REFERENT mechanism above, which only resolves
+        # against an ALREADY-STORED same-dimension ranking, not a NEW
+        # dept-scoped one like this).
+        _SINGULAR_WHICH_ENTITY = re.compile(
+            r"\b(?:which|who)\b[^.?!]{0,15}\b(employee|department|person)\b[^.?!]{0,40}"
+            r"\b(?:has|had|is|scored)\b[^.?!]{0,20}\b(lowest|highest|best|worst)\b",
+            re.IGNORECASE)
+        if _SINGULAR_WHICH_ENTITY.search(raw_message):
+            limit = 1
         try:
             rows = queries.build_query(dimension, metrics, filters=filters, period=period,
                                         name_filter=None, limit=limit, ascending=ascending,
-                                        latest_n_days=latest_n_days)
+                                        scope=_rank_scope, latest_n_days=latest_n_days)
         except Exception:
             logging.getLogger("pace_chatbot.main").exception(
                 "build_query() raised inside extraction-LLM cascade step (ranking)")
@@ -1694,6 +2110,20 @@ def _extraction_llm_reply(raw_message, message, session):
                 last_dimension=dimension, last_result_ids=_result_ids,
                 ascending=ascending, metric=metrics, period_phrase=extracted.get("period_phrase"),
             )
+            # Item #86 (failure K/L, part of the same chain): push the
+            # RESULT (the actual department winner/loser this ranking just
+            # found - rows[0], since order_dir already matches `ascending`)
+            # into sticky dept context, not just query_context - a plain
+            # department-ranking answer previously left sticky_context.dept_name
+            # untouched entirely (confirmed gap, item #83 section 1's "L"
+            # analysis), so a bare "that department" follow-up ("how many
+            # employees are in that department") had nothing to resolve
+            # against even though this WAS a real, single-topic department
+            # answer at its top row.
+            if dimension == "department" and rows:
+                _top_dept = rows[0].get("dept_name")
+                if _top_dept:
+                    session_store.push_context(session, dept_name=_top_dept)
         return reply, rows
 
     try:
@@ -4353,26 +4783,32 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     if _filter_meta_response is not None:
         return _filter_meta_response
 
-    # --- Item #84: two DELIBERATELY-DEFERRED ambiguities (per this round's
-    # task brief - a business-decision call, not something to guess at).
-    # Both checked BEFORE intent classification, same "deterministic safety
-    # check wins" precedent as the filter-meta-followup check above, so
-    # neither can ever be silently answered by a guessed reading.
+    # --- Item #86: the 2 business decisions item #84 deliberately deferred
+    # (per that round's task brief) are now resolved per the user's explicit
+    # answers - both checked BEFORE intent classification, same
+    # "deterministic safety check wins" precedent as the filter-meta-followup
+    # check above, so neither can ever be second-guessed by an unrelated
+    # intent.
     #
-    # (1) "which employees are driving <department>'s performance" is
-    # genuinely ambiguous between at least 3 readings (top individual
-    # scorers / biggest month-over-month improvers / biggest positive
-    # deviation from the company average) - see SESSION_HANDOFF.md item
-    # #83 section 5. Live-confirmed this round: without this check, the
-    # "driving performance" clause was silently DROPPED (the rest of the
-    # question, e.g. a department ranking, still answered) rather than
-    # flagged - which is not a fabricated number, but also isn't the
-    # controlled clarification the task requires. Checked on the raw
-    # message so it fires regardless of what else the question also asks.
+    # (1) "which employees are driving <department>'s performance" -
+    # Decision 1 (verbatim): means the highest-performing employees WITHIN
+    # the department identified by the first clause, ranked by PACE score -
+    # NOT month-over-month improvement, NOT deviation-from-company-average
+    # (both explicitly rejected). See _handle_driving_performance() above
+    # for the 2-step (department winner -> department-scoped employee
+    # ranking) implementation. Checked on the raw message so it fires
+    # regardless of what else the question also asks. Falls back to the old
+    # 3-way clarification only if the handler itself can't resolve anything
+    # (e.g. the message doesn't actually carry the "which department" half
+    # of this shape) - never guesses beyond Decision 1's own definition.
     _DRIVING_PERFORMANCE_PATTERN = re.compile(
         r"\bemployees?\b[^.?!]{0,60}\bdriving\b|\bdriving\b[^.?!]{0,60}\bperformance\b",
         re.IGNORECASE)
     if _DRIVING_PERFORMANCE_PATTERN.search(message):
+        _driving_result = _handle_driving_performance(raw_message, message, session)
+        if _driving_result is not None:
+            _driving_reply, _driving_rows = _driving_result
+            return ChatResponse(reply=_driving_reply, rows=_driving_rows)
         return ChatResponse(
             reply=(
                 "\"Which employees are driving that performance\" could mean a few different things — "
@@ -4388,13 +4824,13 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         )
 
     # (2) "highest AND lowest" in one question (e.g. "who has the highest
-    # and lowest PACE among WFH employees") - the exact row-count semantics
-    # (top-1+bottom-1 of the full filtered population vs. of whatever N is
-    # shown) is a NEW operation type not yet wired up (see SESSION_HANDOFF.md
-    # item #83 section 5) - live-confirmed this round: without this check,
-    # the question silently answered with just a single-direction ranking
-    # table, ignoring the "and lowest"/"and highest" half entirely. A
-    # controlled fallback here beats guessing which semantics to apply.
+    # and lowest PACE among WFH employees") - Decision 3 (verbatim): return
+    # EXACTLY two rows, the single highest and single lowest of the filtered
+    # population (respecting all filters and period semantics first), with
+    # their PACE statuses - confirmed as its own new `rank_both_ends`
+    # operation, not an extension of a normal top-N ranking. See
+    # _handle_rank_both_ends() above. Falls back to the old clarification
+    # only if the handler itself finds no data at all.
     _BOTH_ENDS_PATTERN = re.compile(
         r"\bhighest\b[^.?!]{0,40}\band\b[^.?!]{0,10}\blowest\b"
         r"|\blowest\b[^.?!]{0,40}\band\b[^.?!]{0,10}\bhighest\b"
@@ -4402,6 +4838,10 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         r"|\bworst\b[^.?!]{0,40}\band\b[^.?!]{0,10}\bbest\b",
         re.IGNORECASE)
     if _BOTH_ENDS_PATTERN.search(message):
+        _both_ends_result = _handle_rank_both_ends(raw_message, message, session)
+        if _both_ends_result is not None:
+            _both_ends_reply, _both_ends_rows = _both_ends_result
+            return ChatResponse(reply=_both_ends_reply, rows=_both_ends_rows)
         return ChatResponse(
             reply=(
                 "I can look up the highest or lowest separately — which would you like, or both "
@@ -4410,6 +4850,19 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             needs_clarification=True,
             clarification_options=["Highest only", "Lowest only", "Both, separately"],
         )
+
+    # --- Item #86, failure O: "was that area also the weakest area for the
+    # department overall?" right after a single employee's own weakest/
+    # strongest-area answer - checked BEFORE intent classification, same
+    # precedent as every other conversational pre-check above, so it can
+    # never be misrouted to a fresh company-wide "weakest area" lookup by
+    # the normal cascade (which has no way to know "that area"/"the
+    # department" refer to the prior turn's employee-level answer). See
+    # _handle_dept_weakest_area_followup above. ---
+    _dept_area_followup_response = _handle_dept_weakest_area_followup(raw_message, session)
+    if _dept_area_followup_response is not None:
+        _da_reply, _da_rows = _dept_area_followup_response
+        return ChatResponse(reply=_da_reply, rows=_da_rows)
 
     # --- Bare superlative direction follow-up ("least", "most", "highest",
     # "lowest", ...) right after a ranking (item #63) - checked BEFORE intent
