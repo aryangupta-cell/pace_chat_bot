@@ -1263,24 +1263,70 @@ def _extraction_llm_reply(raw_message, message, session):
 
     # Never trust the LLM's own filter values blindly beyond the enum the
     # schema already constrains them to - queries.build_query() itself
-    # validates/defaults these further, so just pass through.
-    filters = extracted.get("filters") or {}
+    # validates/defaults these further. Item #76: merged with two
+    # deterministic sources that OVERRIDE the LLM's own guess, same
+    # "narrow deterministic regex beats a probabilistic LLM guess" precedent
+    # as _repair_new_vocab_metric()/_detect_pct_capped_metrics() above -
+    # (1) _detect_build_query_filters() (the same regex detector the
+    # rule-based build_query() callers already use for ps/visit/wfh/shift
+    # overrides), and (2) a filter implied by the period phrase itself (e.g.
+    # "last 10 WFH days" implies work_mode="wfh" even if the LLM's separate
+    # `filters` field missed it).
+    filters = dict(extracted.get("filters") or {})
+    filters.update(_detect_build_query_filters(raw_message))
 
     # Re-parse period_phrase through the EXISTING, already-tested date
-    # parsers - never trust LLM date arithmetic directly.
+    # parsers - never trust LLM date arithmetic directly. Item #76: bare/
+    # qualified "last N days" is checked FIRST (entities.extract_last_n_days) -
+    # a strictly more specific shape than extract_date_range's named windows,
+    # and the ONLY parser here that supports a raw day-count at all (see
+    # entities.py's docstring for the live-verified gap this closes).
     period = None
+    latest_n_days = None
     phrase = extracted.get("period_phrase")
     if phrase:
-        d_start, d_end, mentioned = entities.extract_date_range(phrase)
-        if mentioned:
-            period = (d_start, d_end)
+        n_days, n_qualifier, n_mentioned = entities.extract_last_n_days(phrase)
+        if n_mentioned:
+            if n_qualifier is None:
+                # Plain calendar window: "last 40 days" -> (today-39, today).
+                _today = datetime.date.today()
+                period = (_today - datetime.timedelta(days=n_days - 1), _today)
+            else:
+                # "last 10 WFH days" etc - qualifying-ROW-count mode
+                # (queries.build_query()'s new latest_n_days param): filters
+                # define the population FIRST, then the latest N matching
+                # rows are taken - never a calendar window filtered
+                # afterward. The qualifier also deterministically sets/
+                # overrides the matching build_query() filter, same
+                # "deterministic wins" precedent as above.
+                latest_n_days = n_days
+                _qualifier_filter = {
+                    "wfh": {"work_mode": "wfh"}, "office": {"work_mode": "office"},
+                    "ot": {"shift_type": "Overtime (OT)"}, "standard": {"shift_type": "Standard"},
+                    "visit": {"visit_status": "yes"},
+                    "ps_working": {"ps_status": "working"}, "ps_not_working": {"ps_status": "not_working"},
+                    "non_working": {"ps_status": "not_working"},
+                }.get(n_qualifier)
+                if _qualifier_filter:
+                    filters.update(_qualifier_filter)
         else:
-            month_str, mentioned_m = entities.extract_month(phrase, default_to_current=False)
-            if mentioned_m and month_str:
-                period = _month_str_to_range(month_str)
-        # If the phrase was named but genuinely unparseable, period stays
-        # None -> build_query() defaults to last 60 days (documented, not a
-        # crash) rather than us guessing.
+            d_start, d_end, mentioned = entities.extract_date_range(phrase)
+            if mentioned:
+                period = (d_start, d_end)
+            else:
+                month_str, mentioned_m = entities.extract_month(phrase, default_to_current=False)
+                if mentioned_m and month_str:
+                    period = _month_str_to_range(month_str)
+            # If the phrase was named but genuinely unparseable, period stays
+            # None -> build_query() defaults to last 60 days (documented, not
+            # a crash) rather than us guessing.
+
+    # Item #76 (Part B): "<employee/dept/RM>'s strongest/weakest area" - a
+    # derived OPERATION (rank the 4 pct sub-metrics for one scope), not a
+    # new queryable column. Detected on the raw message so it composes with
+    # whatever dimension/name/period/filters were already extracted above,
+    # rather than being a new parallel intent.
+    _area_match = re.search(r"\b(strongest|weakest)\s+(?:area|metric|dimension|aspect)\b", raw_message, re.I)
 
     # Re-resolve dimension_name through the EXISTING fuzzy-safe extraction
     # functions against the ORIGINAL message - never trust the LLM's own
@@ -1288,6 +1334,7 @@ def _extraction_llm_reply(raw_message, message, session):
     # everywhere else in this file.
     name_text = extracted.get("dimension_name") or message
     name_filter = None
+    name_label = None
     if dimension == "employee":
         try:
             emp_id, emp_name = entities.extract_employee(name_text, fallback_text=raw_message)
@@ -1327,14 +1374,94 @@ def _extraction_llm_reply(raw_message, message, session):
         name_filter = None
         name_label = "The whole company"
 
-    if dimension in ("employee", "department", "rm") and not name_filter:
+    # Item #76 (Part B): RANKING operation - dimension in (employee,
+    # department, rm) with NO name resolvable at all (nothing named in this
+    # message, nothing in sticky context either) used to be a hard fail
+    # (return None -> falls through to sql_fallback). If the raw message
+    # actually reads as a ranking/superlative question ("highest"/"lowest"/
+    # "best"/"worst"/"top"/"most"/"least"/etc.), that's not missing
+    # information - it's a genuine multi-row ranking request the engine
+    # already supports (build_query() with no name_filter returns a ranked,
+    # LIMIT-ed table) but this cascade never exercised before this round.
+    _RANKING_WORDS = re.compile(
+        r"\b(highest|lowest|best|worst|top|bottom|most|least|greatest|smallest|"
+        r"largest|highest-scoring|lowest-scoring)\b", re.IGNORECASE)
+    _ASCENDING_WORDS = re.compile(r"\b(least|lowest|worst|fewest|bottom|smallest)\b", re.IGNORECASE)
+    is_ranking = (
+        dimension in ("employee", "department", "rm")
+        and not name_filter
+        and not _area_match
+        and _RANKING_WORDS.search(raw_message) is not None
+    )
+
+    if dimension in ("employee", "department", "rm") and not name_filter and not is_ranking:
         # Nothing resolvable at all (no name in the message, no sticky
-        # context either) - not enough to run a scoped query; fall through.
+        # context either) and not a ranking question either - not enough to
+        # run a scoped query; fall through.
         return None
+
+    if _area_match and dimension in ("employee", "department", "rm") and not name_filter:
+        # "strongest/weakest area" needs ONE concrete scope (a named entity,
+        # or company-wide) - a bare ranking of "areas" across many
+        # entities isn't a supported shape; fall through rather than guess.
+        return None
+
+    _AREA_METRICS = ["engagement_pct", "effectiveness_pct", "discipline_pct", "working_pct"]
+    _AREA_LABELS = {
+        "engagement_pct": "Engagement", "effectiveness_pct": "Effectiveness",
+        "discipline_pct": "Discipline", "working_pct": "Working hours",
+    }
+
+    if _area_match:
+        # Force the metrics to exactly the 4 comparable pct sub-metrics,
+        # overriding whatever extract_build_query() guessed for `metrics` -
+        # this operation is never about any other metric.
+        try:
+            rows = queries.build_query(dimension, _AREA_METRICS, filters=filters, period=period,
+                                        name_filter=name_filter, limit=1, latest_n_days=latest_n_days)
+        except Exception:
+            logging.getLogger("pace_chatbot.main").exception(
+                "build_query() raised inside extraction-LLM cascade step (strongest/weakest area)")
+            return None
+        if not rows:
+            return (f"No data found for {name_label or 'that scope'} in this period.", [])
+        row = rows[0]
+        present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
+        if not present:
+            return (f"No data found for {name_label or 'that scope'} in this period.", [])
+        want_weakest = _area_match.group(1).lower() == "weakest"
+        best_key, best_val = max(present, key=lambda kv: float(kv[1]))
+        worst_key, worst_val = min(present, key=lambda kv: float(kv[1]))
+        chosen_key, chosen_val = (worst_key, worst_val) if want_weakest else (best_key, best_val)
+        direction = "weakest" if want_weakest else "strongest"
+        reply = (
+            f"{name_label}'s {direction} area is {_AREA_LABELS[chosen_key]} "
+            f"({_fmt(chosen_val)}%).\n"
+            "All 4 areas: " + ", ".join(f"{_AREA_LABELS[k]} {_fmt(v)}%" for k, v in present)
+        )
+        if session is not None and dimension == "department" and name_filter:
+            session_store.push_context(session, dept_name=name_filter)
+        if session is not None and dimension == "employee" and name_filter:
+            session_store.push_context(session, employee_id=name_filter, employee_name=name_label)
+        return reply, rows
+
+    if is_ranking:
+        limit = entities.extract_limit(raw_message, default=queries.LIMIT)
+        ascending = _ASCENDING_WORDS.search(raw_message) is not None
+        try:
+            rows = queries.build_query(dimension, metrics, filters=filters, period=period,
+                                        name_filter=None, limit=limit, ascending=ascending,
+                                        latest_n_days=latest_n_days)
+        except Exception:
+            logging.getLogger("pace_chatbot.main").exception(
+                "build_query() raised inside extraction-LLM cascade step (ranking)")
+            return None
+        reply = _format_build_query_rows(rows, dimension, metrics, name_label=None)
+        return reply, rows
 
     try:
         rows = queries.build_query(dimension, metrics, filters=filters, period=period,
-                                    name_filter=name_filter, limit=1)
+                                    name_filter=name_filter, limit=1, latest_n_days=latest_n_days)
     except Exception:
         logging.getLogger("pace_chatbot.main").exception("build_query() raised inside extraction-LLM cascade step")
         return None
@@ -2131,7 +2258,23 @@ _NEW_VOCAB_OVERRIDE_PATTERN = re.compile(
     r"|\bpace score\b.*\b(day|event)[- ]level\b"
     r"|\bprecomputed\b.*\b(dept|department)?\s*(score|status)\b"
     r"|\bpace status\b.*\b(over|for|last|past|this|next)\b.*\b(day|days|week|weeks|month|months)\b"
-    r"|\bderived\b.*\b(dept|department)\b.*\bstatus\b",
+    r"|\bderived\b.*\b(dept|department)\b.*\bstatus\b"
+    # Item #76 (Phase 3, Part A): bare "last/past N days" phrasing (with or
+    # without a filter-word right before "days", e.g. "last 10 WFH days").
+    # Live-verified gap (SESSION_HANDOFF item #76): no existing rule-based
+    # intent or entities.py parser handled this shape at all before this
+    # round - "PACE status for AI Labs last 5 days" and "...last 60 days"
+    # previously returned byte-identical replies (silently unparsed, always
+    # falling back to build_query()'s 60-day default). A rule_intent/
+    # llm_result match on a message like this is therefore never trustworthy
+    # for the period it silently applies - null it out so extract_build_query()
+    # (which now understands entities.extract_last_n_days()) gets the turn.
+    r"|\b(?:last|past)\s+\d{1,3}\s+(?:\w+\s+)?days?\b"
+    # Item #76 (Part B): "strongest/weakest area" - a NEW derived operation
+    # (ranking the 4 pct sub-metrics for one scope) with no equivalent
+    # concept in any of the ~123 existing intents; must reach the
+    # extraction cascade, never an old ranking/percentage intent.
+    r"|\b(strongest|weakest)\s+(area|metric|dimension|aspect)\b",
     re.IGNORECASE,
 )
 

@@ -735,9 +735,30 @@ otherwise use null for each field (the caller applies the correct defaults):
   shift_type: a shift name (e.g. "Overtime (OT)") or "any" | null
 
 period_phrase: the time period AS WRITTEN by the user (e.g. "last 3 weeks",
-"last 2 months", "August", "yesterday", "between 1 Aug and 20 Aug") - or null
-if no period was named at all. NEVER emit an actual ISO date yourself; the
-caller re-parses your phrase through its own date parser.
+"last 2 months", "August", "yesterday", "between 1 Aug and 20 Aug", "last 40
+days", "last 10 WFH days") - or null if no period was named at all. NEVER
+emit an actual ISO date yourself; the caller re-parses your phrase through
+its own date parser (which now also understands bare/qualified "last N
+days" phrasing - always pass it through verbatim, including any filter word
+sitting right before "days" like "WFH"/"office"/"OT"/"visit").
+
+Two more composable things to recognize (Phase 3):
+
+RANKING questions ("which department has the highest discipline this
+month", "top 5 employees by engagement last week") name NO specific
+employee/department/RM at all - just a dimension and a superlative
+(highest/lowest/best/worst/top/bottom/most/least). For these, dimension_name
+MUST be null (do not invent a name) - the caller detects the ranking wording
+itself and runs a multi-row query.
+
+"strongest/weakest area" questions (e.g. "what is Rahul's strongest area",
+"which area is Ops - Cement weakest in") ask which of the 4 comparable
+percentage areas (engagement/effectiveness/discipline/working hours) is
+highest/lowest for one named scope - a DERIVED comparison across those 4
+areas, not a request for any other single metric. For these, dimension and
+dimension_name should still be extracted normally (who/what the question is
+about); metrics can be left as an empty list - the caller supplies the 4
+area metrics itself.
 
 Respond with JSON matching the given schema only."""
 
@@ -755,6 +776,16 @@ _BQ_FEW_SHOT = [
     ("day level pace score for Accounts department over the last 2 weeks", {"dimension": "department", "dimension_name": "Accounts", "metrics": ["pace_score_day_level"], "filters": {}, "period_phrase": "last 2 weeks"}),
     ("precomputed 60 day dept score for Founders Office", {"dimension": "department", "dimension_name": "Founders Office", "metrics": ["dept_score_60_days_precomputed"], "filters": {}, "period_phrase": None}),
     ("pace status for AI Labs over last 30 days", {"dimension": "department", "dimension_name": "AI Labs", "metrics": ["pace_status"], "filters": {}, "period_phrase": "last 30 days"}),
+    # Item #76 (Phase 3): arbitrary "last N days" period, with/without a
+    # qualifying filter word right before "days".
+    ("what is Manisha's pace score for the last 40 days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_score"], "filters": {}, "period_phrase": "last 40 days"}),
+    ("pace status for Manisha for the last 10 WFH days", {"dimension": "employee", "dimension_name": "Manisha", "metrics": ["pace_status"], "filters": {"work_mode": "wfh"}, "period_phrase": "last 10 WFH days"}),
+    # Item #76: ranking (no specific name at all - dimension_name null).
+    ("which department has the highest discipline this month", {"dimension": "department", "dimension_name": None, "metrics": ["discipline_pct"], "filters": {}, "period_phrase": "this month"}),
+    ("top 5 employees by engagement last week", {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {}, "period_phrase": "last week"}),
+    # Item #76: strongest/weakest area (derived - metrics left empty).
+    ("what is Rahul Kanwaria's strongest area", {"dimension": "employee", "dimension_name": "Rahul Kanwaria", "metrics": [], "filters": {}, "period_phrase": None}),
+    ("which area is Ops - Cement weakest in over the last 2 months", {"dimension": "department", "dimension_name": "Ops - Cement", "metrics": [], "filters": {}, "period_phrase": "last 2 months"}),
 ]
 
 

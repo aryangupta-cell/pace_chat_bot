@@ -458,6 +458,84 @@ def _rolling_last_n_months(text_l, today=None):
     return start, today, True
 
 
+# Phase 3 (item #76) — bare "last/past N days" support. No existing parser
+# anywhere in this file (or main.py) handled this shape at all before this
+# round: extract_date_range() only covers named windows (yesterday/today/
+# last week/last 4 weeks/week-of-month) and _rolling_last_n_months() only
+# covers N *months*. Live-verified gap (SESSION_HANDOFF item #76): "PACE
+# status for AI Labs last 5 days" and "...last 60 days" previously returned
+# byte-identical replies - the phrase was silently unparsed and every caller
+# fell through to build_query()'s 60-day default regardless of N.
+#
+# Deliberately a SEPARATE function from extract_date_range() (rather than a
+# new branch inside it) so this round's new capability is opt-in per caller
+# (only the extraction-LLM cascade in app/main.py uses it) and cannot change
+# the behaviour of any of the ~123 existing rule-based intents, which all
+# call extract_date_range()/extract_month() directly and must stay untouched
+# per this round's constraints.
+#
+# Distinguishes two shapes, since they need different query semantics
+# (SESSION_HANDOFF item #76's critical business rule):
+#   "last 40 days"       -> qualifier=None -> a plain CALENDAR window
+#                            (today - 39 .. today), same shape as every
+#                            other extract_date_range() result.
+#   "last 10 WFH days"    -> qualifier="wfh" -> a ROW-COUNT request: the
+#                            latest 10 days actually matching that filter,
+#                            NOT the WFH days falling inside the last 10
+#                            CALENDAR days (which could under-count if WFH
+#                            didn't happen on 10 of the last 10 calendar
+#                            days). The caller (app/main.py) routes this
+#                            through queries.build_query()'s new
+#                            `latest_n_days` qualifying-row-count mode
+#                            instead of a fixed (start, end) period - filters
+#                            still define the qualifying population FIRST,
+#                            the N-row window is taken from that population,
+#                            never the other way around.
+_LAST_N_DAYS_RE = re.compile(
+    r"\b(?:last|past)\s+(\d{1,3})\s+"
+    r"(wfh|work[\s-]?from[\s-]?home|office|ot|overtime|standard|visit|"
+    r"non[\s-]?working|ps[\s-]?working|ps[\s-]?not[\s-]?working)?\s*days?\b",
+    re.IGNORECASE,
+)
+
+# Raw regex-captured qualifier word -> a normalized qualifier key, consumed
+# by app/main.py to also set the matching queries.build_query() filter
+# (deterministically - never left to the extraction LLM's own guess, same
+# "deterministic wins" precedent as _detect_pct_capped_metrics() etc.).
+_LAST_N_DAYS_QUALIFIER_MAP = {
+    "wfh": "wfh", "work from home": "wfh", "work-from-home": "wfh",
+    "office": "office",
+    "ot": "ot", "overtime": "ot",
+    "standard": "standard",
+    "visit": "visit",
+    "non working": "non_working", "non-working": "non_working",
+    "ps working": "ps_working", "ps-working": "ps_working",
+    "ps not working": "ps_not_working", "ps-not-working": "ps_not_working",
+}
+
+
+def extract_last_n_days(text):
+    """Returns (n, qualifier, True) for "last/past N [qualifier] days"
+    phrasing, or (None, None, False) if not present. `qualifier` is None for
+    a bare calendar-day count ("last 40 days") or one of the
+    _LAST_N_DAYS_QUALIFIER_MAP values when a filter-shaped word sits right
+    before "days" ("last 10 WFH days"). Deliberately permissive about which
+    exact word can appear there - an unrecognized word (e.g. "last 5 working
+    days" where "working" isn't in the map) still yields qualifier=None
+    (treated as a plain calendar window) rather than raising, consistent
+    with this project's fail-safe-not-fail-loud convention."""
+    m = _LAST_N_DAYS_RE.search(text or "")
+    if not m:
+        return None, None, False
+    n = int(m.group(1))
+    if n <= 0:
+        return None, None, False
+    raw_qualifier = (m.group(2) or "").strip().lower()
+    raw_qualifier = re.sub(r"[\s-]+", " ", raw_qualifier)
+    qualifier = _LAST_N_DAYS_QUALIFIER_MAP.get(raw_qualifier)
+    return n, qualifier, True
+
+
 def extract_date_range(text):
     """Returns (start_date, end_date, was_mentioned bool) for day/week-level
     relative time references: "yesterday", "today", "last week", "this week",

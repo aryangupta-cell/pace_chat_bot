@@ -2732,7 +2732,7 @@ _build_query_default_period = default_period_last_60_days
 
 
 def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None, scope=None,
-                 ascending=False):
+                 ascending=False, latest_n_days=None):
     """General parametrized engine: SELECT <metrics> GROUP BY <dimension> FROM
     public.pace_1 WHERE <filters> AND <period>.
 
@@ -2752,7 +2752,28 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         work_mode: None (default - no filter) | "wfh" (wfh_status='Work From Home') | "office"
         shift_type: "Standard" (default) | any other pace_1 shift_type value | "any"
     period: (start_date, end_date) tuple, or None -> defaults to the last 60
-        days (today inclusive).
+        days (today inclusive). Mutually exclusive with `latest_n_days` -
+        ignored (not applied at all) whenever `latest_n_days` is given.
+    latest_n_days: item #76 (Phase 3) addition - "N qualifying rows" mode,
+        distinct from `period`'s fixed calendar-date-range mode. When set,
+        `period` is ignored entirely and NO date-range clause is applied to
+        the qualifying population at all - instead, ALL other filters
+        (ps_status/visit_status/work_mode/shift_type/name_filter/scope/the
+        capped-not-null clause for pace_score/pace_status) are applied FIRST
+        to define the qualifying population, THEN the latest N rows *per
+        employee* (ordered by worked_day desc) are taken from that
+        population via a row_number() CTE, and only THEN aggregated. This is
+        the deliberate fix for the "last 10 WFH days" business rule: taking
+        a fixed calendar window first and filtering afterward would silently
+        under-count whenever the qualifying condition (e.g. WFH) doesn't
+        hold on every day of that window - this mode never does that.
+        Partitioning by employee_id (rather than by the requested dimension)
+        is intentional so the semantics compose correctly regardless of
+        dimension: a department/RM/company-level "last N qualifying days"
+        query is simply each employee's own latest N qualifying days,
+        aggregated together - never one shared calendar window applied
+        uniformly to every employee regardless of when THEIR qualifying days
+        actually fell.
     name_filter: optional exact dept_name / reporting_manager_name / employee_id
         to scope to one group (e.g. a single department's overview).
     limit: max rows returned (default LIMIT for a ranking-style call; a
@@ -2802,12 +2823,17 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         where.append("shift_type = %(shift_type)s")
         params["shift_type"] = shift_type
 
-    if period is None:
-        period = _build_query_default_period()
-    start, end = period
-    where.append("worked_day between %(date_start)s and %(date_end)s")
-    params["date_start"] = start
-    params["date_end"] = end
+    if latest_n_days is None:
+        # Fixed calendar-window mode (unchanged from before this round).
+        if period is None:
+            period = _build_query_default_period()
+        start, end = period
+        where.append("worked_day between %(date_start)s and %(date_end)s")
+        params["date_start"] = start
+        params["date_end"] = end
+    # else: latest_n_days mode - NO date clause here at all; the row-count
+    # window is applied later via the row_number() CTE, after every other
+    # filter below has already defined the qualifying population.
 
     if name_filter:
         col = {"employee": "employee_id", "rm": "reporting_manager_name", "department": "dept_name"}[dimension]
@@ -2897,14 +2923,41 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     else:
         order_col = "n_employees"
     order_dir = "asc" if ascending else "desc"
+    params["limit"] = lim
+
+    if latest_n_days is None:
+        sql = f"""
+            select {", ".join(select_parts)}
+            from public.pace_1
+            where {where_clause}{group_by_clause}
+            order by {order_col} {order_dir} nulls last
+            limit %(limit)s
+        """
+        return run_query(sql, params)
+
+    # latest_n_days mode (item #76): `where_clause` above already reflects
+    # every non-date filter (ps/visit/work_mode/shift_type/name_filter/
+    # scope/capped-not-null) - the qualifying population. Rank each
+    # employee's own rows within that population by worked_day desc, keep
+    # only the latest N per employee, THEN aggregate - never the reverse
+    # order. `from filtered` (not `from public.pace_1`) is the only
+    # difference in the outer query's FROM/WHERE-rn shape vs the plain mode
+    # above; every select/group-by/order-by expression is identical since
+    # `filtered` carries every pace_1 column through unchanged (`select *`).
+    params["latest_n_days"] = int(latest_n_days)
     sql = f"""
+        with filtered as (
+            select *,
+                   row_number() over (partition by employee_id order by worked_day desc) as rn
+            from public.pace_1
+            where {where_clause}
+        )
         select {", ".join(select_parts)}
-        from public.pace_1
-        where {where_clause}{group_by_clause}
+        from filtered
+        where rn <= %(latest_n_days)s{group_by_clause}
         order by {order_col} {order_dir} nulls last
         limit %(limit)s
     """
-    params["limit"] = lim
     return run_query(sql, params)
 
 
