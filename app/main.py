@@ -1413,11 +1413,16 @@ def _extraction_llm_reply(raw_message, message, session):
     # its OWN, older single-slot pronoun resolution - item #30's "last
     # discussed employee" - which would otherwise silently resolve "them"
     # to just ONE person before this code ever got a chance to run; live-
-    # confirmed this round). Only fires when the extraction LLM itself
-    # found no explicit name this turn (dimension_name is null) and both
-    # tracked entities are the SAME type as the requested dimension.
+    # confirmed this round). Deliberately does NOT gate on
+    # extracted.get("dimension_name") being null - the extraction LLM is
+    # given a context_hint built from sticky_context (a single name), so
+    # for a "both of them"-style message it commonly fills dimension_name
+    # with that ONE sticky name anyway (also live-confirmed this round) -
+    # an explicit "them"/"both"/"the two" in the RAW message is a strong
+    # enough plural signal on its own to override that single-name guess
+    # whenever two tracked comparison entities of the right type exist.
     _COMPARISON_PRONOUN = re.compile(r"\b(them|both|the two|either of them)\b", re.IGNORECASE)
-    if (not extracted.get("dimension_name") and dimension in ("employee", "department")
+    if (dimension in ("employee", "department")
             and _COMPARISON_PRONOUN.search(raw_message) and session is not None):
         _cmp_first, _cmp_second = session_store.get_comparison_entities(session)
         if (_cmp_first and _cmp_second
