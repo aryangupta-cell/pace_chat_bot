@@ -1556,7 +1556,16 @@ def _extraction_llm_reply(raw_message, message, session):
         "discipline_pct": "Discipline", "working_pct": "Working hours",
     }
 
-    if (_area_match and dimension == "employee" and not name_filter
+    # Item #84 (failure G): dimension here is whatever the extraction LLM
+    # guessed from the raw message ALONE - for a pronoun-only follow-up
+    # like "what are their weakest areas?" (no explicit employee/
+    # department mention at all), it has no way to know "their" refers to
+    # the ranked group from the PRIOR turn and typically guesses "company"
+    # by default. query_context.last_dimension (this round's addition) is
+    # the authoritative signal for what the pronoun actually refers to, so
+    # it - not the LLM's context-blind dimension guess - decides whether
+    # this is the group-of-employees case.
+    if (_area_match and not name_filter
             and _qc.get("last_dimension") == "employee" and _qc.get("last_result_ids")
             and re.search(r"\b(their|them|those)\b", raw_message, re.IGNORECASE)):
         # Item #84 (failure G): "their weakest areas" right after a ranking
