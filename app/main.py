@@ -5192,6 +5192,29 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         month=_explicit_month_this_turn, date_range=_explicit_date_range_this_turn,
     )
 
+    # Item #85: some phrasings of the SAME "company-wide PACE-score decline
+    # ranking" question (e.g. "which employees' PACE scores dropped the
+    # most vs last month") reach here with `intent` ALREADY set to
+    # "score_drop_ranking"/"score_improvement_alltime" directly out of
+    # intents.match_intent()'s own fuzzy fallback - i.e. a THIRD routing
+    # path onto the same old intents, distinct from (and not caught by) the
+    # explicit "full_trend_emp"/"subscore_trend_emp" redirects earlier in
+    # this function, since match_intent() never returned "full_trend_emp"
+    # for this wording in the first place. Same underlying bug, same fix:
+    # a message that explicitly says "employees" (plural - a company-wide
+    # signal that the asker is not asking about their own team) with no
+    # resolvable department should never fall into the implicit "my team"
+    # gate below. Redirect to "pace_delta_ranking_cw" (see its handler
+    # above) BEFORE computing `_implicit_self_ref`, so it's naturally
+    # excluded (that intent name is deliberately not in the tuple below).
+    # Deliberately narrow (only these two intents, only the literal word
+    # "employees") so the genuinely-ambiguous short trigger phrasing this
+    # gate exists for ("whose score dropped the most?", no "employees"
+    # word, no other company-wide signal) is completely unaffected.
+    if intent in ("score_drop_ranking", "score_improvement_alltime") and not dept_name \
+            and re.search(r"\bemployees\b", message, re.IGNORECASE):
+        intent = "pace_delta_ranking_cw"
+
     # --- Self-referential "my team" path ---
     # Score-drop/score-improvement questions with NO department named are
     # treated as implicitly self-referential too, so "whose score dropped
