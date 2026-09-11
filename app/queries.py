@@ -1743,6 +1743,64 @@ def day_compare(date1, date2, dept_name=None, employee_id=None, metric_keys=None
     return results
 
 
+def day_compare_ranking(date1, date2, dept_name=None, employee_ids=None, metric_key=None,
+                         filter_sql=None, ascending=True, limit=None):
+    """Item #87 (bug C): per-EMPLOYEE two-date delta ranking - "compare the
+    employees' engagement between 8 Sept and 10 Sept, who decreased the
+    most?" needs a per-employee breakdown ranked by change, not
+    day_compare()'s single population-average delta. Reuses day_compare()'s
+    own single-day/no-Jensen's-inequality reasoning (a plain per-day value,
+    no multi-day averaging) and DAY_COMPARE_METRICS for the metric mapping,
+    plus the exact 2-period-pivot-then-join shape gainer_loser_ranking()
+    already uses for month-over-month deltas - just pivoted on two fixed
+    dates instead of two 4-week periods, and keyed by employee_id instead of
+    a population aggregate.
+
+    Only employees with a non-null value on BOTH dates (under the same
+    population filter day_compare() uses) qualify - same "needs data on
+    both sides" precedent as gainer_loser_ranking()'s cur_n>=2/prior_n>=2
+    gate, just for single days instead of 4-week windows.
+
+    Returns (rows, label) - rows are {employee_id, emp_name, dept_name,
+    val1, val2, delta}, ordered by delta ascending (biggest decrease first)
+    or descending (biggest increase first) per `ascending`; label is the
+    metric's display label (for the reply header)."""
+    key = metric_key or DEFAULT_DAY_COMPARE_METRIC
+    col, label = DAY_COMPARE_METRICS.get(key, DAY_COMPARE_METRICS[DEFAULT_DAY_COMPARE_METRIC])
+    pop_filter = f"and {filter_sql}" if filter_sql else "and shift_type = 'Standard'"
+    lim = limit or LIMIT
+    order = "asc" if ascending else "desc"
+    sql = f"""
+        with d1 as (
+            select employee_id, emp_name, dept_name, {col} as val1
+            from public.pace_1
+            where worked_day = %(date1)s
+              and {col} is not null
+              and (%(dept_name)s is null or dept_name = %(dept_name)s)
+              and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+              {pop_filter}
+        ),
+        d2 as (
+            select employee_id, {col} as val2
+            from public.pace_1
+            where worked_day = %(date2)s
+              and {col} is not null
+              and (%(dept_name)s is null or dept_name = %(dept_name)s)
+              and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+              {pop_filter}
+        )
+        select d1.employee_id, d1.emp_name, d1.dept_name, d1.val1, d2.val2,
+               (d2.val2 - d1.val1) as delta
+        from d1
+        join d2 on d1.employee_id = d2.employee_id
+        order by delta {order}
+        limit {lim}
+    """
+    params = {"date1": date1, "date2": date2, "dept_name": dept_name, "employee_ids": employee_ids}
+    rows = run_query(sql, params)
+    return rows, label
+
+
 def month_compare(month1, month2, dept_name=None, employee_id=None, metric_keys=None, filter_sql=None):
     """Company-wide (or dept/employee-scoped) average comparison of one or
     more metrics between two full calendar months ('YYYY-MM' strings) -

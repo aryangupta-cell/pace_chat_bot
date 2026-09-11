@@ -2259,6 +2259,52 @@ def format_day_compare(results, date1, date2, subject_label, filter_footer=None)
     return "\n".join(lines)
 
 
+def format_day_compare_ranking(rows, date1, date2, label, direction_label, filter_footer=None):
+    """Item #87 (bug C): formatter for queries.day_compare_ranking()'s
+    per-employee delta rows - mirrors format_day_compare()'s style (same
+    date-header phrasing, same filter_footer handling) but as a ranked
+    table instead of a single population-average line, since the whole
+    point of this shape is "which EMPLOYEES changed the most", not one
+    company-wide number."""
+    if not rows:
+        reply = (f"No employees had qualifying {label} data on both {date1} and {date2} "
+                  f"under the current filters.")
+        if filter_footer:
+            reply += f"\n\n{filter_footer}"
+        return reply
+    headers = ["#", "Employee", "Department", f"{date1}", f"{date2}", "Change"]
+    data = []
+    for i, r in enumerate(rows, 1):
+        delta = r["delta"]
+        data.append([i, r["emp_name"], r["dept_name"], _fmt(r["val1"]), _fmt(r["val2"]), f"{float(delta):+.0f}"])
+    body = _render_table(headers, data)
+    lines = [f"Employees {direction_label} in {label} from {date1} to {date2}:\n", body]
+    if filter_footer:
+        lines.append("")
+        lines.append(filter_footer)
+    return "\n".join(lines)
+
+
+# Item #87 (bug C): "compare the employees' engagement between X and Y, who
+# decreased the most" needs a PER-EMPLOYEE ranking, not day_compare()'s
+# single company-wide delta - "the employees" (plural) / a bare "who"
+# ranking question are the signal, same "no silent substitution when the
+# message signals a different shape" precedent as items #72/#73/#78/#82 and
+# this round's bug A. Deliberately narrow: only fires when no single named
+# employee was already resolved this message (a specific name means the
+# user wants THAT person's own day-vs-day comparison, the existing
+# behaviour, untouched).
+_DAY_COMPARE_PER_EMPLOYEE_PATTERN = re.compile(
+    r"\bemployees[’']?\b|\beach employee\b|"
+    r"\bwho\b[^.?!]{0,30}\b(decreased|declined|dropped|fell|falling|worsen(?:ed)?|"
+    r"increased|improved|gained|rose|rising|changed)\b",
+    re.IGNORECASE)
+_DAY_COMPARE_DECLINE_WORDS = re.compile(
+    r"\b(decreased?|declin(?:e[ds]?|ing)|dropp?ed|fell|falling|worsen(?:ed)?)\b", re.IGNORECASE)
+_DAY_COMPARE_IMPROVE_WORDS = re.compile(
+    r"\b(increased?|improv(?:e[ds]?|ing)|gain(?:ed)?|rose|rising)\b", re.IGNORECASE)
+
+
 def _handle_day_compare(message, raw_message, session):
     fb = raw_message if raw_message and raw_message != message else None
     d1, d2, found = entities.extract_two_dates(message)
@@ -2310,6 +2356,36 @@ def _handle_day_compare(message, raw_message, session):
         subject_label = dept_name
 
     filter_sql, filter_footer = _resolve_population_filter(message)
+
+    # Item #87 (bug C): "the employees"/"who decreased the most" language
+    # signals a per-EMPLOYEE delta ranking is wanted, not a single company-
+    # wide/department-wide average delta - only when no single specific
+    # employee was already resolved above (a named person still gets their
+    # own existing single-subject comparison, untouched).
+    if employee_id is None and _DAY_COMPARE_PER_EMPLOYEE_PATTERN.search(message):
+        metric_key = metric_keys[0] if metric_keys else queries.DEFAULT_DAY_COMPARE_METRIC
+        if _DAY_COMPARE_DECLINE_WORDS.search(message):
+            ascending, direction_label = True, "who decreased the most"
+        elif _DAY_COMPARE_IMPROVE_WORDS.search(message):
+            ascending, direction_label = False, "who increased the most"
+        else:
+            ascending, direction_label = True, "ranked by change"
+        rank_rows, label = queries.day_compare_ranking(
+            d1, d2, dept_name=dept_name, metric_key=metric_key, filter_sql=filter_sql, ascending=ascending)
+        if session is not None:
+            _pe_result_ids = [r.get("employee_id") for r in rank_rows if r.get("employee_id") is not None]
+            session_store.set_query_context(
+                session, last_operation="rank_bottom" if ascending else "rank_top",
+                last_dimension="employee", last_result_ids=_pe_result_ids,
+                ascending=ascending, metric=[metric_key], period_phrase=None,
+            )
+            session_store.set_last_answer_filters(
+                session, label=f"the {label} comparison ({d1} vs {d2})",
+                **_default_filters_from_message(message))
+        return ChatResponse(
+            reply=format_day_compare_ranking(rank_rows, d1, d2, label, direction_label, filter_footer),
+            rows=rank_rows)
+
     results = queries.day_compare(d1, d2, dept_name=dept_name, employee_id=employee_id, metric_keys=metric_keys, filter_sql=filter_sql)
     if session is not None:
         session_store.set_last_answer_filters(
@@ -2749,10 +2825,24 @@ def _ps_off_caveat(emp_id, month, date_range):
 # explicit-month override in handle_message below: only metrics with a
 # known single-value counterpart here are eligible to be forced out of
 # full_trend_emp when the user names an explicit month/date range. Metrics
-# with no defined single-value emp intent (ot_hours/ot_days/pace_score) are
+# with no defined single-value emp intent (ot_hours/ot_days) are
 # deliberately left out - full_trend_emp remains their only path, so the
 # override leaves those alone rather than guessing a mapping that doesn't
 # exist.
+#
+# Item #87 (bug D): "pace_score" (the _detect_full_trend_metric() default
+# when no specific sub-metric/attendance-flag keyword is named at all, e.g.
+# "how did X perform in August") was ALSO deliberately left out originally
+# - meaning a plain "how did <employee> perform in <month>" question, which
+# names an explicit single month, still fell all the way through to
+# full_trend_emp's multi-month trend table instead of an August-only
+# answer, since this map had nothing to redirect it to. Mapped to
+# "emp_overview" (the existing "how is X doing/performing" single-period
+# PACE-score-plus-sub-metrics summary, queries.employee_detail() + `month`)
+# - the correct single-period counterpart for a bare "how did X perform"
+# question with no trend/comparison wording, reusing the exact same
+# handler an "is doing" phrasing of the same question already gets, rather
+# than inventing a new parallel one.
 _FULL_TREND_METRIC_TO_SINGLE_INTENT = {
     "wfh": "wfh_emp",
     "visit": "visit_emp",
@@ -2764,6 +2854,7 @@ _FULL_TREND_METRIC_TO_SINGLE_INTENT = {
     "effectiveness": "emp_effectiveness",
     "discipline": "emp_discipline",
     "working_pct": "emp_working_pct",
+    "pace_score": "emp_overview",
 }
 
 
@@ -3682,6 +3773,23 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
 
     if intent in ("dept_best", "dept_worst", "dept_avg"):
         ascending = intent == "dept_worst"
+        # Item #87 (bug A): "which/what department has the lowest/highest
+        # X" asks for ONE department, not a full ranking table - collapse to
+        # limit=1 for this specific singular phrasing shape. Same precedent
+        # as the limit=1 collapse already added to metric_ranking() (search
+        # "failure M" above) and to the extraction cascade's own is_ranking
+        # branch (_SINGULAR_WHICH_ENTITY) - deliberately keyed off `limit is
+        # None` (no explicit count was extracted from the message at all),
+        # so an explicit plural/ranking ask ("3 departments with the lowest
+        # X", "top 5 departments", "rank all departments") is completely
+        # unaffected: entities.extract_limit() already sets a real `limit`
+        # for those phrasings before this branch ever runs, so the singular
+        # collapse below never fires for them.
+        if limit is None and re.search(
+                r"\b(?:which|what)\b[^.?!]{0,15}\bdepartment\b(?!s)[^.?!]{0,40}"
+                r"\b(?:has|had|is|scored)\b[^.?!]{0,20}\b(?:lowest|highest|best|worst)\b",
+                message, re.IGNORECASE):
+            limit = 1
         # Item B: last-60-days default when nothing was named at all (see
         # the _METRIC_INTENTS branch above for the full rationale).
         _dr_month, _dr_date_range = month, None

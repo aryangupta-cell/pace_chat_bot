@@ -1339,8 +1339,9 @@ def match_intent(text):
 
 
 FALLBACK_MESSAGE = (
-    "Hi there, currently I can answer questions about attendance, PACE score, and productivity. "
-    "For example:\n\n"
+    "Hi there, I can answer questions about PACE score and status, attendance, and productivity "
+    "(engagement/effectiveness/discipline, WFH/visits/leaves, rankings, comparisons, and trends), "
+    "for a person, department, or team, with follow-up questions. For example:\n\n"
     "1. PACE Score of Aryan Gupta.\n"
     "2. Worst attendance in AI Labs this month.\n"
     "3. Top 5 by pace score in IT-Development.\n"

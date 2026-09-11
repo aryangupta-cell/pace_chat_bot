@@ -131,7 +131,7 @@ function initChatWidget({ chatEl, inputEl, sendBtnEl }) {
   sendBtnEl.addEventListener('click', send);
   inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
 
-  addMessage("Hi! Ask me about attendance or productive time (optionally mention a department and/or month).", 'bot');
+  addMessage("Hi! Ask me about PACE score/status, attendance, or productivity (sub-metrics, rankings, comparisons, trends) — optionally mention a person, department, and/or month, and I'll follow conversational context too.", 'bot');
 
   return { addMessage, send };
 }
