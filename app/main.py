@@ -4013,6 +4013,44 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     if rule_intent in _EMP_FIELD_INTENTS and _detect_build_query_filters(message):
         rule_intent = None
 
+    # Item #76 (Phase 3, Part B): a third instance of the same failure class,
+    # this time a DIMENSION mismatch rather than a metric/filter one. A
+    # family of old intents (declining/improving/most_disciplined/
+    # least_disciplined/engagement_high|low/effectiveness_high|low/
+    # most_late_comings/most_early_leavings/most_deficient_hours/
+    # highest_working_pct) always rank/report at EMPLOYEE grain - live-
+    # verified: "which department has the biggest pace score drop this
+    # month" matched "declining" (which has no department-vs-department
+    # concept at all) and silently answered "no employees had enough data",
+    # ignoring that a DEPARTMENT-level ranking was asked for; "which
+    # manager's team has the lowest discipline this month" matched
+    # "least_disciplined" and returned an employee list instead of a
+    # per-manager-team ranking. dept_best/dept_worst/rm_ranking_best/
+    # rm_ranking_worst already solve exactly this for the "score"/pct-capped
+    # wording they explicitly cover (item #73) - this extends the same
+    # "dimension-explicit phrasing wins" precedent as a redirect (not a
+    # rewrite) for every OTHER employee-level-only intent: whenever the
+    # message explicitly names "department"/"dept" or "RM/manager/reporting
+    # manager team" as the ranking scope, null the employee-level match so
+    # classify()/the extraction cascade's ranking support (dimension=
+    # department|rm) - or, failing that, the clearly-labeled AI-generated
+    # sql_fallback - answers the dimension actually asked for instead of a
+    # silently-substituted employee-level one.
+    _EMPLOYEE_LEVEL_ONLY_RANKING_INTENTS = {
+        "declining", "improving", "most_disciplined", "least_disciplined",
+        "engagement_high", "engagement_low", "effectiveness_high", "effectiveness_low",
+        "most_late_comings", "most_early_leavings", "most_deficient_hours", "highest_working_pct",
+    }
+    _DIMENSION_SCOPE_OVERRIDE_PATTERN = re.compile(
+        r"\bwhich\s+(?:dept|department)\b|\b(?:dept|department)\b[^.?!]{0,20}\b(?:most|least|highest|lowest|best|worst|top|bottom|biggest)\b"
+        r"|\bwhich\s+(?:rm|manager|reporting manager)(?:'s)?\s*team\b"
+        r"|\b(?:rm|manager|reporting manager)(?:'s)?\s*team\b[^.?!]{0,20}\b(?:most|least|highest|lowest|best|worst|top|bottom|biggest)\b",
+        re.IGNORECASE,
+    )
+    if (rule_intent in _EMPLOYEE_LEVEL_ONLY_RANKING_INTENTS
+            and _DIMENSION_SCOPE_OVERRIDE_PATTERN.search(message)):
+        rule_intent = None
+
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO
     # explicit-regex-match an old intent's pattern directly (e.g. "day level
