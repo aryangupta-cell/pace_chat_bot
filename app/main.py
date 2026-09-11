@@ -4678,7 +4678,7 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             _fte_emp_id = "ambiguous"
         _fte_dept_name, _fte_dept_candidates = entities.extract_department(message, fallback_text=raw_message)
         if not _fte_emp_id and not _fte_dept_name and not _fte_dept_candidates:
-            if re.search(r"\b(declin\w*|drop\w*|fell|decreas\w*|worse|improv\w*|increas\w*|better)\b", message, re.IGNORECASE):
+            if re.search(r"\b(declin\w*|drop\w*|fell|fall\w*|decreas\w*|worse|improv\w*|increas\w*|better)\b", message, re.IGNORECASE):
                 rule_intent = "pace_delta_ranking_cw"
 
     # Item #72 (see the fuller override comment below): live testing found
