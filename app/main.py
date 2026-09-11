@@ -3352,11 +3352,37 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             _mr_month = None
             _mr_date_range = queries.default_period_last_60_days()
             _mr_scope_note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) + _period_note(None, _mr_date_range)
+        # Item #86 (failure M, part of the K/L/M/N/O chain): "which employee
+        # has/had the lowest/highest X (there)?" asks for ONE entity, not a
+        # ranked table - collapse to limit=1 for this specific singular
+        # phrasing shape. Purely additive (only changes `limit` for this one
+        # narrow phrasing), same precedent as the identical collapse added
+        # to the extraction cascade's own is_ranking branch this round.
+        if limit is None and re.search(
+                r"\b(?:which|who)\b[^.?!]{0,15}\b(?:employee|person)\b[^.?!]{0,40}"
+                r"\b(?:has|had|is|scored)\b[^.?!]{0,20}\b(?:lowest|highest|best|worst)\b",
+                message, re.IGNORECASE):
+            limit = 1
         rows = queries.metric_ranking(
             metric_key, dept_name, _mr_month, ascending=ascending, employee_ids=employee_ids,
             limit=limit, reporting_user_id=manager_id if employee_ids is None else None, date_range=_mr_date_range,
         )
         label = queries.METRICS[metric_key][1]
+        if session is not None and rows:
+            # Item #86: additive conversational-memory bookkeeping (this
+            # shared handler previously only called set_last_list(), never
+            # set_query_context()) - same "record what a ranking answer just
+            # found" precedent as item #84's extraction-cascade fix and this
+            # round's dept_best/dept_worst fix, so a later pronoun follow-up
+            # ("their weakest area", "was that area also...") has real
+            # per-employee state to resolve against instead of falling back
+            # to a company-/department-wide default.
+            _mr_result_ids = [r.get("employee_id") for r in rows if r.get("employee_id") is not None]
+            session_store.set_query_context(
+                session, last_operation="rank_bottom" if ascending else "rank_top",
+                last_dimension="employee", last_result_ids=_mr_result_ids,
+                ascending=ascending, metric=[metric_key], period_phrase=None,
+            )
         if session is not None:
             def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=500,
                        _metric_key=metric_key, _ascending=ascending, _label=label, _rid=manager_id):
@@ -4831,22 +4857,32 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # (e.g. the message doesn't actually carry the "which department" half
     # of this shape) - never guesses beyond Decision 1's own definition.
     _DRIVING_PERFORMANCE_PATTERN = re.compile(
-        r"\bemployees?\b[^.?!]{0,60}\bdriving\b|\bdriving\b[^.?!]{0,60}\bperformance\b"
-        # Item #86: a second phrasing of the SAME 2-clause shape - "which
-        # department has the worst X, and who's struggling there" - no
-        # "employees"/"driving" word at all, but the same "department
-        # winner/loser -> who at the individual level" composition. Scoped
-        # tightly (requires BOTH a department mention and a ranking/
-        # superlative word alongside "struggling", not a bare "who's
-        # struggling" anywhere) so this doesn't false-positive on an
-        # unrelated single-clause "who is struggling with X" question -
-        # _handle_driving_performance() itself also requires a literal
-        # "department" mention before it will do anything, as a second,
-        # independent guard.
-        r"|\bdepartments?\b[^.?!]{0,80}\b(?:worst|lowest|best|highest)\b[^.?!]{0,60}\bstruggl\w*\b"
-        r"|\b(?:worst|lowest|best|highest)\b[^.?!]{0,60}\bdepartments?\b[^.?!]{0,80}\bstruggl\w*\b",
+        r"\bemployees?\b[^.?!]{0,60}\bdriving\b|\bdriving\b[^.?!]{0,60}\bperformance\b",
         re.IGNORECASE)
-    if _DRIVING_PERFORMANCE_PATTERN.search(message):
+    # Item #86 follow-up 2: the "which department has the worst X, and who's
+    # struggling there" phrasing (added in a prior commit this same round)
+    # used tight [^.?!]{0,60}/{0,80} adjacency windows between "department",
+    # the superlative word, and "struggl*" - live-tested here with a longer,
+    # realistic sentence ("... over the last 60 days, and which employees
+    # are struggling there?") and the window between "lowest" and
+    # "struggling" alone measured ~68 chars, over the {0,60} cap, so the
+    # whole alternative silently failed to match and the message fell
+    # through to the OLD single-clause department-only path (no employee-
+    # level answer at all - not even the old 3-way clarification, since the
+    # gate itself never fired). Replaced the adjacency-window regex with 3
+    # independent presence checks (department word + superlative word +
+    # "struggl*" word, anywhere in the message, no distance limit) - still
+    # requires all 3 signals together so it doesn't false-positive on an
+    # unrelated single-clause "who is struggling with X" question (which
+    # only ever carries "struggl*" alone), and
+    # _handle_driving_performance() itself still independently requires a
+    # literal "department" mention before it will act, as a second guard.
+    _has_dept_word = re.search(r"\bdepartments?\b", message, re.IGNORECASE) is not None
+    _has_superlative_word = re.search(r"\b(?:worst|lowest|best|highest)\b", message, re.IGNORECASE) is not None
+    _has_struggle_word = re.search(r"\bstruggl\w*\b", message, re.IGNORECASE) is not None
+    if _DRIVING_PERFORMANCE_PATTERN.search(message) or (
+        _has_dept_word and _has_superlative_word and _has_struggle_word
+    ):
         _driving_result = _handle_driving_performance(raw_message, message, session)
         if _driving_result is not None:
             _driving_reply, _driving_rows = _driving_result
