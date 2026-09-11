@@ -1326,7 +1326,14 @@ def _extraction_llm_reply(raw_message, message, session):
     # new queryable column. Detected on the raw message so it composes with
     # whatever dimension/name/period/filters were already extracted above,
     # rather than being a new parallel intent.
-    _area_match = re.search(r"\b(strongest|weakest)\s+(?:area|metric|dimension|aspect)\b", raw_message, re.I)
+    # Word order varies in natural phrasing ("Rahul's strongest area" vs
+    # "which area is Rahul weakest in") - check both orders and derive the
+    # direction word from whichever one actually matched.
+    _area_dir_match = (
+        re.search(r"\b(strongest|weakest)\b[^.?!]{0,40}\b(?:area|metric|dimension|aspect)\b", raw_message, re.I)
+        or re.search(r"\b(?:area|metric|dimension|aspect)\b[^.?!]{0,40}\b(strongest|weakest)\b", raw_message, re.I)
+    )
+    _area_match = _area_dir_match
 
     # Re-resolve dimension_name through the EXISTING fuzzy-safe extraction
     # functions against the ORIGINAL message - never trust the LLM's own
@@ -2274,7 +2281,8 @@ _NEW_VOCAB_OVERRIDE_PATTERN = re.compile(
     # (ranking the 4 pct sub-metrics for one scope) with no equivalent
     # concept in any of the ~123 existing intents; must reach the
     # extraction cascade, never an old ranking/percentage intent.
-    r"|\b(strongest|weakest)\s+(area|metric|dimension|aspect)\b",
+    r"|\b(strongest|weakest)\b[^.?!]{0,40}\b(area|metric|dimension|aspect)\b"
+    r"|\b(area|metric|dimension|aspect)\b[^.?!]{0,40}\b(strongest|weakest)\b",
     re.IGNORECASE,
 )
 
@@ -3965,6 +3973,29 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # picked the intent.
     rule_intent = intents.match_intent(message)
     llm_result = llm_nlu.classify(raw_message)
+
+    # Item #76 (Phase 3, Part B): pace_score_best/pace_score_worst's own
+    # regex patterns (app/intents.py) are broad "top N employees"/"most/
+    # least score"-shaped matches that fire even when the message names a
+    # DIFFERENT metric entirely - live-verified this round: "top 5 employees
+    # by engagement last week" matched pace_score_best, which (per
+    # _METRIC_INTENTS above) always ranks by plain pace_score regardless of
+    # what was actually asked - the exact silent-wrong-metric failure mode
+    # this project must eliminate, just discovered in an OLD intent rather
+    # than the new cascade this time. Not this intent's FUNCTION being
+    # touched (per this round's constraints) - only a redirect, same
+    # established "narrow deterministic override" pattern as
+    # _NEW_VOCAB_OVERRIDE_PATTERN below: whenever the raw message names a
+    # specific non-pace_score metric, null the match so classify()/the
+    # extraction cascade's ranking support (which correctly detects the
+    # named metric) gets the turn instead.
+    _PACE_SCORE_BEST_WRONG_METRIC_PATTERN = re.compile(
+        r"\b(engagement|effectiveness|discipline|working\s*hours?|worked\s*hours?|capped|"
+        r"late[- ]?comings?|early[- ]?leav\w*|deficient|productive|whatsapp|"
+        r"ai\s*(tool|min)|tools?\s*(and|&)\s*mail)\b", re.IGNORECASE)
+    if (rule_intent in ("pace_score_best", "pace_score_worst")
+            and _PACE_SCORE_BEST_WRONG_METRIC_PATTERN.search(message)):
+        rule_intent = None
 
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO
