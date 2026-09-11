@@ -1267,9 +1267,15 @@ def _extraction_llm_reply(raw_message, message, session):
     # phrasing as an unrecognized-metric case - its metrics are SUPPOSED to
     # be empty at this point (the caller supplies the 4 area metrics itself
     # further down).
+    # Item #84: allow the plural "areas"/"metrics"/etc. too (e.g. "their
+    # weakest areas") - the original singular-only regex silently never
+    # matched a plural follow-up like this at all, live-confirmed this
+    # round as part of testing failure G ("what are their weakest areas?"
+    # right after a ranking) - a pre-existing gap, not introduced this
+    # round, but directly blocking that fix from ever being reached.
     _area_dir_match = (
-        re.search(r"\b(strongest|weakest)\b[^.?!]{0,40}\b(?:area|metric|dimension|aspect)\b", raw_message, re.I)
-        or re.search(r"\b(?:area|metric|dimension|aspect)\b[^.?!]{0,40}\b(strongest|weakest)\b", raw_message, re.I)
+        re.search(r"\b(strongest|weakest)\b[^.?!]{0,40}\b(?:areas?|metrics?|dimensions?|aspects?)\b", raw_message, re.I)
+        or re.search(r"\b(?:areas?|metrics?|dimensions?|aspects?)\b[^.?!]{0,40}\b(strongest|weakest)\b", raw_message, re.I)
     )
     _area_match = _area_dir_match
     if not metrics:
