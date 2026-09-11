@@ -3997,6 +3997,22 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             and _PACE_SCORE_BEST_WRONG_METRIC_PATTERN.search(message)):
         rule_intent = None
 
+    # Item #76 (Phase 3, Part B): the same silent-wrong-population failure
+    # mode, found in a second old-intent family this round. _EMP_FIELD_INTENTS
+    # (emp_pace_score/emp_late_comings/emp_engagement/etc.) all resolve
+    # through a single plain whole-month lookup with NO ps/visit/shift/WFH
+    # filter support at all - live-verified: "late comings for Aryan Gupta on
+    # OT days in August" matched emp_late_comings and silently returned his
+    # WHOLE-MONTH late-coming count (2), completely ignoring "on OT days".
+    # Same redirect-not-modify fix as above: whenever the raw message
+    # actually names an explicit population filter that build_query() DOES
+    # support (reusing the exact same deterministic detector
+    # _detect_build_query_filters() already uses for the rule-based
+    # build_query() callers), null the match so classify()/the extraction
+    # cascade - which correctly applies the named filter - gets the turn.
+    if rule_intent in _EMP_FIELD_INTENTS and _detect_build_query_filters(message):
+        rule_intent = None
+
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO
     # explicit-regex-match an old intent's pattern directly (e.g. "day level
