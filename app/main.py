@@ -3669,10 +3669,39 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                                         limit=limit, ascending=ascending)
             label = _BUILD_QUERY_METRIC_LABELS.get(bq_metric, bq_metric)
             table = _format_build_query_rows(rows, "department", [bq_metric])
+            # Item #86 (failure O's K/L/M/N chain, item #83 section 1's
+            # class-(d) gap): this rule-based department ranking previously
+            # never recorded ANY conversational memory of its result - same
+            # confirmed gap as the extraction cascade's own ranking branch
+            # had before item #84's fix, just in a different code path (this
+            # one is matched BEFORE the extraction cascade ever runs, so
+            # that fix alone can't reach it). Pure additive bookkeeping -
+            # the query/ranking logic above is unchanged - so a later "that
+            # department"/"there" follow-up has something real to resolve
+            # against instead of nothing.
+            if session is not None and rows:
+                session_store.push_context(session, dept_name=rows[0].get("dept_name"))
+                session_store.set_query_context(
+                    session, last_operation="rank_bottom" if ascending else "rank_top",
+                    last_dimension="department",
+                    last_result_ids=[r.get("dept_name") for r in rows if r.get("dept_name")],
+                    ascending=ascending, metric=[bq_metric], period_phrase=None,
+                )
             return ChatResponse(reply=f"Departments ranked by {label}:\n\n{table}", rows=rows)
 
         metric_key = "pace_score"
         rows = queries.dept_ranking(metric_key, _dr_month, ascending=ascending, limit=limit, date_range=_dr_date_range)
+        # Item #86: same additive conversational-memory bookkeeping as the
+        # bq_metric branch above, for the far more common plain-pace_score
+        # path (dept_ranking()'s own row shape uses "dept_name" too).
+        if session is not None and rows:
+            session_store.push_context(session, dept_name=rows[0].get("dept_name"))
+            session_store.set_query_context(
+                session, last_operation="rank_bottom" if ascending else "rank_top",
+                last_dimension="department",
+                last_result_ids=[r.get("dept_name") for r in rows if r.get("dept_name")],
+                ascending=ascending, metric=[metric_key], period_phrase=None,
+            )
         return ChatResponse(reply=f"Departments ranked by {queries.METRICS[metric_key][1]}:\n\n{format_dept_rows(rows, metric_key)}", rows=rows)
 
     # RM (reporting-manager) team ranking - "which RM team has the most/
