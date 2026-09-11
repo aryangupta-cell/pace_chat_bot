@@ -1126,7 +1126,7 @@ def _format_build_query_rows(rows, dimension, metrics, name_label=None):
 _WANTS_LIST_PATTERN = re.compile(r"\blist\b", re.IGNORECASE)
 
 
-def build_query_overview_reply(dimension, name, message="", period=None, session=None):
+def build_query_overview_reply(dimension, name, message="", period=None, session=None, display_name=None):
     """Shared helper: runs queries.build_query() for a single named
     employee/RM/department scope and formats a reply - used both by the
     'how is ai labs doing'-style bug fix (redirecting a failed single-
@@ -1155,7 +1155,17 @@ def build_query_overview_reply(dimension, name, message="", period=None, session
     wants_list = dimension != "employee" and _WANTS_LIST_PATTERN.search(message or "") is not None
     # "company" scope has no name at all (no department/RM/employee named) -
     # label it explicitly rather than printing "None" anywhere in the reply.
-    name_label = name if name else "The whole company"
+    # `name` doubles as build_query()'s own name_filter, which for
+    # dimension="employee" is the numeric employee_id (the column build_query()
+    # actually filters on), NOT a display-friendly string - every
+    # dimension="employee" caller was passing the raw id straight through as
+    # the label too, so replies like "average meeting minutes for Rudhi" showed
+    # "36014 - 1 employee(s)..." instead of "Rudhi - ...". `display_name` lets
+    # a caller supply the real name separately for the label while `name`
+    # keeps filtering correctly; falls back to `name` unchanged for every
+    # dimension/caller that already passed a proper display string (department/
+    # RM/company all already did, only employee-dimension callers had this bug).
+    name_label = display_name if display_name else (name if name else "The whole company")
 
     def _summary_reply():
         rows = queries.build_query(dimension, metrics, filters=filters, period=period, name_filter=name, limit=1)
@@ -2589,7 +2599,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         if avg_mgr_id:
             reply, rows = build_query_overview_reply("rm", avg_mgr_name, message, period=avg_period, session=session)
         elif avg_emp_id:
-            reply, rows = build_query_overview_reply("employee", avg_emp_id, message, period=avg_period, session=session)
+            reply, rows = build_query_overview_reply("employee", avg_emp_id, message, period=avg_period, session=session, display_name=avg_emp_name)
         elif avg_dept_name and not avg_dept_candidates:
             reply, rows = build_query_overview_reply("department", avg_dept_name, message, period=avg_period, session=session)
         else:
@@ -4438,7 +4448,7 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         _rl_date_start, _rl_date_end, _rl_date_mentioned = entities.extract_date_range(message)
         _rl_period = (_rl_date_start, _rl_date_end) if _rl_date_mentioned else None
         if _rl_emp_id:
-            reply, rows = build_query_overview_reply("employee", _rl_emp_id, message, period=_rl_period, session=session)
+            reply, rows = build_query_overview_reply("employee", _rl_emp_id, message, period=_rl_period, session=session, display_name=_rl_emp_name)
             return ChatResponse(reply=reply, rows=rows)
         if _rl_dept_name:
             reply, rows = build_query_overview_reply("department", _rl_dept_name, message, period=_rl_period, session=session)
@@ -4549,7 +4559,7 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         _bq_date_start, _bq_date_end, _bq_date_mentioned = entities.extract_date_range(message)
         _bq_period = (_bq_date_start, _bq_date_end) if _bq_date_mentioned else None
         if _bq_emp_id:
-            reply, rows = build_query_overview_reply("employee", _bq_emp_id, message, period=_bq_period, session=session)
+            reply, rows = build_query_overview_reply("employee", _bq_emp_id, message, period=_bq_period, session=session, display_name=_bq_emp_name)
             return ChatResponse(reply=reply, rows=rows)
         if _bq_dept_name and not _bq_dept_candidates:
             reply, rows = build_query_overview_reply("department", _bq_dept_name, message, period=_bq_period, session=session)
