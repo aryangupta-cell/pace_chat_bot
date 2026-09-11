@@ -4265,6 +4265,64 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     if _filter_meta_response is not None:
         return _filter_meta_response
 
+    # --- Item #84: two DELIBERATELY-DEFERRED ambiguities (per this round's
+    # task brief - a business-decision call, not something to guess at).
+    # Both checked BEFORE intent classification, same "deterministic safety
+    # check wins" precedent as the filter-meta-followup check above, so
+    # neither can ever be silently answered by a guessed reading.
+    #
+    # (1) "which employees are driving <department>'s performance" is
+    # genuinely ambiguous between at least 3 readings (top individual
+    # scorers / biggest month-over-month improvers / biggest positive
+    # deviation from the company average) - see SESSION_HANDOFF.md item
+    # #83 section 5. Live-confirmed this round: without this check, the
+    # "driving performance" clause was silently DROPPED (the rest of the
+    # question, e.g. a department ranking, still answered) rather than
+    # flagged - which is not a fabricated number, but also isn't the
+    # controlled clarification the task requires. Checked on the raw
+    # message so it fires regardless of what else the question also asks.
+    _DRIVING_PERFORMANCE_PATTERN = re.compile(
+        r"\bemployees?\b[^.?!]{0,60}\bdriving\b|\bdriving\b[^.?!]{0,60}\bperformance\b",
+        re.IGNORECASE)
+    if _DRIVING_PERFORMANCE_PATTERN.search(message):
+        return ChatResponse(
+            reply=(
+                "\"Which employees are driving that performance\" could mean a few different things — "
+                "which would you like?\n"
+                "1. The top individual scorers in that scope right now\n"
+                "2. The employees with the biggest month-over-month improvement\n"
+                "3. The employees contributing the most above the company average\n\n"
+                "Let me know which one, and I can pull that up (or ask me any other part of your "
+                "question separately in the meantime)."
+            ),
+            needs_clarification=True,
+            clarification_options=["Top scorers", "Biggest improvers", "Biggest above-average contributors"],
+        )
+
+    # (2) "highest AND lowest" in one question (e.g. "who has the highest
+    # and lowest PACE among WFH employees") - the exact row-count semantics
+    # (top-1+bottom-1 of the full filtered population vs. of whatever N is
+    # shown) is a NEW operation type not yet wired up (see SESSION_HANDOFF.md
+    # item #83 section 5) - live-confirmed this round: without this check,
+    # the question silently answered with just a single-direction ranking
+    # table, ignoring the "and lowest"/"and highest" half entirely. A
+    # controlled fallback here beats guessing which semantics to apply.
+    _BOTH_ENDS_PATTERN = re.compile(
+        r"\bhighest\b[^.?!]{0,40}\band\b[^.?!]{0,10}\blowest\b"
+        r"|\blowest\b[^.?!]{0,40}\band\b[^.?!]{0,10}\bhighest\b"
+        r"|\bbest\b[^.?!]{0,40}\band\b[^.?!]{0,10}\bworst\b"
+        r"|\bworst\b[^.?!]{0,40}\band\b[^.?!]{0,10}\bbest\b",
+        re.IGNORECASE)
+    if _BOTH_ENDS_PATTERN.search(message):
+        return ChatResponse(
+            reply=(
+                "I can look up the highest or lowest separately — which would you like, or both "
+                "(as two separate answers)?"
+            ),
+            needs_clarification=True,
+            clarification_options=["Highest only", "Lowest only", "Both, separately"],
+        )
+
     # --- Bare superlative direction follow-up ("least", "most", "highest",
     # "lowest", ...) right after a ranking (item #63) - checked BEFORE intent
     # classification (both rule-based AND the fuzzy fallback inside
@@ -4487,6 +4545,37 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             _std_emp_id = "ambiguous"  # let subscore_trend_emp's own clarification fire, unchanged
         if not _std_emp_id:
             rule_intent = "subscore_delta_ranking"
+
+    # Item #84 (Finding 3 follow-up, discovered via this round's own live-
+    # test instruction): "who are the employees whose PACE score has
+    # declined the most compared with the previous month" does NOT match
+    # _SUBSCORE_TREND_PATTERNS (no engagement/effectiveness/discipline word
+    # present) - live-confirmed this round it instead reaches match_intent()'s
+    # FUZZY fallback (_fuzzy_match_intent), which matches "full_trend_emp"
+    # against that intent's own few-shot examples ("pace score trend", "score
+    # trend over time", "month on month score") purely on string similarity,
+    # with - same class of bug - no requirement that a specific employee be
+    # named. full_trend_emp's handler then fails the identical way
+    # ("I couldn't find that employee"). Same redirect-not-rewrite fix: when
+    # no employee (and no department) is resolvable, this is really a
+    # company-/department-wide PACE-SCORE trend ranking (not a sub-metric
+    # one - no engagement/effectiveness/discipline word was named, so
+    # subscore_delta_ranking above doesn't apply) - redirect to the
+    # EXISTING score_drop_ranking/score_improvement_alltime intents
+    # (item #74/#75's already-verified precomputed pace_score_delta
+    # ranking), picking direction from the same declin*/drop*/fell vs
+    # improv*/increas* wording used elsewhere in this cascade.
+    if rule_intent == "full_trend_emp":
+        try:
+            _fte_emp_id, _ = entities.extract_employee(message, fallback_text=raw_message)
+        except entities.Ambiguous:
+            _fte_emp_id = "ambiguous"
+        _fte_dept_name, _fte_dept_candidates = entities.extract_department(message, fallback_text=raw_message)
+        if not _fte_emp_id and not _fte_dept_name and not _fte_dept_candidates:
+            if re.search(r"\b(declin\w*|drop\w*|fell|decreas\w*|worse)\b", message, re.IGNORECASE):
+                rule_intent = "score_drop_ranking"
+            elif re.search(r"\b(improv\w*|increas\w*|better)\b", message, re.IGNORECASE):
+                rule_intent = "score_improvement_alltime"
 
     # Item #72 (see the fuller override comment below): live testing found
     # this goes deeper than classify() alone - some of these phrasings ALSO
