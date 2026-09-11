@@ -2332,7 +2332,25 @@ _NEW_VOCAB_OVERRIDE_PATTERN = re.compile(
     # concept in any of the ~123 existing intents; must reach the
     # extraction cascade, never an old ranking/percentage intent.
     r"|\b(strongest|weakest)\b[^.?!]{0,40}\b(area|metric|dimension|aspect)\b"
-    r"|\b(area|metric|dimension|aspect)\b[^.?!]{0,40}\b(strongest|weakest)\b",
+    r"|\b(area|metric|dimension|aspect)\b[^.?!]{0,40}\b(strongest|weakest)\b"
+    # Item #79: engagement_minutes/tasks_*/todos_*/meeting_count are new
+    # BUILD_QUERY_METRICS entries with NO equivalent concept in any of the
+    # ~123 existing intents - live-verified classify() (the LLM intent
+    # classifier, independent of the rule-based regex matcher and of
+    # extract_build_query()) still confidently guesses an old bare-percentage
+    # intent for "engagement minutes for X" (emp_engagement, ignoring
+    # "minutes" entirely and returning engagement_pct) since nothing
+    # previously told it not to. Null both rule_intent (harmless - none of
+    # these bare phrasings match any existing rule-based pattern, confirmed)
+    # and llm_result so extract_build_query() gets the turn instead. Bare
+    # "meeting minutes"/"meeting count" deliberately NOT included here (would
+    # incorrectly null the legitimate org-wide meeting_min_ranking/
+    # meeting_count_ranking use case that has no named employee at all) -
+    # the meeting-minutes collision is handled by the narrower avg-word-
+    # conditioned redirect near "meeting_min_ranking" above instead.
+    r"|\bengagement\s*minutes?\b"
+    r"|\btasks?\s*(created|assigned)\b"
+    r"|\btodos?\s*(created|assigned)\b",
     re.IGNORECASE,
 )
 
@@ -4175,7 +4193,15 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # correctly-matched "which department has the best/worst X" ranking
     # question to the LLM extraction cascade or sql_fallback instead of the
     # now-metric-aware rule-based handler.
-    if (rule_intent is not None and rule_intent not in ("dept_best", "dept_worst")
+    # Item #79: "average_metric"/"meeting_had_emp" are exempted for the same
+    # reason - both are the CORRECT deterministic handlers for the new
+    # engagement_minutes/meeting_minutes/tasks_*/todos_*/had-any-meetings
+    # vocabulary this round added (average_metric via the new
+    # BUILD_QUERY_METRICS entries + extended _AVG_METRIC_WORD; meeting_had_emp
+    # via the new DAY_FLAGS-reuse boolean intent) - nulling them here would
+    # send an already-correctly-resolved match to the LLM cascade instead.
+    if (rule_intent is not None
+            and rule_intent not in ("dept_best", "dept_worst", "average_metric", "meeting_had_emp")
             and _NEW_VOCAB_OVERRIDE_PATTERN.search(message)):
         rule_intent = None
 
