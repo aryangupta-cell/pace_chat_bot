@@ -4802,7 +4802,20 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # (e.g. the message doesn't actually carry the "which department" half
     # of this shape) - never guesses beyond Decision 1's own definition.
     _DRIVING_PERFORMANCE_PATTERN = re.compile(
-        r"\bemployees?\b[^.?!]{0,60}\bdriving\b|\bdriving\b[^.?!]{0,60}\bperformance\b",
+        r"\bemployees?\b[^.?!]{0,60}\bdriving\b|\bdriving\b[^.?!]{0,60}\bperformance\b"
+        # Item #86: a second phrasing of the SAME 2-clause shape - "which
+        # department has the worst X, and who's struggling there" - no
+        # "employees"/"driving" word at all, but the same "department
+        # winner/loser -> who at the individual level" composition. Scoped
+        # tightly (requires BOTH a department mention and a ranking/
+        # superlative word alongside "struggling", not a bare "who's
+        # struggling" anywhere) so this doesn't false-positive on an
+        # unrelated single-clause "who is struggling with X" question -
+        # _handle_driving_performance() itself also requires a literal
+        # "department" mention before it will do anything, as a second,
+        # independent guard.
+        r"|\bdepartments?\b[^.?!]{0,80}\b(?:worst|lowest|best|highest)\b[^.?!]{0,60}\bstruggl\w*\b"
+        r"|\b(?:worst|lowest|best|highest)\b[^.?!]{0,60}\bdepartments?\b[^.?!]{0,80}\bstruggl\w*\b",
         re.IGNORECASE)
     if _DRIVING_PERFORMANCE_PATTERN.search(message):
         _driving_result = _handle_driving_performance(raw_message, message, session)
