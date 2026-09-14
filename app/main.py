@@ -2044,37 +2044,52 @@ def _extraction_llm_reply(raw_message, message, session):
             return None
         row = rows[0] if rows else None
         present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None] if row else []
-        # Item #89: a single named employee with sparse/irregular recent
-        # attendance can have NO rows inside build_query()'s default fixed
-        # calendar-60-day window (queries.default_period_last_60_days())
-        # even though real data exists for them elsewhere (confirmed live:
-        # "PACE score of Kalpesh Nandkumar Thakur" works via
-        # queries.employee_detail(), which applies no date window at all
-        # when no month is named). Only when NO explicit period/day-count
-        # was requested by the user (period is None and latest_n_days is
-        # None - i.e. build_query() silently fell back to its own default
-        # window) and this is the single-employee scope (not department/rm,
-        # and not the group-pronoun ranking branch above, which is a
-        # separate code path untouched by this fallback) do we retry once
-        # using build_query()'s qualifying-ROW-count mode
-        # (latest_n_days=BUILD_QUERY_DEFAULT_PERIOD_DAYS) - this takes each
-        # employee's own latest N *worked* rows regardless of calendar
-        # proximity, the same rolling-window shape employee_detail()-style
-        # lookups already succeed with for sparse-attendance employees.
-        # Scoped narrowly to this one branch - department/company-scope
-        # queries and the group-pronoun ranking follow-up above are
-        # untouched.
-        if (not present and dimension == "employee" and name_filter
-                and period is None and latest_n_days is None):
+        # Item #89 (original diagnosis) blamed build_query()'s default fixed
+        # calendar-60-day window for this "no data" failure and retried with
+        # latest_n_days=BUILD_QUERY_DEFAULT_PERIOD_DAYS - but live-retesting
+        # (item #90) proved that fix never actually worked: the retry reuses
+        # the SAME default *qualifying-population filters* build_query()
+        # applies (ps_status="working" -> ps_worked_flag_day=1,
+        # visit_status="no" -> visit_flag='No', shift_type="Standard"), so
+        # for an employee who is simply excluded by one of THOSE filters -
+        # not by the date window - both the original query and item #89's
+        # retry return the identical empty result. Confirmed live for the
+        # reported case: "Kalpesh Nandkumar Thakur" has shift_type='Standard'
+        # every day (not a shift mismatch) but "PS working on 0 of 11 days
+        # (0%)" this month - ps_worked_flag_day is 0/null on 100% of his
+        # rows, so the default ps_status="working" filter alone excludes ALL
+        # of his data regardless of calendar window, while
+        # queries.employee_detail() (no filters at all) correctly shows his
+        # real engagement/effectiveness/discipline numbers for the exact
+        # same period. Real, generalized fix: when nothing is found for a
+        # single named employee, retry once with the 3 default qualifying-
+        # population filters (ps_status/visit_status/shift_type) relaxed to
+        # "any" wherever the user did NOT explicitly request a specific
+        # value (an explicit override in `filters` - e.g. "...during OT" -
+        # is never overridden), in addition to widening the date window via
+        # latest_n_days the same way item #89 already did whenever no
+        # explicit period was named. This is the same "give me THIS
+        # person's own real data, not a value conditioned on some default
+        # ranking population" fix as employee_detail()'s no-filter
+        # behavior - scoped narrowly to the single-employee _area_match
+        # branch (not department/rm/company scope, and not the group-
+        # pronoun ranking branch above, both untouched).
+        if not present and dimension == "employee" and name_filter:
+            _relaxed_filters = dict(filters)
+            for _fk in ("ps_status", "visit_status", "shift_type"):
+                _relaxed_filters.setdefault(_fk, "any")
+            _fallback_period, _fallback_latest_n_days = period, latest_n_days
+            if period is None and latest_n_days is None:
+                _fallback_latest_n_days = queries.BUILD_QUERY_DEFAULT_PERIOD_DAYS
             try:
                 fallback_rows = queries.build_query(
-                    dimension, _AREA_METRICS, filters=filters, period=None,
+                    dimension, _AREA_METRICS, filters=_relaxed_filters, period=_fallback_period,
                     name_filter=name_filter, limit=1,
-                    latest_n_days=queries.BUILD_QUERY_DEFAULT_PERIOD_DAYS)
+                    latest_n_days=_fallback_latest_n_days)
             except Exception:
                 logging.getLogger("pace_chatbot.main").exception(
                     "build_query() raised inside extraction-LLM cascade step "
-                    "(strongest/weakest area, sparse-attendance fallback)")
+                    "(strongest/weakest area, qualifying-population-filter/sparse-attendance fallback)")
                 fallback_rows = None
             if fallback_rows:
                 rows = fallback_rows
