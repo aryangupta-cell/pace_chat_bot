@@ -3583,11 +3583,26 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 r"\b(?:has|had|is|scored)\b[^.?!]{0,20}\b(?:lowest|highest|best|worst)\b",
                 message, re.IGNORECASE):
             limit = 1
+        # Item #91/#92 fix: this rule-based ranking path (pace_score_best/
+        # pace_score_worst and every other _METRIC_INTENTS entry) previously
+        # called queries.metric_ranking() with NO filter detection at all -
+        # unlike build_query()-based callers (e.g. _handle_rank_both_ends),
+        # which already run _detect_build_query_filters() on the raw message.
+        # Confirmed live: "top 5 PACE employees working from home" returned
+        # the exact same rows as the unfiltered top-5 (WFH silently dropped).
+        # Reuses the SAME shared detector every other build_query() caller
+        # uses - no new filter-detection logic invented here.
+        _mr_filters = _detect_build_query_filters(raw_message)
         rows = queries.metric_ranking(
             metric_key, dept_name, _mr_month, ascending=ascending, employee_ids=employee_ids,
             limit=limit, reporting_user_id=manager_id if employee_ids is None else None, date_range=_mr_date_range,
+            filters=_mr_filters,
         )
         label = queries.METRICS[metric_key][1]
+        if _mr_filters.get("work_mode") == "wfh":
+            label = f"{label} (WFH employees)"
+        elif _mr_filters.get("work_mode") == "office":
+            label = f"{label} (office employees)"
         if session is not None and rows:
             # Item #86: additive conversational-memory bookkeeping (this
             # shared handler previously only called set_last_list(), never
@@ -3605,9 +3620,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             )
         if session is not None:
             def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=500,
-                       _metric_key=metric_key, _ascending=ascending, _label=label, _rid=manager_id):
+                       _metric_key=metric_key, _ascending=ascending, _label=label, _rid=manager_id, _filters=_mr_filters):
                 _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
-                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None, date_range=date_range)
+                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None, date_range=date_range,
+                                                filters=_filters)
                 return f"Ranked by {_label}{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_metric_rows(_rows, _metric_key)}", _rows
             # Direction-flip closure for bare superlative follow-ups
             # ("least"/"most"/"highest"/"lowest" with nothing else) - see
@@ -3620,9 +3636,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             # word to "productive_low"/"productive_high" regardless of what
             # the real prior metric was - see SESSION_HANDOFF.md item #63).
             def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=500,
-                                 _metric_key=metric_key, _ascending=(not ascending), _label=label, _rid=manager_id):
+                                 _metric_key=metric_key, _ascending=(not ascending), _label=label, _rid=manager_id, _filters=_mr_filters):
                 _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
-                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None, date_range=date_range)
+                                                limit=limit, reporting_user_id=_rid if employee_ids is None else None, date_range=date_range,
+                                                filters=_filters)
                 _dir_word = "lowest" if _ascending else "highest"
                 return (f"Ranked by {_label} ({_dir_word} first)"
                         f"{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n"
@@ -4098,21 +4115,32 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         # still uses the ORIGINAL calendar-month pace_score_trend_ranking()
         # path below, completely unchanged in shape.
         if _no_period_named_at_all(message, session):
+            # Item #91/#92 fix: same WFH-filter-dropped bug as the plain
+            # _METRIC_INTENTS ranking branch above - pace_score_progress_ranking()
+            # never received any filter at all, so "who is making the most
+            # progress in PACE among WFH employees" silently ranked the whole
+            # company. Reuses the same shared detector, threaded through
+            # queries.pace_score_progress_ranking()'s new `filters` param.
+            _prog_filters = _detect_build_query_filters(raw_message)
             _prog_rows, _prog_meta = queries.pace_score_progress_ranking(
                 dept_name, employee_ids=employee_ids,
                 reporting_user_id=manager_id if employee_ids is None else None,
-                declining=_declining, limit=limit,
+                declining=_declining, limit=limit, filters=_prog_filters,
             )
             _n = _prog_meta["n"]
             _prog_scope_note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) \
                 + f" (latest {_n} vs previous {_n} qualifying Standard-shift rows)"
+            if _prog_filters.get("work_mode") == "wfh":
+                _prog_scope_note += " (WFH employees)"
+            elif _prog_filters.get("work_mode") == "office":
+                _prog_scope_note += " (office employees)"
             if session is not None:
                 def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, limit=500,
-                           _declining=_declining, _rid=manager_id, _label=_label):
+                           _declining=_declining, _rid=manager_id, _label=_label, _filters=_prog_filters):
                     _rows, _meta = queries.pace_score_progress_ranking(
                         dept_name, employee_ids=employee_ids,
                         reporting_user_id=_rid if employee_ids is None else None,
-                        declining=_declining, limit=limit,
+                        declining=_declining, limit=limit, filters=_filters,
                     )
                     _n2 = _meta["n"]
                     _note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) \

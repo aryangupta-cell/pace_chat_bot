@@ -242,10 +242,29 @@ METRICS = {
 
 
 def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=None, limit=None,
-                    reporting_user_id=None, date_range=None):
+                    reporting_user_id=None, date_range=None, filters=None):
     """Generic best/worst (or top-N/bottom-N via `limit`) ranking by any key
     in METRICS, optionally scoped by dept_name, employee_ids, and/or a
     specific manager's reporting_user_id.
+
+    `filters` (new, additive - item #91/#92 WFH-filter-dropped fix): optional
+    dict, currently only `work_mode` ("wfh" | "office" | None/"any") is
+    honoured, same values/semantics as build_query()'s own `filters["work_mode"]`
+    (item #86 Decision 3). Root cause this param fixes: this function (used by
+    the RULE-BASED `_METRIC_INTENTS` dispatch in main.py for plain "top/bottom
+    N ... employees" ranking phrasings, e.g. "top 5 PACE employees working
+    from home") is a separate, older code path from queries.build_query() -
+    it never had ANY work-mode filtering capability at all, so a WFH-scoped
+    ranked-list question silently fell through to the unfiltered company-wide
+    ranking (confirmed live: identical rows to the unfiltered top-N). Applied
+    as `wfh_status = 'Work From Home'` directly for the two pace_score
+    branches (queried straight off public.pace_1, day-level - exact, same
+    condition build_query() uses), and as an `employee_id IN (SELECT ... FROM
+    public.pace_1 WHERE wfh_status=... AND <same period>)` restriction for the
+    generic METRICS branch (queried off pace_chatbot_view, which does not
+    expose wfh_status - pace_chatbot_view itself is never modified, per this
+    project's standing rule). None (default) preserves the exact prior
+    behaviour (no work-mode filter) for every existing caller.
 
     BUG FIX (this round, Part 4b): for metric_key="pace_score" with a
     SPECIFIC month filter given, ranking on pace_chatbot_view's
@@ -271,6 +290,7 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
     capped-average-first-then-formula-once recompute as the single-month
     branch above (still avoiding the Jensen's-inequality bug), just filtered
     by `worked_day between` instead of `to_char(...) = month`."""
+    work_mode = (filters or {}).get("work_mode")
     if date_range is not None:
         start, end = date_range
         order = "asc" if ascending else "desc"
@@ -287,13 +307,16 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
                   and (%(dept_name)s is null or dept_name = %(dept_name)s)
                   and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
                   and (%(reporting_user_id)s is null or reporting_user_id = %(reporting_user_id)s)
+                  and (%(work_mode)s is null
+                       or (%(work_mode)s = 'wfh' and wfh_status = 'Work From Home')
+                       or (%(work_mode)s = 'office' and (wfh_status is null or wfh_status <> 'Work From Home')))
                 group by employee_id, emp_name, dept_name
                 order by metric_value {order} nulls last
                 limit {lim}
             """
             return run_query(sql, {
                 "date_start": start, "date_end": end, "dept_name": dept_name, "employee_ids": employee_ids,
-                "reporting_user_id": reporting_user_id,
+                "reporting_user_id": reporting_user_id, "work_mode": work_mode,
             })
         expr, _ = METRICS[metric_key]
         sql = f"""
@@ -305,13 +328,19 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
               and worked_day between %(date_start)s and %(date_end)s
               and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
               and (%(reporting_user_id)s is null or reporting_user_id = %(reporting_user_id)s)
+              and (%(work_mode)s is null or employee_id in (
+                    select employee_id from public.pace_1
+                    where worked_day between %(date_start)s and %(date_end)s
+                      and ((%(work_mode)s = 'wfh' and wfh_status = 'Work From Home')
+                           or (%(work_mode)s = 'office' and (wfh_status is null or wfh_status <> 'Work From Home')))
+              ))
             group by employee_id, emp_name, dept_name
             order by metric_value {order} nulls last
             limit {lim}
         """
         return run_query(sql, {
             "dept_name": dept_name, "date_start": start, "date_end": end, "employee_ids": employee_ids,
-            "reporting_user_id": reporting_user_id,
+            "reporting_user_id": reporting_user_id, "work_mode": work_mode,
         })
     month_list = _month_param(month)
     if metric_key == "pace_score" and month_list is not None and len(month_list) == 1:
@@ -328,13 +357,16 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
               and (%(dept_name)s is null or dept_name = %(dept_name)s)
               and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
               and (%(reporting_user_id)s is null or reporting_user_id = %(reporting_user_id)s)
+              and (%(work_mode)s is null
+                   or (%(work_mode)s = 'wfh' and wfh_status = 'Work From Home')
+                   or (%(work_mode)s = 'office' and (wfh_status is null or wfh_status <> 'Work From Home')))
             group by employee_id, emp_name, dept_name
             order by metric_value {order} nulls last
             limit {lim}
         """
         return run_query(sql, {
             "month": month_list[0], "dept_name": dept_name, "employee_ids": employee_ids,
-            "reporting_user_id": reporting_user_id,
+            "reporting_user_id": reporting_user_id, "work_mode": work_mode,
         })
     expr, _ = METRICS[metric_key]
     order = "asc" if ascending else "desc"
@@ -348,13 +380,19 @@ def metric_ranking(metric_key, dept_name, month, ascending=False, employee_ids=N
           and (%(month)s is null or to_char(worked_day,'YYYY-MM') = any(%(month)s))
           and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
           and (%(reporting_user_id)s is null or reporting_user_id = %(reporting_user_id)s)
+          and (%(work_mode)s is null or employee_id in (
+                select employee_id from public.pace_1
+                where (%(month)s is null or to_char(worked_day,'YYYY-MM') = any(%(month)s))
+                  and ((%(work_mode)s = 'wfh' and wfh_status = 'Work From Home')
+                       or (%(work_mode)s = 'office' and (wfh_status is null or wfh_status <> 'Work From Home')))
+          ))
         group by employee_id, emp_name, dept_name
         order by metric_value {order} nulls last
         limit {lim}
     """
     return run_query(sql, {
         "dept_name": dept_name, "month": month_list, "employee_ids": employee_ids,
-        "reporting_user_id": reporting_user_id,
+        "reporting_user_id": reporting_user_id, "work_mode": work_mode,
     })
 
 
@@ -3162,7 +3200,7 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     return run_query(sql, params)
 
 
-def pace_score_progress_ranking(dept_name=None, employee_ids=None, reporting_user_id=None, declining=False, limit=None, n=20):
+def pace_score_progress_ranking(dept_name=None, employee_ids=None, reporting_user_id=None, declining=False, limit=None, n=20, filters=None):
     """Item #88: "who is making progress / improving in PACE" with NO
     explicit comparison period named. Business rule (new this round, not a
     calendar-month comparison): rank employees by the delta between their
@@ -3194,11 +3232,11 @@ def pace_score_progress_ranking(dept_name=None, employee_ids=None, reporting_use
     """
     scope = ("department", dept_name) if dept_name else None
     latest_rows = build_query(
-        "employee", ["pace_score", "days_counted"], scope=scope, employee_ids=employee_ids,
+        "employee", ["pace_score", "days_counted"], filters=filters, scope=scope, employee_ids=employee_ids,
         reporting_user_id=reporting_user_id, latest_n_days=n, latest_n_days_offset=0, limit=100000,
     )
     prev_rows = build_query(
-        "employee", ["pace_score", "days_counted"], scope=scope, employee_ids=employee_ids,
+        "employee", ["pace_score", "days_counted"], filters=filters, scope=scope, employee_ids=employee_ids,
         reporting_user_id=reporting_user_id, latest_n_days=n, latest_n_days_offset=n, limit=100000,
     )
     prev_by_id = {r["employee_id"]: r for r in prev_rows}
