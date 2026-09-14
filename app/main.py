@@ -1566,7 +1566,12 @@ def _handle_dept_weakest_area_followup(raw_message, session):
     emp_metric = (qc.get("metric") or [None])[0]
     if not emp_ids or emp_metric not in _AREA_METRICS:
         return None
-    dept_name = session_store.get_recent_context(session, "dept_name")
+    # Item #92 fix: reads the dedicated `employee_dept_name` slot (see
+    # push_context()'s docstring) - the incidental department pushed by the
+    # single-employee weakest/strongest-area lookup this follow-up chains
+    # from - not the general `dept_name` slot (which must only ever hold an
+    # EXPLICITLY-named department, per its own documented contract).
+    dept_name = session_store.get_recent_context(session, "employee_dept_name")
     if not dept_name:
         return None
     try:
@@ -1894,9 +1899,12 @@ def _extraction_llm_reply(raw_message, message, session):
             # shape as the singular _area_match branch below, so record the
             # same query_context/sticky dept_name a follow-up like "was that
             # area also the weakest for the department overall?" needs - see
-            # _handle_dept_weakest_area_followup.
+            # _handle_dept_weakest_area_followup. Item #92 fix: same
+            # incidental-vs-explicit distinction as the singular branch below
+            # - goes into the dedicated `employee_dept_name` slot, never the
+            # general `dept_name` slot (see push_context()'s docstring).
             if _last_dept_name:
-                session_store.push_context(session, dept_name=_last_dept_name)
+                session_store.push_context(session, employee_dept_name=_last_dept_name)
             session_store.set_query_context(
                 session, last_operation="strongest_weakest", last_dimension="employee",
                 last_result_ids=[_last_eid], ascending=_want_weakest_grp,
@@ -2154,9 +2162,19 @@ def _extraction_llm_reply(raw_message, message, session):
             # so this is free from the row already fetched, no extra query.
             # Needed so a later "...for the department overall?" follow-up
             # (see _handle_dept_weakest_area_followup below) can resolve
-            # "the department" without the user re-naming it.
+            # "the department" without the user re-naming it. Item #92 fix
+            # (SESSION_HANDOFF.md item #91's "employee-chain step M" leak):
+            # this is an INCIDENTAL department (the employee's own, not
+            # something the user explicitly named), so it goes into the
+            # dedicated `employee_dept_name` sticky slot, NOT the general
+            # `dept_name` slot - previously writing straight into `dept_name`
+            # here caused a completely unrelated later question (e.g.
+            # "which employee has the highest PACE score?", no referential
+            # cue at all) to silently inherit and narrow to this department
+            # via the general dept-scope carry-forward elsewhere in this
+            # file, confirmed live in item #91.
             if row.get("dept_name"):
-                session_store.push_context(session, dept_name=row.get("dept_name"))
+                session_store.push_context(session, employee_dept_name=row.get("dept_name"))
         if session is not None:
             # Item #86 (failure O): records WHICH area/direction this single-
             # entity answer found, so a follow-up like "was that area also

@@ -63,6 +63,27 @@ def get_session(session_id):
             # since a day-vs-day pair is a fundamentally different shape
             # (two fixed snapshot days, not a period).
             "day_compare_dates": None,
+            # Item #92 fix (SESSION_HANDOFF.md item #91's "employee-chain
+            # step M" finding): item #86 (failure O) originally pushed a
+            # single-employee weakest/strongest-area lookup's OWN department
+            # into the general `dept_name` slot above, so a LATER "...for the
+            # department overall?" follow-up could resolve "the department"
+            # without the user re-naming it. But `dept_name` is documented
+            # (see the comment above this dict) as holding only what was
+            # EXPLICITLY named - an incidental department derived from an
+            # employee lookup is NOT an explicit mention, and live-testing
+            # (item #91) proved it leaking into completely unrelated
+            # follow-up questions with no referential cue at all (e.g. "which
+            # employee has the highest PACE score?" right after an unrelated
+            # employee's weakest-area answer silently narrowed to that
+            # employee's department). Fix: that one incidental push now goes
+            # into this SEPARATE field instead of `dept_name`, so it never
+            # feeds the general department-scope fallback
+            # (answer_intent()'s/handle_message()'s `dept_name = ...
+            # get_recent_context(session, "dept_name")` carry-forward) - only
+            # _handle_dept_weakest_area_followup (the one feature that
+            # actually needs it) reads this field.
+            "employee_dept_name": None,
         },
         # The single most-recent LIST-PRODUCING answer (a day-flag count/
         # list, a status count/list, or a ranking) - kept SEPARATE from
@@ -148,16 +169,27 @@ def _push_comparison_entity(session, entity_type, entity_id, entity_name):
 
 
 def push_context(session, dept_name=None, employee_id=None, employee_name=None, month=None,
-                  date_range=None, day_compare_dates=None, month_compare_months=None):
+                  date_range=None, day_compare_dates=None, month_compare_months=None,
+                  employee_dept_name=None):
     """Record what was EXPLICITLY named in this turn (pass None for anything
     not mentioned this turn - do not pass through an already-inherited
     value, so this only reflects real mentions, not propagated guesses).
     Each non-None field OVERWRITES the sticky value for that field and it
     then persists for the rest of the session (until overwritten again),
-    rather than aging out after a fixed number of turns."""
+    rather than aging out after a fixed number of turns.
+
+    `employee_dept_name` (item #92 fix): a SEPARATE slot from `dept_name`
+    for the one incidental (not explicitly-named) case - a single-employee
+    weakest/strongest-area lookup's own department, needed only so
+    _handle_dept_weakest_area_followup's "...for the department overall?"
+    follow-up can resolve it. Deliberately never written into `dept_name`
+    itself (see the sticky_context dict's own comment in get_session()) so
+    it can never leak into the general department-scope carry-forward that
+    `dept_name` feeds elsewhere - that carry-forward must stay restricted to
+    departments the user actually named."""
     ctx = session.setdefault("sticky_context", {
         "dept_name": None, "employee_id": None, "employee_name": None,
-        "month": None, "date_range": None,
+        "month": None, "date_range": None, "employee_dept_name": None,
     })
     if dept_name is not None:
         _push_comparison_entity(session, "department", dept_name, dept_name)
@@ -174,6 +206,8 @@ def push_context(session, dept_name=None, employee_id=None, employee_name=None, 
         ctx["day_compare_dates"] = day_compare_dates
     if month_compare_months is not None:
         ctx["month_compare_months"] = month_compare_months
+    if employee_dept_name is not None:
+        ctx["employee_dept_name"] = employee_dept_name
 
 
 def get_comparison_entities(session):
