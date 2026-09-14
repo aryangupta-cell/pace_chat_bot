@@ -530,6 +530,36 @@ def format_productive_rows(rows):
     return _render_table(headers, data)
 
 
+def format_progress_rows(rows, meta):
+    """Item #88: formats queries.pace_score_progress_ranking()'s latest-N-vs-
+    previous-N qualifying-row delta rows - same shape/spirit as
+    format_trend_rows() above, just for the row-count-window comparison
+    instead of the calendar-month comparison (different meta keys, no
+    partial-month caveat since this mode never depends on how far into the
+    current month we are)."""
+    n = meta["n"]
+    if not rows:
+        return (
+            f"No employees had at least {n} qualifying Standard-shift rows in both their latest "
+            f"and previous windows to show a reliable progress ranking."
+        )
+    if len(rows) == 1:
+        r = rows[0]
+        sign = "+" if r["pace_score_delta"] and r["pace_score_delta"] > 0 else ""
+        return (
+            f"{r['emp_name']} ({r['dept_name']}) — {sign}{_fmt(r['pace_score_delta'])} pts "
+            f"(latest {r['days_latest']} qualifying rows avg {_fmt(r['pace_score'])} vs previous "
+            f"{r['days_prev']} rows avg {_fmt(r['pace_score_prev'])})"
+        )
+    headers = ["#", "Employee", "Department", "Change (pts)", "Latest avg", "Previous avg", "Rows (latest/prev)"]
+    data = []
+    for i, r in enumerate(rows, 1):
+        sign = "+" if r["pace_score_delta"] and r["pace_score_delta"] > 0 else ""
+        data.append([i, r["emp_name"], r["dept_name"], f"{sign}{_fmt(r['pace_score_delta'])}",
+                     _fmt(r["pace_score"]), _fmt(r["pace_score_prev"]), f"{r['days_latest']}/{r['days_prev']}"])
+    return _render_table(headers, data)
+
+
 def format_trend_rows(rows, meta):
     note = ""
     if meta["partial_month"]:
@@ -3965,31 +3995,79 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         return ChatResponse(reply=f"New joiners{scope_note.replace(_period_note(month, date_range), '')}:\n\n{format_new_joiners(rows)}", rows=rows)
 
     if intent in ("improving", "declining"):
-        # Item B (SESSION_HANDOFF.md): this ranking is inherently a
-        # month-vs-prior-month DELTA (queries.pace_score_trend_ranking()
-        # internally computes prev_month = _prev_month(month) and compares
-        # the two) - a plain date-range window doesn't map onto that
-        # semantics, so "last 60 days" isn't literally applicable here.
-        # Judgment call, flagged in SESSION_HANDOFF.md: when NO period was
-        # named at all, use the last FULLY COMPLETED calendar month (vs the
-        # one before it) instead of the old default of the current,
-        # still-in-progress month (vs last month) - this is exactly the
-        # same underlying fix or item B everywhere else (avoid comparing
-        # against a partial/scarce-data month), applied in the way that
-        # actually fits this function's month-over-month mechanics.
-        _trend_month = _first_month(month)
+        _declining = intent == "declining"
+        _label = "declining" if _declining else "improving"
+        # Item #88: NEW default when NO period is named at all -
+        # "who is making progress/improving in PACE" (and equivalents, e.g.
+        # "who are the biggest PACE improvers") previously defaulted to a
+        # calendar-month comparison (item B's fix: the last FULLY COMPLETED
+        # month vs the one before it) - still the wrong default per this
+        # round's business rule even though item B stopped it from starving
+        # for data early in a month. New default: each employee's LATEST 20
+        # qualifying Standard-shift rows vs their PREVIOUS 20 qualifying rows
+        # (queries.pace_score_progress_ranking() - reuses item #76/#78's
+        # qualifying-row build_query(latest_n_days=...) mechanism via two
+        # calls, NOT a new query engine - see that function's docstring). An
+        # EXPLICIT period named in the message (a month, a month pair like
+        # "between July and August", or sticky month/date_range context)
+        # still uses the ORIGINAL calendar-month pace_score_trend_ranking()
+        # path below, completely unchanged in shape.
         if _no_period_named_at_all(message, session):
-            _trend_month = queries._prev_month(f"{datetime.date.today().year:04d}-{datetime.date.today().month:02d}")
+            _prog_rows, _prog_meta = queries.pace_score_progress_ranking(
+                dept_name, employee_ids=employee_ids,
+                reporting_user_id=manager_id if employee_ids is None else None,
+                declining=_declining, limit=limit,
+            )
+            _n = _prog_meta["n"]
+            _prog_scope_note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) \
+                + f" (latest {_n} vs previous {_n} qualifying Standard-shift rows)"
+            if session is not None:
+                def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, limit=500,
+                           _declining=_declining, _rid=manager_id, _label=_label):
+                    _rows, _meta = queries.pace_score_progress_ranking(
+                        dept_name, employee_ids=employee_ids,
+                        reporting_user_id=_rid if employee_ids is None else None,
+                        declining=_declining, limit=limit,
+                    )
+                    _n2 = _meta["n"]
+                    _note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) \
+                        + f" (latest {_n2} vs previous {_n2} qualifying Standard-shift rows)"
+                    return f"Who is {_label}{_note} (full list):\n\n{format_progress_rows(_rows, _meta)}", _rows
+                session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
+                                             dept_name=dept_name, employee_ids=employee_ids, team_label=team_label)
+                # Item #88 conversational follow-up: records that the last
+                # substantive answer was a progress/improvement ranking, so
+                # a later period-only follow-up ("tell me with respect to
+                # July and August") can redirect back into THIS same
+                # intent/direction instead of collapsing into a generic
+                # company-wide PACE score lookup - see the query_context
+                # check in handle_message() right before the Item #85
+                # redirect.
+                session_store.set_query_context(session, last_operation="progress_ranking", ascending=_declining)
+            return ChatResponse(reply=f"Who is {_label}{_prog_scope_note}:\n\n{format_progress_rows(_prog_rows, _prog_meta)}", rows=_prog_rows)
+
+        # Explicit period named - original calendar-month comparison.
+        # Item #88 fix: when TWO explicit months were named (e.g. "between
+        # July and August"), pace_score_trend_ranking() only ever compares
+        # its ONE `month` argument against the immediately-preceding
+        # calendar month (internally, prev_month = _prev_month(month)) - so
+        # the LATER of the two named months must be passed (comparing it
+        # against its own immediate predecessor), not the earlier/first one,
+        # or an adjacent-month pair like "July and August" would silently
+        # compare July-vs-June instead of the August-vs-July the user
+        # actually named. A single named month (the overwhelmingly common
+        # case) is unaffected - month[-1] and _first_month(month) agree when
+        # there's only one month.
+        _trend_month = month[-1] if isinstance(month, list) and month else _first_month(month)
         rows, meta = queries.pace_score_trend_ranking(
-            dept_name, _trend_month, declining=(intent == "declining"),
+            dept_name, _trend_month, declining=_declining,
             reporting_user_id=manager_id if employee_ids is None else None,
             employee_ids=employee_ids, limit=limit,
         )
-        label = "declining" if intent == "declining" else "improving"
         _trend_scope_note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) + _period_note(_trend_month, None)
         if session is not None:
             def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_trend_month, date_range=None, limit=500,
-                       _declining=(intent == "declining"), _rid=manager_id, _label=label):
+                       _declining=_declining, _rid=manager_id, _label=_label):
                 _rows, _meta = queries.pace_score_trend_ranking(
                     dept_name, _first_month(month), declining=_declining,
                     reporting_user_id=_rid if employee_ids is None else None,
@@ -3998,7 +4076,8 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 return f"Who is {_label}{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_trend_rows(_rows, _meta)}", _rows
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
                                          dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_trend_month, date_range=None)
-        return ChatResponse(reply=f"Who is {label}{_trend_scope_note}:\n\n{format_trend_rows(rows, meta)}", rows=rows)
+            session_store.set_query_context(session, last_operation="progress_ranking", ascending=_declining)
+        return ChatResponse(reply=f"Who is {_label}{_trend_scope_note}:\n\n{format_trend_rows(rows, meta)}", rows=rows)
 
     # --- Category A (new): Leave & absence ---
     if intent in ("leave_emp_check", "call_emp", "visit_emp", "wfh_emp", "d_score_emp",
@@ -5808,6 +5887,28 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         _single_intent = _FULL_TREND_METRIC_TO_SINGLE_INTENT.get(_trend_metric_key)
         if _single_intent is not None:
             intent = _single_intent
+
+    # --- Item #88: PACE-progress-ranking period-only follow-up ---
+    # A follow-up naming an explicit multi-month comparison right after a
+    # "who is making progress/improving in PACE" default-window answer (e.g.
+    # "Tell me with respect to July and August") carries NO intent-shaped
+    # keyword of its own - live-verified that, left alone, it collapses into
+    # whatever generic intent the rule/LLM matchers guess at from "July and
+    # August" alone (observed: a bare company-wide PACE-score lookup),
+    # losing the improvement-ranking framing entirely. Reuses query_context
+    # (item #84/#86's mechanism - see answer_intent()'s "improving"/
+    # "declining" branch, which sets last_operation="progress_ranking") to
+    # detect "the last substantive answer was a progress/improvement
+    # ranking" and forces the SAME operation/direction, just re-scoped to
+    # the newly-named period. Deliberately narrow: only fires when (a) the
+    # last answer was this exact operation and (b) THIS message names an
+    # explicit 2+ month comparison of its own - a message that already
+    # resolved to "improving"/"declining" on its own merits is left alone.
+    if session is not None and intent not in ("improving", "declining") \
+            and month_mentioned and isinstance(month, list) and len(month) >= 2:
+        _qc_progress = session_store.get_query_context(session) or {}
+        if _qc_progress.get("last_operation") == "progress_ranking":
+            intent = "declining" if _qc_progress.get("ascending") else "improving"
 
     # --- Conversational context carry-forward (feature) ---
     # Remember exactly what THIS message explicitly named, before any

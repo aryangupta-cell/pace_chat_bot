@@ -79,6 +79,19 @@ _IMPROVING_PATTERNS = [
     # project's established convention - no separate fuzzy handling needed
     # here.
     r"\bgoing up\b",
+    # item #88: "who are making progress (in PACE)" / "who are the biggest
+    # PACE improvers" - previously unmatched by any pattern here, so these
+    # phrasings either fell through to the LLM cascade (fine on their own)
+    # or, whenever the message ALSO happened to contain a date/month phrase
+    # ("...between July and August"), got hijacked by _DAY_LIST_PATTERNS'
+    # broad "who is/are ... <date phrase>" pattern before ever reaching this
+    # list or the LLM cascade at all (see the ("improving"...)/("declining"
+    # ...) reordering below _INTENTS, moved ahead of day_count/day_list for
+    # exactly this reason). "\bbiggest\b...\bimprovers?\b" allows up to 2
+    # words in between ("biggest PACE improvers", "biggest improvers") -
+    # deliberately generalized, not a literal-phrase patch.
+    r"\bmaking progress\b",
+    r"\bbiggest\b(?:\s+\w+){0,2}\s+improvers?\b",
 ]
 
 _DECLINING_PATTERNS = [
@@ -974,6 +987,17 @@ _INTENTS = [
     ("ps_exclude_metric", _PS_EXCLUDE_PATTERNS),
     ("ps_ratio_info", _PS_RATIO_PATTERNS),
     ("ps_explain", _PS_EXPLAIN_PATTERNS),
+    # item #88: "improving"/"declining" moved ahead of day_count/day_list -
+    # previously below, so a progress/improvement question that ALSO
+    # contains a date/month phrase ("...making progress...between July and
+    # August") was hijacked by _DAY_LIST_PATTERNS' broad "who is/are ...
+    # <date phrase>" pattern before ever reaching this list (day_list would
+    # then find no attendance/leave/WFH flag in the message and return an
+    # unrelated clarification). This reorder only changes routing for
+    # messages that match _IMPROVING_PATTERNS/_DECLINING_PATTERNS - every
+    # other day_count/day_list-routed question is unaffected.
+    ("declining", _DECLINING_PATTERNS),
+    ("improving", _IMPROVING_PATTERNS),
     ("day_count", _DAY_COUNT_PATTERNS),
     ("day_list", _DAY_LIST_PATTERNS),
     ("status_transitions", _STATUS_TRANSITION_PATTERNS),
@@ -1111,8 +1135,6 @@ _INTENTS = [
     ("score_drop_ranking", _LEAST_IMPROVED_PATTERNS),
     ("score_improvement_alltime", _MOST_IMPROVED_PATTERNS),
     ("pace_score_worst", _WORST_SUBSCORE_COMPANY_PATTERNS),
-    ("declining", _DECLINING_PATTERNS),
-    ("improving", _IMPROVING_PATTERNS),
     ("attendance_worst", _ATTENDANCE_WORST_PATTERNS),
     ("attendance_best", _ATTENDANCE_BEST_PATTERNS),
     ("productive_low", _PRODUCTIVE_LOW_PATTERNS),

@@ -2779,6 +2779,13 @@ BUILD_QUERY_DIMENSIONS = {
 # formula-once, same pattern as dept_ranking()/rm_ranking() - see their
 # docstrings for the Jensen's-inequality bug this avoids).
 BUILD_QUERY_METRICS = {
+    # Item #88 addition: raw row-count metric (distinct from n_employees,
+    # which is count(distinct employee_id) - always 1 for dimension=
+    # "employee"). Needed so pace_score_progress_ranking() can report how
+    # many qualifying rows actually fell in each employee's latest/previous
+    # window (a window can come up short of the requested `n` for an
+    # employee near the start of their tenure).
+    "days_counted": ("count(*)", "qualifying rows"),
     "engagement_pct": ("avg(engagement_pct)", "avg engagement %"),
     "effectiveness_pct": ("avg(effectiveness_pct)", "avg effectiveness %"),
     "discipline_pct": ("avg(discipline_pct)", "avg discipline %"),
@@ -2896,7 +2903,8 @@ _build_query_default_period = default_period_last_60_days
 
 
 def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None, scope=None,
-                 ascending=False, latest_n_days=None):
+                 ascending=False, latest_n_days=None, employee_ids=None, latest_n_days_offset=0,
+                 reporting_user_id=None):
     """General parametrized engine: SELECT <metrics> GROUP BY <dimension> FROM
     public.pace_1 WHERE <filters> AND <period>.
 
@@ -2948,6 +2956,24 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         every employee IN that department (item #59: response-shape
         switching from a department summary to its per-employee list reuses
         this, same rerun_list mechanism as the older ranking functions).
+    employee_ids: optional list of employee_id values to restrict the
+        qualifying population to (item #88 addition, additive - None means
+        no filter, unchanged behaviour). Used for team-scoped callers (a
+        resolved manager's team) the same way every other ranking function
+        in this file already supports an `employee_ids` filter.
+    reporting_user_id: optional single manager id (item #88 addition,
+        additive) - same "direct reports of this manager" filter every
+        other ranking function in this file already supports via
+        reporting_user_id on pace_1/the view.
+    latest_n_days_offset: item #88 addition, only meaningful together with
+        `latest_n_days` - shifts the row_number() window back by this many
+        rows, so latest_n_days=20/offset=20 selects each employee's rows
+        21-40 back (their "previous 20 qualifying rows") instead of their
+        latest 20. Default 0 (unchanged behaviour: latest N rows). Lets a
+        caller get two non-overlapping qualifying-row windows (latest vs
+        previous) from the SAME qualifying-population mechanism (item #76)
+        via two calls, instead of a new bespoke query - see
+        pace_score_progress_ranking() below.
 
     Returns a list of dict rows, one per group, each with the dimension's
     key column(s), `n_employees`, and one column per requested metric
@@ -3003,6 +3029,14 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         col = {"employee": "employee_id", "rm": "reporting_manager_name", "department": "dept_name"}[dimension]
         where.append(f"{col} = %(name_filter)s")
         params["name_filter"] = name_filter
+
+    if employee_ids:
+        where.append("employee_id = any(%(employee_ids)s)")
+        params["employee_ids"] = employee_ids
+
+    if reporting_user_id:
+        where.append("reporting_user_id = %(reporting_user_id)s")
+        params["reporting_user_id"] = reporting_user_id
 
     if dimension in ("rm", "department"):
         col = "reporting_manager_name" if dimension == "rm" else "dept_name"
@@ -3109,6 +3143,9 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     # above; every select/group-by/order-by expression is identical since
     # `filtered` carries every pace_1 column through unchanged (`select *`).
     params["latest_n_days"] = int(latest_n_days)
+    _offset = int(latest_n_days_offset or 0)
+    params["rn_lo"] = _offset
+    params["rn_hi"] = _offset + int(latest_n_days)
     sql = f"""
         with filtered as (
             select *,
@@ -3118,11 +3155,73 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         )
         select {", ".join(select_parts)}
         from filtered
-        where rn <= %(latest_n_days)s{group_by_clause}
+        where rn > %(rn_lo)s and rn <= %(rn_hi)s{group_by_clause}
         order by {order_col} {order_dir} nulls last
         limit %(limit)s
     """
     return run_query(sql, params)
+
+
+def pace_score_progress_ranking(dept_name=None, employee_ids=None, reporting_user_id=None, declining=False, limit=None, n=20):
+    """Item #88: "who is making progress / improving in PACE" with NO
+    explicit comparison period named. Business rule (new this round, not a
+    calendar-month comparison): rank employees by the delta between their
+    PACE score over their LATEST `n` qualifying Standard-shift rows and
+    their PACE score over their PREVIOUS `n` qualifying rows (rows n+1..2n
+    back) - the SAME "qualifying-row" semantics as item #76/#78's
+    build_query(latest_n_days=...) mode (filters applied BEFORE selecting
+    the N rows, partitioned per employee), reused here via two calls rather
+    than a new query mechanism. This is deliberately NOT the calendar-month
+    pace_score_trend_ranking() path (that stays for callers who name an
+    explicit period, e.g. "between July and August") - the whole point of
+    this function is to give a real answer even when the current calendar
+    month doesn't have enough elapsed days yet, which is exactly the bug
+    this item fixes (previously "who is making progress" silently routed
+    into pace_score_trend_ranking() and returned a data-availability
+    non-answer whenever the current month was too young).
+
+    Only employees with at least one qualifying row in BOTH windows are
+    ranked (an employee with fewer than n+1 total qualifying rows has no
+    "previous" window and is naturally excluded by the join below - same
+    reliability gate in spirit as pace_score_trend_ranking()'s
+    MIN_DAYS_FOR_DELTA, just expressed as "must have a previous window" for
+    the row-count mode instead of a day-count mode).
+
+    Returns (rows, meta). Each row: employee_id, emp_name, dept_name,
+    pace_score (latest window), pace_score_prev (previous window),
+    pace_score_delta (latest - previous), days_latest, days_prev. meta
+    carries `n` for the caller's scope-note text.
+    """
+    scope = ("department", dept_name) if dept_name else None
+    latest_rows = build_query(
+        "employee", ["pace_score", "days_counted"], scope=scope, employee_ids=employee_ids,
+        reporting_user_id=reporting_user_id, latest_n_days=n, latest_n_days_offset=0, limit=100000,
+    )
+    prev_rows = build_query(
+        "employee", ["pace_score", "days_counted"], scope=scope, employee_ids=employee_ids,
+        reporting_user_id=reporting_user_id, latest_n_days=n, latest_n_days_offset=n, limit=100000,
+    )
+    prev_by_id = {r["employee_id"]: r for r in prev_rows}
+    combined = []
+    for r in latest_rows:
+        prev = prev_by_id.get(r["employee_id"])
+        if prev is None or r["pace_score"] is None or prev["pace_score"] is None:
+            continue
+        delta = r["pace_score"] - prev["pace_score"]
+        combined.append({
+            "employee_id": r["employee_id"],
+            "emp_name": r["emp_name"],
+            "dept_name": r["dept_name"],
+            "pace_score": r["pace_score"],
+            "pace_score_prev": prev["pace_score"],
+            "pace_score_delta": delta,
+            "days_latest": r["days_counted"],
+            "days_prev": prev["days_counted"],
+        })
+    combined.sort(key=lambda r: r["pace_score_delta"], reverse=not declining)
+    lim = limit or LIMIT
+    meta = {"n": n}
+    return combined[:lim], meta
 
 
 def build_query_day_flags(employee_id, date):
