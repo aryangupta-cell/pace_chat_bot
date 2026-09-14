@@ -2042,10 +2042,44 @@ def _extraction_llm_reply(raw_message, message, session):
             logging.getLogger("pace_chatbot.main").exception(
                 "build_query() raised inside extraction-LLM cascade step (strongest/weakest area)")
             return None
-        if not rows:
-            return (f"No data found for {name_label or 'that scope'} in this period.", [])
-        row = rows[0]
-        present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
+        row = rows[0] if rows else None
+        present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None] if row else []
+        # Item #89: a single named employee with sparse/irregular recent
+        # attendance can have NO rows inside build_query()'s default fixed
+        # calendar-60-day window (queries.default_period_last_60_days())
+        # even though real data exists for them elsewhere (confirmed live:
+        # "PACE score of Kalpesh Nandkumar Thakur" works via
+        # queries.employee_detail(), which applies no date window at all
+        # when no month is named). Only when NO explicit period/day-count
+        # was requested by the user (period is None and latest_n_days is
+        # None - i.e. build_query() silently fell back to its own default
+        # window) and this is the single-employee scope (not department/rm,
+        # and not the group-pronoun ranking branch above, which is a
+        # separate code path untouched by this fallback) do we retry once
+        # using build_query()'s qualifying-ROW-count mode
+        # (latest_n_days=BUILD_QUERY_DEFAULT_PERIOD_DAYS) - this takes each
+        # employee's own latest N *worked* rows regardless of calendar
+        # proximity, the same rolling-window shape employee_detail()-style
+        # lookups already succeed with for sparse-attendance employees.
+        # Scoped narrowly to this one branch - department/company-scope
+        # queries and the group-pronoun ranking follow-up above are
+        # untouched.
+        if (not present and dimension == "employee" and name_filter
+                and period is None and latest_n_days is None):
+            try:
+                fallback_rows = queries.build_query(
+                    dimension, _AREA_METRICS, filters=filters, period=None,
+                    name_filter=name_filter, limit=1,
+                    latest_n_days=queries.BUILD_QUERY_DEFAULT_PERIOD_DAYS)
+            except Exception:
+                logging.getLogger("pace_chatbot.main").exception(
+                    "build_query() raised inside extraction-LLM cascade step "
+                    "(strongest/weakest area, sparse-attendance fallback)")
+                fallback_rows = None
+            if fallback_rows:
+                rows = fallback_rows
+                row = rows[0]
+                present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
         if not present:
             return (f"No data found for {name_label or 'that scope'} in this period.", [])
         want_weakest = _area_match.group(1).lower() == "weakest"
