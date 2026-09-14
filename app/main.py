@@ -5610,6 +5610,35 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
                 clarification_options=[llm_intent, opposite_of_llm],
             )
 
+    # --- Item #88: PACE-progress-ranking period-only follow-up ---
+    # A follow-up naming an explicit multi-month comparison right after a
+    # "who is making progress/improving in PACE" default-window answer (e.g.
+    # "Tell me with respect to July and August") carries NO intent-shaped
+    # keyword of its own - live-verified that this message alone classifies
+    # to rule_intent=None and a low-confidence/no LLM match, so `intent` is
+    # None here and, left alone, falls all the way through to the
+    # extraction-LLM cascade (_extraction_llm_reply, a few dozen lines below)
+    # which answers a bare company-wide PACE-score question, losing the
+    # improvement-ranking framing entirely. MUST be checked here - before
+    # the "if intent is None" cascade below - since that branch returns
+    # directly and never reaches the later dept/month-extraction machinery.
+    # Uses entities.extract_two_months() directly (not the `month`/
+    # `month_mentioned` locals, which aren't computed until after that
+    # cascade) and query_context (item #84/#86's mechanism - see
+    # answer_intent()'s "improving"/"declining" branch, which sets
+    # last_operation="progress_ranking") to detect "the last substantive
+    # answer was a progress/improvement ranking". Deliberately narrow: only
+    # fires when (a) the last answer was this exact operation, (b) THIS
+    # message names an explicit 2-month comparison of its own, and (c) this
+    # message didn't already resolve to its own intent - a message that
+    # matched something else on its own merits is left alone.
+    if intent is None and session is not None:
+        _qc_progress = session_store.get_query_context(session) or {}
+        if _qc_progress.get("last_operation") == "progress_ranking":
+            _pm1, _pm2, _pfound = entities.extract_two_months(message)
+            if _pfound:
+                intent = "declining" if _qc_progress.get("ascending") else "improving"
+
     if intent == "month_compare":
         # Month-vs-month comparison has its own dedicated resolution (see
         # _handle_month_compare), mirroring day_compare's short-circuit
