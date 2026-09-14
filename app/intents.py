@@ -336,6 +336,20 @@ _DEPT_BEST_PATTERNS = [
     # _detect_pct_capped_metrics() normalizer instead.
     r"\bwhich (dept|department)\b.{0,20}\b(most|highest|best|top)\b.{0,30}"
     r"\b(effectiveness|engagement|discipline|working hours|capped)\b",
+    # Validation-round fix (item #91): plural "top N departments [by X]"
+    # phrasing names the dimension explicitly ("departments") just as
+    # clearly as the singular "which department..." patterns above, but
+    # was not covered - it fell through to the generic pace_score_best
+    # employee-ranking pattern (`\btop\b.*\bpace score\b`, which is
+    # dimension-agnostic), silently returning a 5/10-row EMPLOYEE table
+    # instead of a department table. Live-confirmed cross-check: "top 5
+    # departments by PACE score" (broken, returned employees) vs "top 5
+    # departments by average PACE score"/"rank departments by PACE score"
+    # (correct, department rows) - same semantic question, inconsistent
+    # grain. Same "dimension-explicit phrasing routes ahead of the generic
+    # pattern" precedent as the singular patterns immediately above -
+    # narrow, additive, no new mechanism.
+    r"\btop\s*\d*\s*departments?\b",
 ]
 _DEPT_WORST_PATTERNS = [
     r"\bworst department\b", r"\bbottom department\b", r"\bwhich department is (the )?worst\b",
@@ -344,6 +358,9 @@ _DEPT_WORST_PATTERNS = [
     # Item #73: worst-side sibling of the dept_best addition above.
     r"\bwhich (dept|department)\b.{0,20}\b(least|lowest|worst|bottom)\b.{0,30}"
     r"\b(effectiveness|engagement|discipline|working hours|capped)\b",
+    # Validation-round fix (item #91): worst-side sibling of the plural
+    # "top N departments" fix above - "bottom N departments [by X]".
+    r"\bbottom\s*\d*\s*departments?\b",
 ]
 
 # Ranking BY reporting-manager ("RM") team - "which RM team has the most/
