@@ -568,8 +568,15 @@ def format_trend_rows(rows, meta):
             "change — may shift as more days come in."
         )
     if not rows:
+        # Item #92 fix (item #91 finding U10): meta["prev_month"] can be None
+        # when the caller's period resolution didn't land on a specific prior
+        # calendar month (e.g. "last 4 weeks" phrasing routed into this
+        # calendar-month trend path) - previously the literal Python "None"
+        # leaked straight into the user-facing reply text. Cosmetic only, no
+        # change to the underlying data/logic.
+        _prev_month_label = meta.get("prev_month") or "the prior period"
         return (
-            f"No employees had enough data in both this month and {meta['prev_month']} "
+            f"No employees had enough data in both this month and {_prev_month_label} "
             f"(at least {meta['min_days']} Standard-shift days in each) to show a reliable trend."
         ) + note
     if len(rows) == 1:
