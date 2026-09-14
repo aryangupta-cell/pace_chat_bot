@@ -4589,10 +4589,44 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         if emp_id is None:
             return ChatResponse(reply="I couldn't find that employee — please give me their exact full name or employee code.")
         row = queries.subscore_compare_for_employee(emp_id, month=period_month, date_range=date_range)
+        vals = {"Engagement": row["engagement"], "Effectiveness": row["effectiveness"], "Discipline": row["discipline"]} if row else {}
+        present = {k: v for k, v in vals.items() if v is not None}
+        # Item #90 fix: same sparse-attendance class of bug item #89 tried to
+        # fix, but landed in the wrong place - "weakest/strongest area"
+        # phrasing (e.g. "What is Kalpesh Nandkumar Thakur weakest area?")
+        # matches _SUBSCORE_COMPARE_PATTERNS in intents.py and is caught by
+        # THIS rule-based subscore_compare_emp intent, which wins via
+        # match_intent()'s first-match-wins precedence BEFORE the
+        # extraction-LLM cascade (where item #89's fallback lives, inside
+        # _extraction_llm_reply's _area_match branch) is ever reached - so
+        # that fallback never fires for this phrasing. A single named
+        # employee with sparse/irregular recent attendance can have NO rows
+        # inside the default period (period_month defaults to the current,
+        # possibly still-in-progress, calendar month when the user named no
+        # explicit period at all - see entities.extract_month's
+        # default_to_current behavior) even though real data exists for them
+        # elsewhere (confirmed live: "PACE score of Kalpesh Nandkumar
+        # Thakur" works via queries.employee_detail(), which applies no date
+        # window at all when no month is named). Only when the user named NO
+        # explicit period at all (and no sticky session period either - see
+        # _no_period_named_at_all) do we retry once with no period
+        # restriction whatsoever, mirroring employee_detail()'s successful
+        # no-month behavior for the same sparse-attendance employees. Scoped
+        # narrowly: an explicitly-named period that simply has no data for
+        # this employee is left completely alone (still "No data found").
+        if not present and _no_period_named_at_all(message, session):
+            fallback_row = queries.subscore_compare_for_employee(emp_id, month=None, date_range=None)
+            if fallback_row:
+                fallback_vals = {
+                    "Engagement": fallback_row["engagement"],
+                    "Effectiveness": fallback_row["effectiveness"],
+                    "Discipline": fallback_row["discipline"],
+                }
+                fallback_present = {k: v for k, v in fallback_vals.items() if v is not None}
+                if fallback_present:
+                    row, vals, present = fallback_row, fallback_vals, fallback_present
         if not row:
             return ChatResponse(reply=f"No data found for {emp_name}{_period_note(month, date_range)}.")
-        vals = {"Engagement": row["engagement"], "Effectiveness": row["effectiveness"], "Discipline": row["discipline"]}
-        present = {k: v for k, v in vals.items() if v is not None}
         if not present:
             return ChatResponse(reply=f"No engagement/effectiveness/discipline data found for {emp_name}{_period_note(month, date_range)}.", rows=[row])
         strongest = max(present, key=present.get)
