@@ -1836,10 +1836,46 @@ def _extraction_llm_reply(raw_message, message, session):
                 logging.getLogger("pace_chatbot.main").exception(
                     "build_query() raised inside extraction-LLM cascade step (group strongest/weakest area)")
                 continue
-            if not _r:
-                continue
-            row = _r[0]
-            present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
+            row = _r[0] if _r else None
+            present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None] if row else []
+            # Validation-round fix (item #91, this round): item #89/90 fixed
+            # this exact "no data because a default qualifying-population
+            # filter (ps_status/visit_status/shift_type) excludes a sparse-
+            # attendance employee" failure for the SINGLE-employee branch
+            # below, but explicitly left this group-pronoun branch untouched
+            # per that commit's own comment ("not the group-pronoun ranking
+            # branch above, which is a separate code path untouched by this
+            # fallback"). Live-reproduced this round: a K/L/M/N chain that
+            # narrows a department ranking down to exactly one employee
+            # (Kalpesh Nandkumar Thakur, the SAME sparse-attendance employee
+            # item #89/90 was built for) and then asks "their weakest area"
+            # goes through THIS loop (last_result_ids has length 1) and hits
+            # the identical "no data" failure item #90 already root-caused
+            # and fixed once - just not here. Same retry, reused verbatim
+            # (relax the 3 default filters to "any" where not explicitly
+            # requested, plus item #89's date-window widening), scoped to
+            # only fire when the initial query found nothing, exactly
+            # mirroring the singular branch's own condition.
+            if not present:
+                _relaxed_filters = dict(filters)
+                for _fk in ("ps_status", "visit_status", "shift_type"):
+                    _relaxed_filters.setdefault(_fk, "any")
+                _fallback_period, _fallback_latest_n_days = period, latest_n_days
+                if period is None and latest_n_days is None:
+                    _fallback_latest_n_days = queries.BUILD_QUERY_DEFAULT_PERIOD_DAYS
+                try:
+                    _fr = queries.build_query(
+                        "employee", _AREA_METRICS, filters=_relaxed_filters, period=_fallback_period,
+                        name_filter=_eid, limit=1, latest_n_days=_fallback_latest_n_days,
+                    )
+                except Exception:
+                    logging.getLogger("pace_chatbot.main").exception(
+                        "build_query() raised inside extraction-LLM cascade step "
+                        "(group strongest/weakest area, qualifying-population-filter/sparse-attendance fallback)")
+                    _fr = None
+                if _fr:
+                    row = _fr[0]
+                    present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
             if not present:
                 continue
             chosen_key, chosen_val = (min if _want_weakest_grp else max)(present, key=lambda kv: float(kv[1]))
