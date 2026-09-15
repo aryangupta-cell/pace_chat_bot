@@ -345,7 +345,9 @@ _GROUP_BY_WISE = re.compile(r"\b(" + _GROUP_BY_TOKEN + r")[\s\-]*wise\b", re.IGN
 # mistaken for a grouping.
 _GROUP_BY_PREP = re.compile(
     r"\b(?:group(?:ed)?\s+by|broken\s+down\s+by|break\s+(?:it\s+)?down\s+by|split\s+by|"
-    r"segmented\s+by|for\s+each|per|by)\s+(" + _GROUP_BY_TOKEN + r")\b",
+    # "each <dim>" with no preposition ("show each department's engagement")
+    # is the same grouping request as "for each <dim>" — item #95.
+    r"segmented\s+by|for\s+each|each|every|per|by)\s+(" + _GROUP_BY_TOKEN + r")\b",
     re.IGNORECASE,
 )
 

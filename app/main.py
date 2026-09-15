@@ -4699,7 +4699,18 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             # person, not a plural/bulk request that never named one).
             _metric_key = _EMP_FIELD_TO_METRIC_KEY.get(intent)
             _last = session_store.get_last_list(session) if session is not None else None
-            _bulk_request = _BULK_ALL_EMPLOYEES_PATTERN.search(message) is not None
+            # Item #95: the old `_BULK_ALL_EMPLOYEES_PATTERN` only knew four
+            # literal shapes ("all ... employees", "everyone", "each
+            # employee"), so an equally explicit bulk request phrased any
+            # other way ("give me the complete list of people ranked by
+            # working hours") fell through to "I couldn't find that
+            # employee" — a phrase list standing in for a concept. The
+            # general (quantifier x population-noun) detector now decides
+            # it; the old pattern is kept as an OR purely so no phrasing
+            # that worked before can regress.
+            _bulk_request = (entities.wants_unlimited(message)
+                             or entities.wants_unlimited(raw_message or "")
+                             or _BULK_ALL_EMPLOYEES_PATTERN.search(message) is not None)
             _ranking_context = _last is not None and _last.get("kind") == "ranking"
             # item #56 fix: same bare department/RM-team overview redirect as
             # emp_overview below - "score of ai labs dept" resolves no
