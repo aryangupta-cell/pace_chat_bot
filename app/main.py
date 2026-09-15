@@ -1795,9 +1795,33 @@ def _handle_query_plan_message(raw_message, message, session):
 
     prior = session_store.get_current_plan(session)
     try:
-        rule_free = intents.match_intent(message) is None
+        _mi = intents.match_intent(message)
     except Exception:
+        _mi = None
         rule_free = False
+    else:
+        # Item #96: two OLD intents collide with a genuine GROUP BY request
+        # in the same way item #93's department-exclude bug did — they each
+        # have a real, narrower purpose that does not cover "every
+        # department, grouped": average_metric ("avg engagement in a
+        # department"/"average pace score in whole company") only knows how
+        # to answer ONE aggregate (company-wide, or one named department —
+        # live-verified: "engagement by department" matched it and silently
+        # collapsed to dimension=company, limit=1), and dept_compare
+        # ("compare Accounts vs Billing") only knows how to compare exactly
+        # TWO specifically NAMED departments (live-verified: "compare
+        # engagement across departments" matched it and returned "I need two
+        # department names to compare" even though no comparison of two
+        # named departments was ever asked for — a full department-grouped
+        # breakdown was). Both are narrow, correct, and unchanged for the
+        # cases they actually cover — this redirects ONLY when the message
+        # also carries an explicit group_by signal (the same detector used
+        # everywhere else in this function, not a phrase-specific check),
+        # same established "redirect, don't rewrite" precedent as the
+        # several other old-intent-collision fixes in this project.
+        if _mi in ("average_metric", "dept_compare") and group_by == "department":
+            _mi = None
+        rule_free = _mi is None
     follow_up_mode = prior is not None and rule_free
 
     # A message carrying its own interrogative subject ("who's in red in
@@ -1844,6 +1868,23 @@ def _handle_query_plan_message(raw_message, message, session):
     if has_negative:
         fire = True
     elif follow_up_mode and (filters or group_by or wants_remove or _bare_modification):
+        fire = True
+    elif rule_free and group_by is not None and not ambiguous:
+        # Item #96: a FRESH question carrying an explicit GROUP BY signal
+        # ("each department's X", "X by department", "X across departments",
+        # "all departments' X", "department-wise X") is self-contained — it
+        # does not need a prior plan to interpret, so it must fire here too,
+        # not only in follow_up_mode. Live-found root cause: without this,
+        # such a message falls through to llm_nlu.classify()'s closed
+        # intent vocabulary, which has no concept of "grouped view of every
+        # department" and instead picks a single-department-required intent
+        # (dept_summary/dept_count/full_trend_dept), landing on "Which
+        # department did you mean?" even though no specific department was
+        # named — a GROUPING was asked for, not a FILTER. `rule_free`
+        # guarantees this can never preempt a rule intent that already
+        # answers the question correctly (dept_best/dept_avg/dept_worst
+        # keep matching exactly as before, since match_intent() runs first
+        # to produce it and wins whenever it fires).
         fire = True
     else:
         fire = False

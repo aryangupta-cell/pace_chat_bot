@@ -681,6 +681,72 @@ llm_nlu.extract_build_query = _saved_extract
 main.llm_nlu.extract_build_query = _saved_extract
 
 # ==========================================================================
+# Q. FRESH GROUP BY, no prior plan (item #96) — "each department's X"/"X by
+# department"/"X across departments"/"all departments' X" must reach the plan
+# path on a FIRST message, not only as a follow-up. Before this fix, these
+# fell through the plan interceptor (which only fired on group_by in
+# follow_up_mode) to classify()'s closed intent vocabulary, which has no
+# "grouped view of every department" concept and picked a single-department-
+# required intent instead — landing on "Which department did you mean?" even
+# though no specific department was named.
+# ==========================================================================
+
+Q_GROUPED = [
+    ("show each department's engagement, all of them", "engagement_pct"),
+    ("engagement by department", "engagement_pct"),
+    ("show engagement for every department", "engagement_pct"),
+    ("give me each department's engagement", "engagement_pct"),
+    ("department-wise engagement for all departments", "engagement_pct"),
+    ("list all departments with their engagement", "engagement_pct"),
+    ("compare engagement across departments", "engagement_pct"),
+]
+for msg, metric in Q_GROUPED:
+    resp, calls = ask("Q-" + msg[:20], msg)
+    c = last_bq()
+    check_true("Q fresh group_by: %r" % msg,
+               c is not None and c["dimension"] == "department" and c["metrics"] == [metric],
+               repr(c))
+    if c:
+        # A GROUP BY is not a FILTER: the plan must carry no department
+        # name filter at all — every department, not one specific one.
+        check_true("Q %r carries no department name filter" % msg,
+                   not any(f["field"] == "department" for f in (c.get("dimension_filters") or [])),
+                   repr(c.get("dimension_filters")))
+
+# Genuine department FILTERS (one specific, named department) must be
+# entirely unaffected by this — group_by must NOT fire for these, so they
+# still flow through the normal (pre-existing, already-correct) pipeline.
+Q_FILTERS_NOT_GROUPED = [
+    "employees in Sales - Digital Fleet",
+    "show SCM engagement",
+    "what is the engagement of the Annotation department?",
+]
+for msg in Q_FILTERS_NOT_GROUPED:
+    r = main._handle_query_plan_message(msg, msg, session_store.get_session("Q-filt-" + msg[:15]))
+    check_true("Q genuine dept filter not treated as group_by: %r" % msg, r is None,
+               repr(r and r.reply[:120]))
+
+# Existing rule intents (dept_best/dept_worst/dept_avg etc.) still take
+# precedence over the new fresh-fire branch — it only fires when rule_free.
+seed_ranking_plan("Q-rulewin")  # prior plan present, but irrelevant here
+r = main._handle_query_plan_message(
+    "which department has the best PACE score?", "which department has the best PACE score?",
+    session_store.get_session("Q-rulewin"))
+check_true("Q existing rule intent (dept_best) still wins, plan path declines",
+           r is None, repr(r and r.reply[:120]))
+
+# Single-turn fresh grouped question == the same request phrased as a
+# follow-up to an existing employee-ranking plan (single-turn/multi-turn
+# equivalence, same principle as section B).
+resp_fresh, _ = ask("Q-equiv-fresh", "engagement by department")
+c_fresh = last_bq()
+seed_ranking_plan("Q-equiv-multi", metric="engagement_pct")
+ask("Q-equiv-multi", "show it department wise")
+c_multi = last_bq()
+check("Q fresh vs follow-up: dimension", c_fresh and c_fresh["dimension"], c_multi and c_multi["dimension"])
+check("Q fresh vs follow-up: metrics", c_fresh and c_fresh["metrics"], c_multi and c_multi["metrics"])
+
+# ==========================================================================
 
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:

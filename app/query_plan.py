@@ -351,6 +351,18 @@ _GROUP_BY_PREP = re.compile(
     re.IGNORECASE,
 )
 
+# "all <dim>s" / "across <dim>s" ("list all departments with their
+# engagement", "compare engagement across departments") — item #96. Restricted
+# to a token list WITHOUT the employee synonyms deliberately: "all employees"/
+# "across employees" already means something else entirely (the item #95
+# UNLIMITED-cardinality signal on the default employee entity, not a request
+# to GROUP employees by employee, which would be a meaningless no-op grouping
+# that risks colliding with that unrelated, already-verified mechanism).
+_GROUP_BY_TOKEN_NO_EMP = r"(?:reporting\s+manager|departments?|depts?|teams?|managers?|rms?|" \
+                         r"supervisor|days?|dates?|daily|months?|monthly|grades?|designations?)"
+_GROUP_BY_ALL_ACROSS = re.compile(
+    r"\b(?:all|across)\s+(" + _GROUP_BY_TOKEN_NO_EMP + r")\b", re.IGNORECASE)
+
 
 def detect_group_by(text):
     """Returns a GROUP_BY_DIMENSIONS value, or None.
@@ -362,7 +374,7 @@ def detect_group_by(text):
     The presence of the word "department" alone decides nothing.
     """
     text = text or ""
-    for rx in (_GROUP_BY_WISE, _GROUP_BY_PREP):
+    for rx in (_GROUP_BY_WISE, _GROUP_BY_PREP, _GROUP_BY_ALL_ACROSS):
         m = rx.search(text)
         if m:
             word = re.sub(r"\s+", " ", m.group(1).strip().lower())
