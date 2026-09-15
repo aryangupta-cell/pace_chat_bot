@@ -2426,3 +2426,41 @@ redeployed both (confirmed via `/api/health`: `pace_reference_chars`
   SQL count. The 331/350/346 figures differ by metric because each metric
   has its own qualifying population (capped-not-null rows), which is
   expected, established behaviour.
+
+---
+
+96. **A FRESH group-by question no longer needs a prior turn to be understood — "show each department's engagement, all of them" fixed, generically, not as a phrase patch.**
+
+**Root cause.** The item #94 plan interceptor's fire condition was `elif follow_up_mode and (filters or group_by or wants_remove or _bare_modification)` — `group_by` could only fire the interceptor as a *follow-up*. A FRESH, self-contained question carrying its own group_by signal never reached it, fell through to `llm_nlu.classify()`'s closed intent vocabulary (no "grouped view of every department" concept), which picked a single-department-required rule intent (`dept_summary`/`dept_count`/`full_trend_dept`) — landing on "Which department did you mean?" even though no specific department was named: a GROUPING was asked for, not a FILTER.
+
+Locally testing the fix surfaced a second, separate collision: two OLD rule intents match this same class of message and mishandle it in their own way — `average_metric` ("avg engagement in a department") silently collapsed `"engagement by department"` to a single company-wide aggregate (`dimension=company, limit=1`); `dept_compare` ("compare Accounts vs Billing") demanded two named departments for `"compare engagement across departments"`, which names none.
+
+**Fix (representation, not phrases).**
+- `app/main.py`, `_handle_query_plan_message()`: new fire branch — `elif rule_free and group_by is not None and not ambiguous: fire = True` — gated on `rule_free` so it can never preempt a rule intent that already answers correctly (`dept_best`/`dept_avg`/`dept_worst` keep matching exactly as before; live-verified below).
+- Same function: `average_metric`/`dept_compare` are **redirected, not rewritten** — same established precedent as every prior old-intent collision in this project (items #76, #82, #86 follow-ups) — nulling the match only when the message also carries the group_by signal the shared detector already produces. Both intents' real purpose (one named aggregate; a genuine two-department compare) is untouched.
+- `app/query_plan.py`, `detect_group_by()`: added an `"all <dim>"`/`"across <dim>"` pattern (`_GROUP_BY_ALL_ACROSS`), deliberately built on a token list that **excludes** the employee synonyms, so `"all employees"` keeps meaning item #95's UNLIMITED-cardinality signal, not a meaningless "group employees by employee." Catches `"list all departments with their engagement"` and `"compare engagement across departments"`.
+
+**Tests.**
+- `scripts/test_query_plan.py`: 213/213 (unchanged).
+- `scripts/test_plan_pipeline.py`: 141/141 — 20 new assertions in section Q: 7 positive group_by phrasings (dimension=department, correct metric, **no** department name filter leaked in), 3 genuine-filter negatives (confirms `"employees in Sales - Digital Fleet"`/`"show SCM engagement"`/`"what is the engagement of the Annotation department?"` are never treated as group_by), 1 check that `dept_best` still wins over the new branch, 2 single-turn == follow-up equivalence checks (`"engagement by department"` fresh vs. `"show it department wise"` after a seeded plan produce the same dimension/metrics). First run caught exactly the 2 old-intent collisions above via 3 real failures — fixed, then 141/141.
+- `scripts/regression_live.py`: baseline run **before** any code change, live production: 90/91 (1 pre-existing, unrelated flake — "top 10 PACE improvers" missing the word "gainer," predates this round). Post-deploy: **91/91, 0 failed**.
+
+**Live verification (production, post-deploy).**
+
+| Question | Result |
+|---|---|
+| "show each department's engagement, all of them" (the exact reported repro) | Ranked by engagement %, one row per department, **34 rows** (every qualifying department — explicit "all of them" honored per item #95) |
+| "engagement by department" | Same ranking, **10 rows** (cardinality unspecified → sensible default, correctly *not* forced to unlimited) |
+| "show engagement for every department" | **34 rows** |
+| "give me each department's engagement" | **34 rows** |
+| "department-wise engagement for all departments" | **34 rows** |
+| "list all departments with their engagement" | **34 rows** |
+| "compare engagement across departments" | Same ranking, **10 rows** (no "all"/"every" word — correctly defaults, not a 2-way compare) |
+| "employees in Sales - Digital Fleet" (genuine filter, unaffected) | "Sales - Digital Fleet has 10 employees for 2026-09." |
+| "what is the engagement of the Annotation department?" (genuine filter, unaffected) | Employee-level ranking scoped to Annotation only, unchanged |
+| "which department has the best PACE score?" (`dept_best`, unaffected) | "HR - Talent Acquisition (6 employees) — avg PACE score: 90" |
+| "compare Accounts vs Billing" (`dept_compare`'s real purpose, unaffected) | Genuine two-department comparison, unchanged |
+
+**Deployment.** Commit `bc72d5c`, pushed to `origin/main` and `origin/master`. `scripts/regression_live.py` re-run in full post-deploy: 91/91.
+
+**Remaining limitations.** The redirect is scoped to the two intents actually found colliding (`average_metric`, `dept_compare`) — a systematic sweep of all 124 intents for the same class of collision was not performed; more may exist and would need to be found by testing, per this project's standing discipline, not assumed away. `detect_group_by()`'s "all/across" pattern still excludes RM/manager synonyms from nothing (RM was already in the non-employee token list) — untested against a live "all managers"/"across managers" phrasing since no report of that failure exists yet.
