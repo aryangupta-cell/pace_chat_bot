@@ -454,6 +454,31 @@ check_true("L3 'dept' in a filter phrase does not become the entity",
            c is not None and c["dimension"] == "employee", repr(c and c["dimension"]))
 
 # ==========================================================================
+# M. Ordering fix (round 3): "what about excluding X" must reach the plan
+#    layer, not the older vague-rescope handler, which cannot express a
+#    filter operator and silently re-ran the query unfiltered.
+# ==========================================================================
+
+session = seed_ranking_plan("M1")
+session_store.set_last_list(session, kind="ranking", answer_kind="list",
+                            rerun_same=lambda **kw: ("stale rerun", []),
+                            rerun_list=lambda **kw: ("stale rerun", []))
+resp, calls = ask("M1", "what about excluding everyone in Control Tower")
+c = last_bq()
+check_true("M1 'what about excluding X' reaches the plan layer",
+           c is not None and dim_filters(c) == [("department", "ne", "Control Tower")],
+           repr((c and dim_filters(c), resp.reply[:120])))
+
+# ...while a genuinely vague re-scope still belongs to the older handler
+session = seed_ranking_plan("M2")
+session_store.set_last_list(session, kind="ranking", answer_kind="list",
+                            rerun_same=lambda **kw: ("OLD HANDLER", []),
+                            rerun_list=lambda **kw: ("OLD HANDLER", []))
+resp, calls = ask("M2", "what about last month")
+check_true("M2 vague re-scope still uses the older handler",
+           "OLD HANDLER" in resp.reply, repr(resp.reply[:160]))
+
+# ==========================================================================
 
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:

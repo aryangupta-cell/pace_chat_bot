@@ -394,6 +394,30 @@ check("unseen: 'designation wise'", qp.detect_group_by("give me designation wise
 check("unseen: 'segmented by department'",
       qp.detect_group_by("segmented by department please"), "department")
 
+# marker vocabulary found by live testing (round 3)
+for msg, want in [
+    ("give me the five least effective people, but not anyone in Walle8", "Walle8"),
+    ("rank departments by discipline, skipping Admin", "Admin"),
+    ("dropping Annotation from that", "Annotation"),
+    ("not in SCM", "SCM"),
+    ("not from Annotation", "Annotation"),
+]:
+    check("live-found negation %r" % msg[:40], filters_of(msg)[0],
+          [("department", "ne", want)])
+
+# bare "dropped" is a TREND word, never an exclusion
+check("bare 'dropped' is not an exclusion",
+      filters_of("whose score dropped the most in Annotation")[0], [])
+
+for msg, want in [
+    ("restrict that to Annotation", "Annotation"),
+    ("limit it to SCM", "SCM"),
+    ("narrow it down to Annotation", "Annotation"),
+    ("keep it to SCM", "SCM"),
+]:
+    check("live-found positive %r" % msg[:40], filters_of(msg)[0],
+          [("department", "eq", want)])
+
 # ---------------------------------------------------------------------------
 # 12. Ambiguity is surfaced, never guessed
 # ---------------------------------------------------------------------------

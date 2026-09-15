@@ -1391,6 +1391,23 @@ def _resolve_period_and_filters(text, base_filters=None):
 # exactly what the mandate asks for.
 # ===========================================================================
 
+def _message_has_negative_dimension_filter(text):
+    """True when `text` names a real entity behind a NEGATION marker.
+
+    Used as a guard by the older pre-classification handlers that predate the
+    plan layer and cannot express a filter operator — so an explicitly
+    negated message reaches the plan interceptor instead of being silently
+    answered unfiltered. Cheap: the resolvers only run if a marker matched at
+    all."""
+    if not text or not query_plan._NEGATION_MARKER.search(text):
+        return False
+    try:
+        filters, _amb = query_plan.detect_dimension_filters(text, _plan_resolvers())
+    except Exception:
+        return False
+    return any(f["operator"] in query_plan.NEGATIVE_OPERATORS for f in filters)
+
+
 def _plan_resolvers():
     """Entity resolvers for query_plan.detect_dimension_filters(), wrapping
     the EXISTING fuzzy-safe extractors in entities.py. Never invents its own
@@ -5931,7 +5948,15 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # the pronoun "last discussed employee" state (item #30) - see
     # session_store.set_last_list for what does/doesn't set this. ---
     last_list = session_store.get_last_list(session)
-    if last_list is not None and (
+    # Item #94: a message that carries an explicit NEGATION filter ("what
+    # about excluding everyone in Control Tower") is not a vague re-scope —
+    # it is a precise filter modification, and this older handler has no way
+    # to express one, so it would silently re-run the previous query
+    # unfiltered. Found by live testing. The guard is the same generic
+    # detector used everywhere else, not a new phrase match.
+    _neg_filter_msg = _message_has_negative_dimension_filter(raw_message) or \
+        _message_has_negative_dimension_filter(message)
+    if last_list is not None and not _neg_filter_msg and (
         _VAGUE_LIST_EXPAND_PATTERN.search(message) is not None
         or _VAGUE_RESCOPE_PATTERN.search(message) is not None
         # Explicit scope-broadening override ("in the whole company",

@@ -109,13 +109,24 @@ CONTEXT_MODIFICATIONS = (
 
 _NEGATION_MARKER = re.compile(
     r"\b(?:exclude|excluding|excluded|except(?:ing)?|other\s+than|outside(?:\s+of)?|"
-    r"without|besides|apart\s+from|not\s+in|leave\s+out|leaving\s+out|omit(?:ting)?|"
-    r"minus|barring|ignore|ignoring)\b",
+    r"without|besides|apart\s+from|leave\s+out|leaving\s+out|omit(?:ting)?|"
+    # NOTE: "dropping" only, never bare "drop"/"dropped" — "whose score
+    # dropped the most in Annotation" is a trend question, not an exclusion.
+    r"minus|barring|ignore|ignoring|skip(?:ping)?|dropping|"
+    # "but not anyone in Walle8" / "not in X" / "not from X" — the negation
+    # word and the preposition can be separated by a quantifier phrase.
+    r"but\s+not|"
+    r"not\s+(?:in|from|any(?:one|body|\s+of)?(?:\s+(?:in|from))?)"
+    r")\b",
     re.IGNORECASE,
 )
 
 _POSITIVE_MARKER = re.compile(
-    r"\b(?:only|just|solely|restricted\s+to|restrict\s+to|limited\s+to|limit\s+to|"
+    r"\b(?:only|just|solely|"
+    r"restrict(?:ed)?(?:\s+(?:it|that|this|them))?\s+to|"
+    r"limit(?:ed)?(?:\s+(?:it|that|this|them))?\s+to|"
+    r"narrow(?:ed)?(?:\s+(?:it|that|this|them))?(?:\s+down)?\s+to|"
+    r"keep(?:\s+(?:it|that|this))?\s+to|"
     r"confined\s+to|within|inside|in|from|for)\b",
     re.IGNORECASE,
 )
@@ -126,7 +137,11 @@ _POSITIVE_MARKER = re.compile(
 # scope-resolution machinery already handles those correctly — so they are
 # restricted to follow-up mode by the caller.
 _STRONG_POSITIVE_MARKER = re.compile(
-    r"\b(?:only|just|solely|restricted\s+to|restrict\s+to|limited\s+to|limit\s+to)\b",
+    r"\b(?:only|just|solely|"
+    r"restrict(?:ed)?(?:\s+(?:it|that|this|them))?\s+to|"
+    r"limit(?:ed)?(?:\s+(?:it|that|this|them))?\s+to|"
+    r"narrow(?:ed)?(?:\s+(?:it|that|this|them))?(?:\s+down)?\s+to|"
+    r"keep(?:\s+(?:it|that|this))?\s+to)\b",
     re.IGNORECASE,
 )
 
