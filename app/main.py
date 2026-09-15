@@ -7082,7 +7082,25 @@ def chat(req: ChatRequest):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    # Item #94: `pace_reference_chars` / `*_in_extraction_prompt` are runtime
+    # PROOF that PACE_REFERENCE.md is actually loaded into the LLM prompts in
+    # the deployed process — not just present in the repo. This project has a
+    # documented history of "looked right in the code, didn't work live", so
+    # the wiring is asserted against the running server, not reviewed.
+    try:
+        _ref = llm_nlu._pace_reference_text()
+        _ext = llm_nlu._bq_stable_instructions()
+        _cls = llm_nlu._classify_instructions()
+        _ref_info = {
+            "pace_reference_chars": len(_ref),
+            "pace_reference_in_extraction_prompt": "PACE REFERENCE KNOWLEDGE" in _ext,
+            "pace_reference_in_classify_prompt": "PACE REFERENCE KNOWLEDGE" in _cls,
+            "extraction_prompt_chars": len(_ext),
+            "classify_prompt_chars": len(_cls),
+        }
+    except Exception:
+        _ref_info = {"pace_reference_chars": -1}
+    return {"status": "ok", **_ref_info}
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
