@@ -205,7 +205,41 @@ check("normalize drops bogus filter field",
       qp.new_plan(filters=[{"field": "colour", "operator": "eq", "value": "red"}])["filters"], [])
 check("normalize drops bogus operator",
       qp.new_plan(filters=[{"field": "department", "operator": "sorta", "value": "SCM"}])["filters"], [])
-check("normalize clamps limit", qp.new_plan(limit=99999)["limit"], 500)
+# Item #95: the ceiling is now a pure safety backstop (was 500, which
+# silently rewrote an explicit larger request).
+check("normalize clamps limit at the safety ceiling",
+      qp.new_plan(limit=10 ** 9)["limit"], qp.UNLIMITED_CEILING)
+check("normalize preserves a large explicit limit", qp.new_plan(limit=300)["limit"], 300)
+
+# ---------------------------------------------------------------------------
+# 4b. Item #95 — result cardinality is THREE states, not an integer
+# ---------------------------------------------------------------------------
+
+check("limit_mode defaults to unspecified", qp.new_plan()["limit_mode"], "unspecified")
+check("an integer limit implies exact mode", qp.new_plan(limit=5)["limit_mode"], "exact")
+check("unspecified -> executor default", qp.effective_limit(qp.new_plan(), 10), 10)
+check("exact -> the user's own number, never the default",
+      qp.effective_limit(qp.new_plan(limit=10), 50), 10)
+_unl = qp.new_plan(limit_mode="unlimited")
+check("unlimited -> the safety ceiling, not the default",
+      qp.effective_limit(_unl, 10), qp.UNLIMITED_CEILING)
+check("unlimited carries no number", _unl["limit"], None)
+check("unlimited ignores a stray number",
+      qp.new_plan(limit_mode="unlimited", limit=50)["limit"], None)
+# The follow-up transitions between the three states.
+check("explicit N after unlimited wins",
+      qp.effective_limit(qp.patch(_unl, {"limit": 5}), 10), 5)
+check("explicit N after unlimited flips the mode",
+      qp.patch(_unl, {"limit": 5})["limit_mode"], "exact")
+check("unlimited after explicit N wins",
+      qp.effective_limit(qp.patch(qp.new_plan(limit=5), {"limit_mode": "unlimited"}), 10),
+      qp.UNLIMITED_CEILING)
+check("a follow-up naming no cardinality preserves unlimited",
+      qp.patch(_unl, {"metrics": ["discipline_pct"]})["limit_mode"], "unlimited")
+check("a follow-up naming no cardinality preserves an exact limit",
+      qp.patch(qp.new_plan(limit=7), {"metrics": ["discipline_pct"]})["limit"], 7)
+check("CLEAR resets cardinality to unspecified",
+      qp.patch(qp.new_plan(limit=7), {"limit": qp.CLEAR})["limit_mode"], "unspecified")
 
 # ---------------------------------------------------------------------------
 # 5. PATCH invariants — unchanged fields literally unchanged

@@ -54,7 +54,18 @@ logger = logging.getLogger("pace_chatbot.sql_fallback")
 
 OPENAI_MODEL = "gpt-5-mini"
 _TIMEOUT_SECONDS = 30.0
-_MAX_ROWS = 200
+# Item #95: was 200 — low enough to silently truncate a legitimate "all
+# employees" answer AND to be quoted back to the user as "up to 200
+# employees", i.e. a disguised semantic default. It is now a pure safety
+# backstop against a pathological unbounded scan, far above any realistic
+# population in pace_1. Mirrors entities.UNLIMITED / query_plan.UNLIMITED_CEILING.
+_MAX_ROWS = 100000
+
+# Rows actually rendered into the chat reply. A backstop against an
+# unreadable wall of text, NOT a cap on what was queried — when it bites,
+# the reply says so explicitly rather than presenting a truncated list as
+# if it were the whole answer.
+_MAX_RENDERED_ROWS = 1000
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _REFERENCE_DOC_PATH = os.path.join(_REPO_ROOT, "pace_chatbot_llm_reference.md")
@@ -100,8 +111,17 @@ HARD RULES (violating these makes your answer unusable — follow them exactly):
 3. Follow the aggregation rules in the reference doc exactly (e.g. the
    capped-average-before-formula rule for PACE score/sub-score period
    aggregates) — do not average an already-computed daily score across days.
-4. Always add a LIMIT clause (200 or fewer rows) unless the question is
-   obviously a single-row aggregate (a count, an average, etc.).
+4. Use a LIMIT clause that matches WHAT THE USER ACTUALLY ASKED FOR:
+   - the user named a count ("top 10") -> LIMIT exactly that number;
+   - the user asked for the whole population ("all employees", "every
+     department", "the entire team", "company-wide", or any wording that
+     means "everybody who qualifies") -> do NOT cap it: either omit LIMIT
+     entirely or use a very large one. Never substitute a guessed number
+     like 50/100/200 for "all" — that silently answers a different question;
+   - the user named no count at all -> a modest LIMIT (e.g. 20) is fine;
+   - an obviously single-row aggregate (a count, an average) needs no LIMIT.
+   A safety cap is applied by the caller regardless, so you never need to
+   add one defensively.
 5. If the question cannot be answered with a safe, single read-only SELECT
    against the documented schema, respond with SQL: null and explain why in
    `explanation` instead of guessing at an unsafe or unanswerable query.
@@ -253,8 +273,12 @@ def answer(question):
     else:
         cols = list(rows[0].keys())
         reply_lines.append(" | ".join(cols))
-        for r in rows[: min(len(rows), _MAX_ROWS)]:
+        for r in rows[: min(len(rows), _MAX_RENDERED_ROWS)]:
             reply_lines.append(" | ".join(str(r[c]) for c in cols))
+        if len(rows) > _MAX_RENDERED_ROWS:
+            reply_lines.append(
+                f"... {len(rows) - _MAX_RENDERED_ROWS} more rows "
+                f"({len(rows)} matched in total)")
 
     reply = "\n".join(reply_lines) + UNVERIFIED_LABEL
     return {"reply": reply, "rows": rows}

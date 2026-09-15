@@ -1209,7 +1209,12 @@ def build_query_overview_reply(dimension, name, message="", period=None, session
         rows = queries.build_query(dimension, metrics, filters=filters, period=period, name_filter=name, limit=1)
         return _format_build_query_rows(rows, dimension, metrics, name_label=name_label), rows
 
-    def _list_reply(limit=500):
+    def _list_reply(limit=entities.UNLIMITED):
+        # Item #95: this default was 500. Every caller of this closure is a
+        # "give me the WHOLE list for this scope" request, so a cap of 500
+        # was a semantic default in disguise — it would silently truncate a
+        # genuine full-population answer for any org above that size.
+        # entities.UNLIMITED is a pure safety backstop instead.
         # "company" scope has no OTHER-dimension column to filter on (every
         # employee is in scope) - pass scope=None instead of ("company", name),
         # which build_query()'s scope-column lookup doesn't recognize.
@@ -1229,10 +1234,10 @@ def build_query_overview_reply(dimension, name, message="", period=None, session
         answer_kind = "count"
 
     if session is not None:
-        def _rerun_list(dept_name=None, employee_ids=None, team_label=None, month=None, date_range=None, limit=500):
-            return _list_reply(limit=limit or 500)
+        def _rerun_list(dept_name=None, employee_ids=None, team_label=None, month=None, date_range=None, limit=entities.UNLIMITED):
+            return _list_reply(limit=limit or entities.UNLIMITED)
 
-        def _rerun_same(dept_name=None, employee_ids=None, team_label=None, month=None, date_range=None, limit=500):
+        def _rerun_same(dept_name=None, employee_ids=None, team_label=None, month=None, date_range=None, limit=entities.UNLIMITED):
             return (_list_reply() if wants_list else _summary_reply())
 
         session_store.set_last_list(
@@ -1585,7 +1590,10 @@ def _execute_plan(plan, session, raw_message=""):
 
     dimension = _plan_effective_dimension(plan)
     ranking = query_plan.is_ranking(plan)
-    limit = plan.get("limit") or (queries.LIMIT if ranking else 1)
+    # Item #95: never `plan["limit"] or <default>` — that expression is the
+    # bug, because it cannot tell "the user asked for everything" from "the
+    # user said nothing". effective_limit() owns the three-state rule.
+    limit = query_plan.effective_limit(plan, queries.LIMIT if ranking else 1)
     name_filter = plan.get("name_filter") if not ranking else None
 
     try:
@@ -1703,13 +1711,21 @@ def _plan_seed_delta_from_message(raw_message, message):
     if named_metric:
         delta["metrics"] = detected_metrics
 
+    # Item #95: cardinality is three states, and the delta must say WHICH —
+    # omitting the keys entirely (the "unspecified" case) is what makes
+    # query_plan.patch() carry the previous turn's cardinality forward.
     limit = entities.extract_limit(text, default=None)
-    if not limit:
-        _wm = _PLAN_WORD_LIMIT.search(text)
-        if _wm:
-            limit = _PLAN_WORD_NUMBERS.get(_wm.group(1).lower())
-    if limit:
-        delta["limit"] = limit
+    if limit == entities.UNLIMITED:
+        delta["limit_mode"] = "unlimited"
+        delta["limit"] = None
+    else:
+        if not limit:
+            _wm = _PLAN_WORD_LIMIT.search(text)
+            if _wm:
+                limit = _PLAN_WORD_NUMBERS.get(_wm.group(1).lower())
+        if limit:
+            delta["limit"] = limit
+            delta["limit_mode"] = "exact"
 
     # `_RANKING_WORDS`/`_ASCENDING_WORDS` are load-bearing for the extraction
     # cascade and must not be widened there. These two plan-local additions
@@ -1821,8 +1837,8 @@ def _handle_query_plan_message(raw_message, message, session):
     # represent them.
     _bare_modification = (
         not _interrogative
-        and any(k in delta for k in ("limit", "operation", "ascending", "metrics",
-                                     "period", "latest_n_days"))
+        and any(k in delta for k in ("limit", "limit_mode", "operation", "ascending",
+                                     "metrics", "period", "latest_n_days"))
     )
 
     if has_negative:
@@ -1853,7 +1869,8 @@ def _handle_query_plan_message(raw_message, message, session):
         # identical plan (asserted in scripts/test_query_plan.py).
         base = query_plan.new_plan(entity="employee", metrics=["pace_score"], source="plan_interceptor")
         plan = query_plan.patch(base, delta)
-        if not query_plan.is_ranking(plan) and plan.get("limit"):
+        if not query_plan.is_ranking(plan) and (
+                plan.get("limit") or plan.get("limit_mode") == "unlimited"):
             plan = query_plan.patch(plan, {"operation": "rank_top"})
 
     # A plan with a filter but no ranking and no named subject would collapse
@@ -1898,6 +1915,20 @@ def _plan_fallback_reply(raw_message, message, session):
     """
     text = raw_message or message or ""
     delta = _plan_seed_delta_from_message(raw_message, message)
+    # Item #95: "show me all employees by engagement" / "list every
+    # employee's pace score" name NO ranking direction, so the direction
+    # test below would decline them and they would land on generated SQL
+    # (which is where the silent 200-row cap lived). An explicit request for
+    # the WHOLE population phrased as a list IS a ranking of that population
+    # with no cardinality cap — treat it as one, at the same verified SQL.
+    # Requires an actual list/ranking verb so an aggregate question that
+    # merely mentions "all employees" ("what's the average across all
+    # employees") is never turned into a list.
+    if (delta.get("limit_mode") == "unlimited"
+            and delta.get("operation") not in ("rank_top", "rank_bottom")
+            and re.search(r"\b(show|list|give|display|rank|ranked|ranking|"
+                          r"breakdown|report|pull\s+up|who)\b", text, re.IGNORECASE)):
+        delta["operation"] = "rank_bottom" if delta.get("ascending") else "rank_top"
     if delta.get("operation") not in ("rank_top", "rank_bottom"):
         return None
     try:
@@ -2934,8 +2965,18 @@ def _extraction_llm_reply(raw_message, message, session):
         # of resetting to the generic default/descending. Any count or
         # direction word actually present in THIS message still wins first
         # (unchanged precedence for every other case).
-        limit = (entities.extract_limit(raw_message, default=None) or extracted.get("limit")
-                 or (_qc.get("limit") if _filter_only_followup else None) or queries.LIMIT)
+        # Item #95: the three cardinality states, in precedence order. The
+        # deterministic reading of THIS message wins first (unchanged); an
+        # explicit "whole population" request from either the regex or the
+        # LLM's own `limit_mode` resolves to the safety ceiling, never to
+        # queries.LIMIT; and only a message that named no cardinality at all
+        # inherits the prior turn's limit or falls through to the default.
+        _det_limit = entities.extract_limit(raw_message, default=None)
+        if _det_limit == entities.UNLIMITED or extracted.get("limit_mode") == "unlimited":
+            limit = query_plan.UNLIMITED_CEILING
+        else:
+            limit = (_det_limit or extracted.get("limit")
+                     or (_qc.get("limit") if _filter_only_followup else None) or queries.LIMIT)
         if _ASCENDING_WORDS.search(raw_message) is not None:
             ascending = True
         elif _op == "rank_bottom":
@@ -4369,10 +4410,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     if intent == "attendance_best":
         rows = queries.attendance_ranking(dept_name, month, worst=False, employee_ids=employee_ids, limit=limit)
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.attendance_ranking(dept_name, month, worst=False, employee_ids=employee_ids, limit=limit)
                 return f"Best attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
-            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.attendance_ranking(dept_name, month, worst=True, employee_ids=employee_ids, limit=limit)
                 return f"Worst attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
@@ -4383,10 +4424,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     if intent == "attendance_worst":
         rows = queries.attendance_ranking(dept_name, month, worst=True, employee_ids=employee_ids, limit=limit)
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.attendance_ranking(dept_name, month, worst=True, employee_ids=employee_ids, limit=limit)
                 return f"Worst attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
-            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.attendance_ranking(dept_name, month, worst=False, employee_ids=employee_ids, limit=limit)
                 return f"Best attendance{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_attendance_rows(_rows)}", _rows
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
@@ -4397,10 +4438,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     if intent == "productive_high":
         rows = queries.productive_time_ranking(dept_name, month, lowest=False, employee_ids=employee_ids, limit=limit)
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.productive_time_ranking(dept_name, month, lowest=False, employee_ids=employee_ids, limit=limit)
                 return f"Most productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
-            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.productive_time_ranking(dept_name, month, lowest=True, employee_ids=employee_ids, limit=limit)
                 return f"Least productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
@@ -4411,10 +4452,10 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     if intent == "productive_low":
         rows = queries.productive_time_ranking(dept_name, month, lowest=True, employee_ids=employee_ids, limit=limit)
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.productive_time_ranking(dept_name, month, lowest=True, employee_ids=employee_ids, limit=limit)
                 return f"Least productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
-            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=500):
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.productive_time_ranking(dept_name, month, lowest=False, employee_ids=employee_ids, limit=limit)
                 return f"Most productive time{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_productive_rows(_rows)}", _rows
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, rerun_opposite=_rerun_opposite,
@@ -4504,7 +4545,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 source="metric_ranking",
             ))
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=500,
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=entities.UNLIMITED,
                        _metric_key=metric_key, _ascending=ascending, _label=label, _rid=manager_id, _filters=_mr_filters):
                 _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
                                                 limit=limit, reporting_user_id=_rid if employee_ids is None else None, date_range=date_range,
@@ -4520,7 +4561,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             # matcher (which previously always misrouted a bare direction
             # word to "productive_low"/"productive_high" regardless of what
             # the real prior metric was - see SESSION_HANDOFF.md item #63).
-            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=500,
+            def _rerun_opposite(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=entities.UNLIMITED,
                                  _metric_key=metric_key, _ascending=(not ascending), _label=label, _rid=manager_id, _filters=_mr_filters):
                 _rows = queries.metric_ranking(_metric_key, dept_name, month, ascending=_ascending, employee_ids=employee_ids,
                                                 limit=limit, reporting_user_id=_rid if employee_ids is None else None, date_range=date_range,
@@ -4606,7 +4647,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                      f"{scope_note}:\n\n{format_metric_rows(rows, metric_key)}")
             if session is not None:
                 def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month,
-                           date_range=date_range, limit=500, _metric_key=metric_key, _ascending=ranking_ascending):
+                           date_range=date_range, limit=entities.UNLIMITED, _metric_key=metric_key, _ascending=ranking_ascending):
                     _rows = queries.metric_ranking_ps_filtered(
                         _metric_key, dept_name, month=month, date_range=date_range,
                         ascending=_ascending, employee_ids=employee_ids, limit=limit, exclude_ps_off=True,
@@ -4672,13 +4713,13 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             if _metric_key is not None and (_bulk_request or _ranking_context):
                 rows = queries.metric_ranking(
                     _metric_key, dept_name, month, ascending=False, employee_ids=employee_ids,
-                    limit=limit or 500, reporting_user_id=manager_id if employee_ids is None else None,
+                    limit=limit or entities.UNLIMITED, reporting_user_id=manager_id if employee_ids is None else None,
                 )
                 label = queries.METRICS[_metric_key][1]
                 reply = f"{label.capitalize()}{scope_note} (full list):\n\n{format_metric_rows(rows, _metric_key)}"
                 if session is not None:
                     def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=month,
-                               date_range=date_range, limit=500, _mk=_metric_key, _rid=manager_id):
+                               date_range=date_range, limit=entities.UNLIMITED, _mk=_metric_key, _rid=manager_id):
                         _rows = queries.metric_ranking(_mk, dept_name, month, ascending=False, employee_ids=employee_ids,
                                                         limit=limit, reporting_user_id=_rid if employee_ids is None else None)
                         _label = queries.METRICS[_mk][1]
@@ -5020,7 +5061,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             elif _prog_filters.get("work_mode") == "office":
                 _prog_scope_note += " (office employees)"
             if session is not None:
-                def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, limit=500,
+                def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, limit=entities.UNLIMITED,
                            _declining=_declining, _rid=manager_id, _label=_label, _filters=_prog_filters):
                     _rows, _meta = queries.pace_score_progress_ranking(
                         dept_name, employee_ids=employee_ids,
@@ -5064,7 +5105,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         )
         _trend_scope_note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) + _period_note(_trend_month, None)
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_trend_month, date_range=None, limit=500,
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_trend_month, date_range=None, limit=entities.UNLIMITED,
                        _declining=_declining, _rid=manager_id, _label=_label):
                 _rows, _meta = queries.pace_score_trend_ranking(
                     dept_name, _first_month(month), declining=_declining,
@@ -5227,7 +5268,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
     if intent == "leave_who":
         rows = queries.who_on_leave(dept_name, month=period_month, date_range=date_range, limit=limit)
         if session is not None:
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=500):
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows = queries.who_on_leave(dept_name, month=month, date_range=date_range, limit=limit)
                 return f"On leave{_scope_note_generic(team_label, dept_name, month, date_range)} (full list):\n\n{format_leave_rows(_rows)}", _rows
             session_store.set_last_list(session, kind="day_flag", rerun_list=_rerun, rerun_same=_rerun, answer_kind="list",
@@ -5394,7 +5435,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             session["weekly_breakdown_employee_id"] = None
             session["weekly_breakdown_employee_name"] = None
 
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=500):
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows, _meta = queries.score_drop_ranking(dept_name, employee_ids=employee_ids, month=month, date_range=date_range, limit=limit)
                 return format_score_delta_ranking(_rows, _meta, f"Biggest PACE score drop{_scope_note_generic(team_label, dept_name, month, date_range)} (full list)"), _rows
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
@@ -5414,7 +5455,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             session["weekly_breakdown_employee_id"] = None
             session["weekly_breakdown_employee_name"] = None
 
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=500):
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=entities.UNLIMITED):
                 _rows, _meta = queries.score_improvement_alltime(dept_name, employee_ids=employee_ids, month=month, limit=limit)
                 return format_score_delta_ranking(_rows, _meta, f"Most improved{_scope_note_generic(team_label, dept_name, month, date_range)} (full list)"), _rows
             session_store.set_last_list(session, kind="ranking", rerun_list=_rerun, answer_kind="list",
@@ -5496,7 +5537,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             session["weekly_breakdown_employee_id"] = None
             session["weekly_breakdown_employee_name"] = None
 
-            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=500, _ascending=_pdr_ascending):
+            def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=period_month, date_range=date_range, limit=entities.UNLIMITED, _ascending=_pdr_ascending):
                 if _ascending:
                     _rows, _meta = queries.score_drop_ranking(dept_name, employee_ids=employee_ids, month=month, date_range=date_range, limit=limit)
                     return format_score_delta_ranking(_rows, _meta, f"Biggest PACE score drop{_scope_note_generic(team_label, dept_name, month, date_range)} (full list)"), _rows
@@ -5704,11 +5745,11 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         if intent == "day_count":
             result = queries.day_flag_count(flag_key, dept_name=dept_name, employee_ids=employee_ids, month=scope_month, date_range=date_range)
             if session is not None:
-                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=500, _flag_key=flag_key):
+                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=entities.UNLIMITED, _flag_key=flag_key):
                     _rows = queries.day_flag_list(_flag_key, dept_name=dept_name, employee_ids=employee_ids, month=month, date_range=date_range, limit=limit)
                     return format_day_list(_rows, _flag_key, _day_note(team_label, dept_name, month, date_range) + " (full list)"), _rows
 
-                def _rerun_same(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=500, _flag_key=flag_key):
+                def _rerun_same(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=entities.UNLIMITED, _flag_key=flag_key):
                     _result = queries.day_flag_count(_flag_key, dept_name=dept_name, employee_ids=employee_ids, month=month, date_range=date_range)
                     return format_day_count(_result, _flag_key, _day_note(team_label, dept_name, month, date_range)), [_result]
 
@@ -5718,7 +5759,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             return ChatResponse(reply=format_day_count(result, flag_key, day_scope_note), rows=[result])
         rows = queries.day_flag_list(flag_key, dept_name=dept_name, employee_ids=employee_ids, month=scope_month, date_range=date_range, limit=limit)
         if session is not None:
-            def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=500, _flag_key=flag_key):
+            def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=scope_month, date_range=date_range, limit=entities.UNLIMITED, _flag_key=flag_key):
                 _rows = queries.day_flag_list(_flag_key, dept_name=dept_name, employee_ids=employee_ids, month=month, date_range=date_range, limit=limit)
                 return format_day_list(_rows, _flag_key, _day_note(team_label, dept_name, month, date_range) + " (full list)"), _rows
             session_store.set_last_list(session, kind="day_flag", rerun_list=_rerun_list, rerun_same=_rerun_list,
@@ -5750,7 +5791,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         if intent == "status_list":
             rows = queries.status_list(statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
             if session is not None:
-                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=500, _statuses=statuses):
+                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=entities.UNLIMITED, _statuses=statuses):
                     _rows = queries.status_list(_statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
                     return format_status_list(_rows, _statuses, _status_note(team_label, dept_name) + " (full list)"), _rows
                 session_store.set_last_list(session, kind="status", rerun_list=_rerun_list, rerun_same=_rerun_list,
@@ -5762,11 +5803,11 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             n = queries.status_count(statuses, dept_name=dept_name, employee_ids=employee_ids)
             label = "/".join(statuses) if statuses else "all-status"
             if session is not None:
-                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=500, _statuses=statuses):
+                def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=entities.UNLIMITED, _statuses=statuses):
                     _rows = queries.status_list(_statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
                     return format_status_list(_rows, _statuses, _status_note(team_label, dept_name) + " (full list)"), _rows
 
-                def _rerun_same(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=500, _statuses=statuses):
+                def _rerun_same(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=entities.UNLIMITED, _statuses=statuses):
                     _n = queries.status_count(_statuses, dept_name=dept_name, employee_ids=employee_ids)
                     _label = "/".join(_statuses) if _statuses else "all-status"
                     return f"{_n} employee(s) are currently {_label}{_status_note(team_label, dept_name)}.", [{"n": _n}]
@@ -5903,7 +5944,7 @@ def _resolve_vague_list_followup(last_list, message, raw_message, session):
     # ranking, since that's what's actually being asked for.
     status_words = [s.capitalize() for s in re.findall(r"\b(black|red|amber|green)\b", message, re.I)]
     if status_words and last_list["kind"] == "ranking":
-        rows = queries.status_list(status_words, dept_name=eff_dept, employee_ids=eff_employee_ids, limit=500)
+        rows = queries.status_list(status_words, dept_name=eff_dept, employee_ids=eff_employee_ids, limit=entities.UNLIMITED)
         note = f" for {eff_team_label}" if eff_team_label else (f" in {eff_dept}" if eff_dept else " company-wide")
         reply = format_status_list(rows, status_words, note)
         session_store.set_last_list(session, kind="status", rerun_list=None, rerun_same=None, answer_kind="list",

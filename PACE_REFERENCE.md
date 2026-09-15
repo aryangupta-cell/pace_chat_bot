@@ -15,7 +15,7 @@ documentation about the system — it is part of the system.
 > **Novel compositions that never appear anywhere in this file are expected to
 > work** whenever the data and the rules support them — any
 > {entity} × {metric} × {filter + operator} × {grouping} × {period} ×
-> {ranking} combination is legitimate, whether or not anyone has written it
+> {ranking} × {result cardinality} combination is legitimate, whether or not anyone has written it
 > down. Conversely, when the data or the rules genuinely do **not** support
 > what was asked, the correct behaviour is the existing controlled
 > clarification / "I don't have a metric called X" / "which one did you mean?"
@@ -327,6 +327,35 @@ multi-day averaging to get wrong).
 - **"driving performance"** for a department = the **highest individual PACE
   scorers within that department**. Explicitly *not* month-over-month
   improvement and *not* deviation from the company average.
+
+### 6.7b Result cardinality — THREE states, never two
+
+How many rows the user wants is part of the plan, and it has **three**
+distinct states. Collapsing the third into the first silently answers a
+different question than the one asked:
+
+| State | The user said | What must happen |
+|---|---|---|
+| `unspecified` | nothing about how many ("which employees have low engagement?") | a sensible default row count applies — this is the **only** state in which a default may decide anything |
+| `exact` | a specific number ("top 10", "bottom 5", "give me 3") | that exact number is used, unchanged, all the way to SQL |
+| `unlimited` | the **whole qualifying population** | no row cap at all beyond a pure safety backstop |
+
+`unlimited` is an **explicit request**, not a missing one. Any wording that
+means *everybody who qualifies* belongs here — "all employees", "every
+employee", "each department", "the whole company", "the entire team",
+"everyone", "company-wide", "the full list", "no limit" — and this list is,
+as everywhere in this file, **examples of the meaning, not an allowlist of
+phrasings**. Never substitute a guessed number (50, 100, 200, 500…) for
+"all": a guessed cap is a wrong answer, not a safe one.
+
+Note the distinction between cardinality and **population scope**: "who has
+the lowest PACE score *among all employees*" names a population to search,
+and still asks for **one** answer. "Show me *all employees* by PACE score"
+asks for the whole list.
+
+This is orthogonal to every other plan field: an explicit count or an
+explicit "all" composes freely with any entity, metric, filter, grouping and
+period, and survives conversational modification until the user changes it.
 
 ### 6.8 Conversational modification
 

@@ -94,7 +94,11 @@ main.sql_fallback.answer = lambda *a, **k: None
 
 def fake_metric_ranking(metric_key, *a, **kw):
     CALLS.append(dict(fn="metric_ranking", metric_key=metric_key, **kw))
-    return [{"employee_id": 100, "emp_name": "Row0", "dept_name": "Annotation", metric_key: 50}]
+    # `metric_value` is the column main.format_metric_rows() reads; the
+    # metric-keyed column is what some callers read. Both are supplied so
+    # this stub works for every caller of metric_ranking().
+    return [{"employee_id": 100, "emp_name": "Row0", "dept_name": "Annotation",
+             metric_key: 50, "metric_value": 50, "days_counted": 20}]
 
 
 queries.metric_ranking = fake_metric_ranking
@@ -144,6 +148,16 @@ def last_bq():
     for c in reversed(CALLS):
         if c["fn"] == "build_query":
             return c
+    return None
+
+
+def last_limit():
+    """The row cap the pipeline actually asked the DB layer for, whichever
+    query function it routed to (item #95 asserts on the cap itself, not on
+    which engine produced it)."""
+    for c in reversed(CALLS):
+        if c.get("limit") is not None:
+            return c["limit"]
     return None
 
 
@@ -570,6 +584,101 @@ c = last_bq()
 check_true("O5 adjective metric form 'least effective'",
            c is not None and c["metrics"] == ["effectiveness_pct"] and c["limit"] == 5,
            repr(c and (c["metrics"], c["limit"])))
+
+# ==========================================================================
+# P. ITEM #95 — an EXPLICIT cardinality is never overridden by a default
+# ==========================================================================
+#
+# The three states asserted end to end, on the `limit` argument the pipeline
+# actually hands to build_query(): "all/every/..." -> the safety ceiling,
+# an explicit N -> exactly N, and nothing said -> queries.LIMIT. The
+# phrasings below are deliberately a MIX of known and never-before-seen
+# wordings — the fix is in the representation, so none of them is special.
+
+CEIL = query_plan.UNLIMITED_CEILING
+
+_UNLIMITED_PHRASINGS = [
+    "show me all employees by engagement",
+    "list every employee's pace score",
+    "rank the whole company by discipline",
+    "give me the full list of employees by effectiveness",
+    "show me each employee's working hours percentage",
+    "list the entire team by pace score",
+    "show every single employee ranked by discipline",
+    "display all staff by engagement with no limit",
+]
+for i, q in enumerate(_UNLIMITED_PHRASINGS):
+    ask("P_unl_%d" % i, q)
+    lim = last_limit()
+    check_true("P unlimited: %r -> no semantic cap" % q,
+               lim is not None and lim >= CEIL, repr(lim))
+
+_EXACT_PHRASINGS = [
+    ("top 10 employees by effectiveness", 10),
+    ("bottom 5 employees in SCM by engagement", 5),
+    ("bottom 10 employees by engagement", 10),
+    ("show me the 3 lowest employees on discipline", 3),
+    ("top 25 people by working hours", 25),
+    ("bottom 7 employees by engagement", 7),
+    ("top 300 employees by pace score", 300),
+]
+for i, (q, want) in enumerate(_EXACT_PHRASINGS):
+    ask("P_exact_%d" % i, q)
+    check_true("P exact: %r -> limit %d" % (q, want), last_limit() == want, repr(last_limit()))
+
+# No cardinality named at all -> the established default still applies.
+# `None` counts as passing here: the query layer's own `lim = limit or LIMIT`
+# turns it into queries.LIMIT. What must NEVER appear is the unlimited
+# ceiling, which would mean a default had been mistaken for a request.
+for i, q in enumerate(["which employees have the lowest engagement",
+                       "which employees have the lowest discipline",
+                       "bottom employees by engagement"]):
+    ask("P_def_%d" % i, q)
+    check_true("P unspecified: %r -> default, not unlimited" % q,
+               last_limit() in (None, queries.LIMIT), repr(last_limit()))
+
+# A population SCOPE phrase is not a cardinality request.
+check("P 'among all employees' is scope, not cardinality",
+      entities.wants_unlimited("who has the lowest pace score among all employees"), False)
+check("P 'all 30 days' is a period, not a population",
+      entities.extract_limit("how did the team do over all 30 days"), None)
+
+# Multi-turn: each state survives, and each replaces the other on request.
+seed_ranking_plan("P_ft1", metric="engagement_pct", limit=10, ascending=True)
+ask("P_ft1", "now show me all of them")
+check_true("P follow-up 'all of them' lifts the previous limit of 10",
+           (last_limit() or 0) >= CEIL, repr(last_limit()))
+
+session = seed_ranking_plan("P_ft2", metric="engagement_pct", limit=10, ascending=True)
+session_store.set_current_plan(session, query_plan.new_plan(
+    entity="employee", metrics=["engagement_pct"], operation="rank_bottom",
+    limit_mode="unlimited", ascending=True))
+ask("P_ft2", "make it the top 5")
+check_true("P follow-up 'top 5' overrides a previous unlimited request",
+           last_limit() == 5, repr(last_limit()))
+
+session = seed_ranking_plan("P_ft3", metric="engagement_pct", limit=10, ascending=True)
+session_store.set_current_plan(session, query_plan.new_plan(
+    entity="employee", metrics=["engagement_pct"], operation="rank_bottom",
+    limit_mode="unlimited", ascending=True))
+ask("P_ft3", "exclude Annotation")
+check_true("P unlimited survives a filter-only follow-up",
+           (last_limit() or 0) >= CEIL, repr(last_limit()))
+
+# The LLM's own tri-state field is honoured even when the regex sees nothing.
+_saved_extract = llm_nlu.extract_build_query
+llm_nlu.extract_build_query = lambda *a, **k: {
+    "dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"],
+    "filters": {}, "period_phrase": None, "unrecognized_metric_phrase": None,
+    "limit": None, "limit_mode": "unlimited", "operation": "rank_top",
+    "group_by": None, "dimension_filters": [], "context_modification": "none",
+}
+main.llm_nlu.extract_build_query = llm_nlu.extract_build_query
+ask("P_llm", "engagement leaderboard for the entire org please")
+check_true("P LLM-reported limit_mode=unlimited is honoured",
+           (last_limit() or 0) >= CEIL, repr(last_limit()))
+llm_nlu.extract_build_query = _saved_extract
+main.llm_nlu.extract_build_query = _saved_extract
 
 # ==========================================================================
 

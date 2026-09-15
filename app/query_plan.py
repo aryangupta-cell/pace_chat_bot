@@ -90,6 +90,32 @@ POPULATION_FILTER_KEYS = ("ps_status", "visit_status", "work_mode", "shift_type"
 # trend/compare operations); the other three are entity groupings.
 GROUP_BY_DIMENSIONS = ("employee", "department", "rm", "day", "month", "grade", "designation")
 
+# ---------------------------------------------------------------------------
+# Item #95: result cardinality is a THREE-state field, not an integer
+# ---------------------------------------------------------------------------
+#
+# `limit: int | None` could only say "N rows" or "the user said nothing",
+# and every executor turned the second into queries.LIMIT (10). There is a
+# third, semantically different state — "the user explicitly asked for the
+# ENTIRE population" — which was being silently folded into the default,
+# so "rank the whole company by discipline" answered with 10 rows.
+#
+# `limit_mode` makes the three states distinct and explicit:
+#   "unspecified" — the user named no cardinality; the EXECUTOR's default
+#                   applies (this is the only state a default may fill in).
+#   "exact"       — the user named N; N is authoritative and must survive
+#                   every downstream layer untouched.
+#   "unlimited"   — the user explicitly asked for everything; only the
+#                   UNLIMITED_CEILING safety backstop applies.
+LIMIT_MODES = ("unspecified", "exact", "unlimited")
+
+#: Pure safety backstop against a pathological/unbounded scan. Deliberately
+#: far above any realistic population in pace_1 (company headcount is in the
+#: hundreds) so it can never act as a disguised semantic default — contrast
+#: 10/50/100/200, every one of which is a number a user might actually have
+#: meant. Mirrors entities.UNLIMITED.
+UNLIMITED_CEILING = 100000
+
 CONTEXT_MODIFICATIONS = (
     "none", "add_filter", "remove_filter", "replace_filter", "change_metric",
     "change_group_by", "change_period", "change_ranking", "change_population",
@@ -401,6 +427,7 @@ _PLAN_DEFAULTS = {
     "group_by": None,
     "operation": "value",
     "limit": None,
+    "limit_mode": "unspecified",   # item #95: see LIMIT_MODES above
     "ascending": False,
     "period": None,               # (date, date) | None
     "period_phrase": None,
@@ -462,11 +489,27 @@ def normalize(plan):
         clean_filters.append({"field": field, "operator": op, "value": val})
     plan["filters"] = clean_filters
 
+    # ---- result cardinality (item #95) ---------------------------------
+    # The mode is the authority; `limit` is only meaningful in "exact" mode.
+    # Note the old code clamped to 500 — which was itself an instance of the
+    # bug being fixed here, since an explicit "top 600" (or an unlimited
+    # request routed through `limit`) was silently rewritten to 500.
+    mode = plan.get("limit_mode")
     limit = plan.get("limit")
-    if isinstance(limit, bool) or not isinstance(limit, int):
+    valid_int = isinstance(limit, int) and not isinstance(limit, bool)
+    if mode not in LIMIT_MODES:
+        # Infer the mode for a plan built by older code that only set `limit`
+        # (from_query_context(), and any caller predating this field).
+        mode = "exact" if valid_int else "unspecified"
+    if mode == "unlimited":
+        plan["limit_mode"] = "unlimited"
         plan["limit"] = None
+    elif valid_int:
+        plan["limit_mode"] = "exact"
+        plan["limit"] = max(1, min(limit, UNLIMITED_CEILING))
     else:
-        plan["limit"] = max(1, min(limit, 500))
+        plan["limit_mode"] = "unspecified"
+        plan["limit"] = None
 
     plan["ascending"] = bool(plan.get("ascending"))
 
@@ -495,6 +538,30 @@ def normalize(plan):
 
 def is_ranking(plan):
     return (plan or {}).get("operation") in ("rank_top", "rank_bottom", "rank_both_ends")
+
+
+def effective_limit(plan, default):
+    """The row count to hand to queries.build_query() for this plan.
+
+    The ONE place the three cardinality states become a single SQL number,
+    so no executor has to re-derive the rule (and no executor can quietly
+    reintroduce `plan["limit"] or <magic number>`, which is exactly how the
+    item #95 bug worked):
+
+        "exact"       -> the user's own N, never overridden.
+        "unlimited"   -> the safety ceiling only.
+        "unspecified" -> the caller's `default` — the only state in which a
+                         deterministic default is allowed to decide anything.
+    """
+    plan = plan or {}
+    mode = plan.get("limit_mode")
+    if mode not in LIMIT_MODES:
+        mode = "exact" if isinstance(plan.get("limit"), int) else "unspecified"
+    if mode == "unlimited":
+        return UNLIMITED_CEILING
+    if mode == "exact" and isinstance(plan.get("limit"), int):
+        return plan["limit"]
+    return default
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +632,7 @@ def merge_filters(existing, incoming, mode="add"):
 #: carried forward from the previous plan untouched — that invariant is what
 #: the multi-turn regression tests assert on, step by step.
 PATCHABLE_FIELDS = (
-    "entity", "metrics", "group_by", "operation", "limit", "ascending",
+    "entity", "metrics", "group_by", "operation", "limit", "limit_mode", "ascending",
     "period", "period_phrase", "latest_n_days", "population_filters",
     "name_filter", "name_label", "comparison",
 )
@@ -581,6 +648,17 @@ def patch(plan, delta, filter_mode="add"):
     """
     base = normalize(plan)
     out = dict(base)
+    delta = dict(delta or {})
+    # Item #95: the two cardinality fields move together. A follow-up that
+    # names a NUMBER ("make it the top 5") after an unlimited request must
+    # switch the mode back to "exact", or normalize() — which treats the
+    # mode as authoritative — would drop the number on the floor.
+    if "limit" in delta and "limit_mode" not in delta:
+        v = delta["limit"]
+        if v is CLEAR or v is None:
+            pass  # "not mentioned"/"reset": leave the previous mode alone
+        else:
+            delta["limit_mode"] = "exact"
     for k in PATCHABLE_FIELDS:
         if k not in (delta or {}):
             continue
@@ -665,6 +743,8 @@ def describe(plan):
     test assertions."""
     plan = normalize(plan)
     bits = []
+    if plan.get("limit_mode") == "unlimited":
+        bits.append("all matching rows")
     if plan["group_by"]:
         bits.append("grouped by %s" % plan["group_by"])
     for f in plan["filters"]:

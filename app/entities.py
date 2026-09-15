@@ -53,6 +53,90 @@ _RANKING_DIRECTION_WORD = (
     r"weakest|strongest|smallest|largest|biggest|greatest)"
 )
 
+# ---------------------------------------------------------------------------
+# Item #95: "ALL / EVERY" is an EXPLICIT row-count request, not a missing one
+# ---------------------------------------------------------------------------
+#
+# Before this round "how many rows did the user ask for?" had exactly two
+# states: an integer, or None. None meant "the user said nothing", and every
+# downstream site turned that into `queries.LIMIT` (10). That silently
+# collapsed a THIRD, genuinely different state — "the user explicitly asked
+# for the WHOLE population" — into the default, so "show me all employees by
+# engagement" answered with 10 rows.
+#
+# UNLIMITED is the representation of that third state. It is deliberately a
+# real integer so that every one of the ~40 pre-existing `lim = limit or
+# LIMIT` call sites in queries.py carries it through to SQL untouched, with
+# no per-call-site change and no risk to the established business logic. Its
+# VALUE is a pure safety backstop against a pathological/unbounded scan — it
+# is two orders of magnitude above this company's headcount (a few hundred)
+# and above any realistic pace_1 group count, so it never acts as a
+# semantically meaningful default the way 10/50/100/200 would.
+UNLIMITED = 100000
+
+#: The hard sanity ceiling applied to an EXPLICIT numeric request. Raised
+#: from 100 this round: clamping "top 300" to 100 is the same class of bug —
+#: a deterministic default silently overriding what the user actually asked
+#: for. Kept only as a backstop, equal to UNLIMITED.
+MAX_EXPLICIT_LIMIT = UNLIMITED
+
+# Nouns that denote the POPULATION being listed. A quantifier only means
+# "unlimited rows" when it quantifies one of these — "all employees" yes,
+# "all 60 days" / "every morning" no. This is a vocabulary of DIMENSIONS,
+# not a list of accepted phrasings: any quantifier from the first group
+# combined with any population noun works, in any order of the optional
+# filler words between them, so novel phrasings compose for free.
+_POPULATION_NOUN = (
+    r"(?:employees?|emps?|people|persons?|staff|members?|workers?|individuals?|"
+    r"headcount|performers?|departments?|depts?|teams?|managers?|rms?|"
+    r"reporting\s+managers?|company|organi[sz]ation)"
+)
+
+_UNLIMITED_QUANTIFIER = re.compile(
+    # "<quantifier> [filler] <population noun>": all employees, every single
+    # employee, each department, the entire team, the whole company, every
+    # one of the managers.
+    r"\b(?:all|every|each|entire|whole|complete|full)\s+(?:the\s+)?(?:\w+\s+){0,2}?"
+    + _POPULATION_NOUN + r"\b"
+    # Pronoun forms that need no noun at all.
+    r"|\b(?:everyone|everybody)\b"
+    r"|\ball\s+of\s+(?:them|us|the\s+above)\b"
+    # Scope adverbs that mean the same thing.
+    r"|\bcompany[\s\-]?wide\b|\borgani[sz]ation[\s\-]?wide\b|\bacross\s+the\s+board\b"
+    # Explicit statements about the LIMIT itself.
+    r"|\bno\s+limit\b|\bwithout\s+(?:a\s+)?limit\b|\bunlimited\b|\bun\-?capped\b"
+    r"|\bfull\s+list\b|\bcomplete\s+list\b|\bentire\s+list\b|\bas\s+many\s+as\s+(?:you|there)\b",
+    re.IGNORECASE,
+)
+
+
+# A quantifier introduced by one of these prepositions describes the
+# POPULATION the question is asked over ("who has the lowest score among all
+# employees"), not how many rows to return — the user still asked for one
+# answer there. Checked per-match so the same words elsewhere in the
+# sentence don't suppress a genuine request.
+_SCOPE_PREPOSITION_BEFORE = re.compile(
+    r"\b(?:among|amongst|across|out\s+of|versus|vs\.?|against|compared\s+to)\s+$",
+    re.IGNORECASE,
+)
+
+
+def wants_unlimited(text):
+    """True when the message EXPLICITLY asks for the whole population.
+
+    Deliberately not a match on any one phrase: it is (quantifier) x
+    (population noun), so "all employees", "every department", "each of the
+    managers", "the entire team", "the whole company", "everyone",
+    "company-wide" and "give me the full list" all resolve to the same state
+    without any of them being enumerated as a special case.
+    """
+    text = text or ""
+    for m in _UNLIMITED_QUANTIFIER.finditer(text):
+        if _SCOPE_PREPOSITION_BEFORE.search(text[:m.start()]):
+            continue
+        return True
+    return False
+
 
 def extract_limit(text, default=None):
     """Extracts a requested row count near a ranking-direction word.
@@ -86,20 +170,20 @@ def extract_limit(text, default=None):
     m = re.search(r"\b(?:top|bottom)\s*(\d{1,3})\b", t)
     if m:
         n = int(m.group(1))
-        return max(1, min(n, 100))
+        return max(1, min(n, MAX_EXPLICIT_LIMIT))
 
     # 2) "N <direction-word...>" e.g. "5 lowest", "5 worst performers",
     #    "3 employees with the highest engagement".
     m = re.search(r"\b(\d{1,3})\b[^.?!]{0,40}?\b" + _RANKING_DIRECTION_WORD + r"\b", t)
     if m:
         n = int(m.group(1))
-        return max(1, min(n, 100))
+        return max(1, min(n, MAX_EXPLICIT_LIMIT))
 
     # 3) "<direction-word...> N" e.g. "lowest 5", "the highest 3 employees".
     m = re.search(r"\b" + _RANKING_DIRECTION_WORD + r"\b[^.?!]{0,40}?\b(\d{1,3})\b", t)
     if m:
         n = int(m.group(1))
-        return max(1, min(n, 100))
+        return max(1, min(n, MAX_EXPLICIT_LIMIT))
 
     # 4) "give me N ..." / "show me N ..." — a bare requested count with no
     #    direction word nearby, only when a ranking-ish request verb is present
@@ -107,7 +191,15 @@ def extract_limit(text, default=None):
     m = re.search(r"\b(?:give|show|list|get)\s+me\s+(\d{1,3})\b", t)
     if m:
         n = int(m.group(1))
-        return max(1, min(n, 100))
+        return max(1, min(n, MAX_EXPLICIT_LIMIT))
+
+    # 5) Item #95: no NUMBER, but an explicit "the whole population" request.
+    #    Checked LAST so any actual number the user named still wins ("top 5
+    #    of all departments" is 5 rows, not everything), and returned as the
+    #    UNLIMITED sentinel rather than None so no downstream `limit or
+    #    LIMIT` site can mistake it for "the user said nothing".
+    if wants_unlimited(text):
+        return UNLIMITED
 
     return default
 

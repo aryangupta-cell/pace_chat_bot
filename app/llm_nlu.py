@@ -59,6 +59,11 @@ import time
 from . import intents
 from .usage_log import log_usage
 
+#: Item #95 safety backstop for an EXPLICIT numeric limit the model returns.
+#: Mirrors entities.MAX_EXPLICIT_LIMIT / query_plan.UNLIMITED_CEILING, kept
+#: as a literal here so this module stays free of DB-touching imports.
+_MAX_EXPLICIT_LIMIT = 100000
+
 logger = logging.getLogger("pace_chatbot.llm_nlu")
 
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
@@ -720,7 +725,29 @@ _BQ_EXTRACTION_SCHEMA = {
         # (_extraction_llm_reply in main.py) still cross-checks/overrides
         # both against the SAME deterministic regexes as before - this is
         # an additional signal, not a replacement for the safety net.
-        "limit": {"type": ["integer", "null"], "description": "the EXACT row count explicitly requested, e.g. 5 for '5 employees with the lowest engagement' or 'give me 5 worst performers' or 'top 5' - null if no explicit count was requested (the caller applies a sensible default)"},
+        "limit": {"type": ["integer", "null"], "description": "the EXACT row count explicitly requested, e.g. 5 for '5 employees with the lowest engagement' or 'give me 5 worst performers' or 'top 5' - null if no explicit count was requested, and null whenever limit_mode is 'unlimited' (never guess a number for 'all')"},
+        # Item #95: result cardinality has THREE states, and collapsing the
+        # third into the second is a bug that silently changes the user's
+        # meaning. "all employees" is an EXPLICIT request for the whole
+        # population, not an absent one - the caller must be able to tell it
+        # apart from "the user named no count", which is the only case a
+        # default may fill in.
+        "limit_mode": {
+            "type": "string",
+            "enum": ["unspecified", "exact", "unlimited"],
+            "description": (
+                "How many rows the user asked for, as a STATE rather than a number. "
+                "'exact': the user named a specific count ('top 10', 'bottom 5', 'give me 3') - put it in `limit`. "
+                "'unlimited': the user explicitly asked for the ENTIRE population with no cap - "
+                "'all employees', 'every employee', 'each department', 'the whole company', "
+                "'the entire team', 'everyone', 'company-wide', 'the full list', 'no limit'. "
+                "Judge this from MEANING, not from any fixed list of phrases - any wording that "
+                "means 'everybody who qualifies' is 'unlimited'. Leave `limit` null for it; "
+                "NEVER invent a number like 50 or 100 to stand in for 'all'. "
+                "'unspecified': the user named no cardinality at all - the caller then applies its "
+                "own sensible default. This is the default when in doubt."
+            ),
+        },
         "operation": {
             "type": "string",
             "enum": ["value", "rank_top", "rank_bottom", "rank_both_ends",
@@ -793,7 +820,7 @@ _BQ_EXTRACTION_SCHEMA = {
         },
     },
     "required": ["dimension", "dimension_name", "metrics", "filters", "period_phrase",
-                 "unrecognized_metric_phrase", "limit", "operation",
+                 "unrecognized_metric_phrase", "limit", "limit_mode", "operation",
                  "group_by", "dimension_filters", "context_modification"],
     "additionalProperties": False,
 }
@@ -924,11 +951,23 @@ depends entirely on this field:
   real metric key - an unrecognized concept must never silently become
   pace_score or any other real metric.
 
-limit: the EXACT row count the user explicitly requested (an integer), e.g.
-5 for "5 employees with the lowest engagement", "give me 5 worst
-performers", or "top 5" - or null if no explicit count was named at all
-(the caller applies a sensible default). Only set this from an actual
-number in the user's wording - never invent one.
+limit / limit_mode: how many rows the user asked for. This is a THREE-state
+thing and getting it wrong silently changes what the user asked:
+- limit_mode "exact": the user named a count ("top 5", "bottom 10", "give me
+  3 worst performers"). Put that number in `limit`. It is authoritative -
+  the caller will not override it.
+- limit_mode "unlimited": the user explicitly asked for the ENTIRE
+  qualifying population, with no cap - "all employees", "every employee",
+  "list each department", "rank the whole company", "the entire team",
+  "everyone", "company-wide", "the full list", "no limit". Leave `limit`
+  null. NEVER substitute a number (50, 100, 200...) for "all" - a guessed
+  number is a wrong answer, not a safe one. Judge this from MEANING: any
+  wording that means "everybody who qualifies" belongs here, whether or not
+  it resembles the examples above.
+- limit_mode "unspecified": the user named no cardinality at all ("which
+  employees have low engagement?"). Leave `limit` null; the caller applies
+  its own sensible default. Use this when in doubt.
+Only ever set `limit` from an actual number in the user's wording.
 
 operation: one of "value" (a plain lookup for one named/implied scope, no
 ranking), "rank_top" (a multi-row ranking, best/highest first), "rank_bottom"
@@ -1037,6 +1076,10 @@ _BQ_FEW_SHOT = [
 
 _BQ_FEW_SHOT_DEFAULTS = {
     "group_by": None, "dimension_filters": [], "context_modification": "none",
+    # Item #95: every pre-existing example names either a count or nothing,
+    # so "unspecified"/"exact" is the right fill-in for all of them; the
+    # "unlimited" state is demonstrated by the new examples below.
+    "limit_mode": "unspecified",
 }
 
 # --- Item #94: the new fields, demonstrated ---------------------------------
@@ -1093,6 +1136,31 @@ _BQ_FEW_SHOT_V2 = [
     ("which department has the lowest effectiveness",
      {"dimension": "department", "dimension_name": None, "metrics": ["effectiveness_pct"], "filters": {},
       "period_phrase": None, "unrecognized_metric_phrase": None, "limit": 1, "operation": "rank_bottom",
+      "group_by": None, "dimension_filters": [], "context_modification": "none"}),
+    # Item #95: the THREE cardinality states, demonstrated side by side. The
+    # point of these three is the DISTINCTION, not the wording — "all
+    # employees" here stands for any phrasing that means "everybody who
+    # qualifies" ("every employee", "the whole company", "each of the
+    # managers", "the full list"), and all of them are "unlimited".
+    ("show me all employees by engagement",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None,
+      "limit_mode": "unlimited", "operation": "rank_top",
+      "group_by": None, "dimension_filters": [], "context_modification": "none"}),
+    ("rank the whole company by discipline",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["discipline_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None,
+      "limit_mode": "unlimited", "operation": "rank_top",
+      "group_by": None, "dimension_filters": [], "context_modification": "none"}),
+    ("top 10 employees by effectiveness",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["effectiveness_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": 10,
+      "limit_mode": "exact", "operation": "rank_top",
+      "group_by": None, "dimension_filters": [], "context_modification": "none"}),
+    ("which employees have low engagement",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None,
+      "limit_mode": "unspecified", "operation": "rank_bottom",
       "group_by": None, "dimension_filters": [], "context_modification": "none"}),
     # COMPARISON, including one that is NOT two named employees.
     ("compare 11 sept with 10 sept for all employees",
@@ -1207,6 +1275,11 @@ def _bq_stable_instructions():
     for text, out in (_BQ_FEW_SHOT + _BQ_FEW_SHOT_V2):
         full = dict(_BQ_FEW_SHOT_DEFAULTS)
         full.update(out)
+        # Item #95: keep every rendered example internally consistent — an
+        # example showing a number but limit_mode "unspecified" would teach
+        # exactly the confusion this field exists to remove.
+        if "limit_mode" not in out and full.get("limit") is not None:
+            full["limit_mode"] = "exact"
         lines.append(f'User: "{text}"\nJSON: {json.dumps(full)}')
     return _reference_block() + prompt + "\n\nExamples:\n" + "\n".join(lines)
 
@@ -1292,12 +1365,25 @@ def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS
     if data.get("dimension") not in _BQ_DIMENSIONS:
         return None
 
+    # Item #95: cardinality as three states. The clamp here used to be 100,
+    # which was itself a silent override of an explicit request ("top 300"
+    # became 300 -> 100); it is now the same pure safety backstop used
+    # everywhere else, far above any real population.
+    _limit_mode = data.get("limit_mode")
+    if _limit_mode not in ("unspecified", "exact", "unlimited"):
+        _limit_mode = None  # decided below from whatever the model did send
     _raw_limit = data.get("limit")
     _limit = None
     if isinstance(_raw_limit, int) and not isinstance(_raw_limit, bool):
-        # Sanity-clamp exactly like entities.extract_limit() does - never
-        # trust the LLM's own number unbounded.
-        _limit = max(1, min(_raw_limit, 100))
+        _limit = max(1, min(_raw_limit, _MAX_EXPLICIT_LIMIT))
+    if _limit_mode == "unlimited":
+        # "all" never carries a number; a model that sent both is telling us
+        # it guessed one, and the guess must not win over the stated meaning.
+        _limit = None
+    elif _limit_mode is None:
+        _limit_mode = "exact" if _limit is not None else "unspecified"
+    elif _limit_mode == "exact" and _limit is None:
+        _limit_mode = "unspecified"
 
     _operation = data.get("operation")
     if _operation not in ("value", "rank_top", "rank_bottom", "rank_both_ends",
@@ -1337,6 +1423,7 @@ def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS
         "period_phrase": data.get("period_phrase") or None,
         "unrecognized_metric_phrase": data.get("unrecognized_metric_phrase") or None,
         "limit": _limit,
+        "limit_mode": _limit_mode,
         "operation": _operation,
         "group_by": _group_by,
         "dimension_filters": _dim_filters,
