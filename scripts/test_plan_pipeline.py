@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import entities, llm_nlu, main, queries, query_plan, session_store  # noqa: E402
 
 DEPTS = ["Sales - Digital Fleet", "Sales - Enterprise", "SCM", "Annotation",
-         "IT-Development", "Founders Office", "Control Tower", "Ops - Cement"]
+         "IT-Development", "Founders Office", "Control Tower", "Ops - Cement",
+         "Walle8", "Admin", "Channel Sales"]
 MANAGERS = ["Nikhil Kumar", "Megha Sharma"]
 
 CALLS = []
@@ -89,6 +90,15 @@ entities.extract_employee = fake_extract_employee
 llm_nlu.classify = lambda *a, **k: None
 llm_nlu.extract_build_query = lambda *a, **k: None
 main.sql_fallback.answer = lambda *a, **k: None
+
+
+def fake_metric_ranking(metric_key, *a, **kw):
+    CALLS.append(dict(fn="metric_ranking", metric_key=metric_key, **kw))
+    return [{"employee_id": 100, "emp_name": "Row0", "dept_name": "Annotation", metric_key: 50}]
+
+
+queries.metric_ranking = fake_metric_ranking
+main.queries.metric_ranking = fake_metric_ranking
 main._resolve_population_filter = lambda msg: ("shift_type = 'Standard'", None)
 main.spellcheck.correct_typos = lambda m: m
 entities.get_dept_names = lambda: tuple(DEPTS)
@@ -477,6 +487,47 @@ session_store.set_last_list(session, kind="ranking", answer_kind="list",
 resp, calls = ask("M2", "what about last month")
 check_true("M2 vague re-scope still uses the older handler",
            "OLD HANDLER" in resp.reply, repr(resp.reply[:160]))
+
+# ==========================================================================
+# N. The plan as a STRUCTURED FALLBACK, ahead of free-form generated SQL
+#    (round 3): fresh ranking phrasings no rule intent claims used to land
+#    on raw SQL, which leaves no state, stranding every follow-up.
+# ==========================================================================
+
+for msg, want_dim in [("bottom 8 by discipline", "employee"),
+                      ("worst 6 on effectiveness", "employee"),
+                      ("which departments have the best engagement?", "department"),
+                      ("rank departments by discipline, skipping Admin", "department")]:
+    resp, calls = ask("N-" + msg[:12], msg)
+    c = last_bq()
+    check_true("N fallback answers %r at %s grain" % (msg[:34], want_dim),
+               c is not None and c["dimension"] == want_dim,
+               repr((c and c["dimension"], resp.reply[:120])))
+
+resp, calls = ask("N-skip", "rank departments by discipline, skipping Admin")
+c = last_bq()
+check_true("N 'skipping Admin' applies as a filter",
+           c is not None and dim_filters(c) == [("department", "ne", "Admin")],
+           repr(c and dim_filters(c)))
+
+# ...and the fallback leaves a plan behind, so a follow-up composes
+ask("N-chain", "worst 6 on effectiveness")
+ask("N-chain", "break it down by department")
+c = last_bq()
+check_true("N fallback leaves a plan for follow-ups",
+           c is not None and c["dimension"] == "department", repr(c and c["dimension"]))
+
+# spelled-out counts
+resp, calls = ask("N-word", "give me the five least effective people, but not anyone in Walle8")
+c = last_bq()
+check_true("N spelled-out limit + separated negation",
+           c is not None and c["limit"] == 5
+           and dim_filters(c) == [("department", "ne", "Walle8")],
+           repr(c and (c["limit"], dim_filters(c))))
+
+# vague input still falls through rather than being force-answered
+r = main._plan_fallback_reply("hello there", "hello there", session_store.get_session("N-vague"))
+check_true("N vague input still falls through", r is None, repr(r))
 
 # ==========================================================================
 

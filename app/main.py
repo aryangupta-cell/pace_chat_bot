@@ -1646,9 +1646,22 @@ _PLAN_RANKING_EXTRA = re.compile(
 _PLAN_ASCENDING_EXTRA = re.compile(
     r"\b(weakest|poorest|struggling|trailing|underperform\w*)\b", re.IGNORECASE)
 _PLAN_ENTITY_SUBJECT = re.compile(
-    r"\b(?:which|who|what|show\s+me|give\s+me|list)\b[\w\s]{0,12}?\b"
+    r"\b(?:which|who|what|show\s+me|give\s+me|list|rank(?:ed|ing)?|"
+    r"top|bottom|best|worst|highest|lowest)\b[\w\s]{0,12}?\b"
     r"(managers?|reporting\s+managers?|rms?|departments?|depts?|employees?|emps?|people|persons?)\b",
     re.IGNORECASE)
+
+# Spelled-out row counts ("the five least effective people"). entities.
+# extract_limit() only understands digits and is shared by many older call
+# sites, so this stays plan-local rather than widening that shared parser.
+_PLAN_WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15,
+    "twenty": 20,
+}
+_PLAN_WORD_LIMIT = re.compile(
+    r"\b(?:top|bottom|best|worst|highest|lowest|first|last|give\s+me|show\s+me|the)\s+"
+    r"(" + "|".join(_PLAN_WORD_NUMBERS) + r")\b", re.IGNORECASE)
 
 
 def _plan_seed_delta_from_message(raw_message, message):
@@ -1673,6 +1686,10 @@ def _plan_seed_delta_from_message(raw_message, message):
         delta["metrics"] = detected_metrics
 
     limit = entities.extract_limit(text, default=None)
+    if not limit:
+        _wm = _PLAN_WORD_LIMIT.search(text)
+        if _wm:
+            limit = _PLAN_WORD_NUMBERS.get(_wm.group(1).lower())
     if limit:
         delta["limit"] = limit
 
@@ -1838,6 +1855,57 @@ def _handle_query_plan_message(raw_message, message, session):
         return None
     reply, rows = result
     return ChatResponse(reply=reply, rows=rows)
+
+
+def _plan_fallback_reply(raw_message, message, session):
+    """Item #94: the plan path as a STRUCTURED fallback, tried after the
+    extraction cascade and BEFORE free-form generated SQL.
+
+    Rationale: the mandate's standard is that new valid questions work
+    without a new intent per phrasing. Live testing found ordinary ranking
+    phrasings ("bottom 8 by discipline", "worst 6 on effectiveness", "which
+    departments have the best engagement?") that no rule intent claims and
+    that the extraction cascade sometimes declines, landing on
+    `sql_fallback` — which answers, but with raw column names, an explicit
+    unverified label, and (the part that compounds) NO structured state, so
+    every follow-up after one of those answers is stranded.
+
+    This builds a plan from the message DETERMINISTICALLY (no LLM at all:
+    the same metric/limit/direction/entity/period/filter detectors the
+    interceptor uses) and runs it through the same executor and the same
+    verified SQL. It cannot preempt anything — by the time it runs, every
+    other path has already declined — and it only fires for a message that
+    actually reads as a ranking, so vague input still falls through to the
+    existing behaviour. Returns (reply, rows) or None.
+    """
+    text = raw_message or message or ""
+    delta = _plan_seed_delta_from_message(raw_message, message)
+    if delta.get("operation") not in ("rank_top", "rank_bottom"):
+        return None
+    try:
+        filters, ambiguous = query_plan.detect_dimension_filters(text, _plan_resolvers())
+    except Exception:
+        filters, ambiguous = [], []
+    if ambiguous:
+        return None  # let the normal clarification machinery handle it
+    if filters:
+        delta["filters"] = filters
+    # A named single entity means this is a lookup, not a ranking this path
+    # should own — leave those to the branches built for them.
+    try:
+        if entities.extract_employee(text)[0]:
+            return None
+    except Exception:
+        pass
+
+    plan = query_plan.patch(
+        query_plan.new_plan(entity="employee", metrics=["pace_score"]), delta)
+    plan["source"] = "plan_fallback"
+    try:
+        return _execute_plan(plan, session, raw_message=text)
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception("_execute_plan() raised in plan fallback")
+        return None
 
 
 def _handle_driving_performance(raw_message, message, session):
@@ -6754,6 +6822,18 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
         if extraction_result is not None:
             _ext_reply, _ext_rows = extraction_result
             return ChatResponse(reply=_ext_reply, rows=_ext_rows)
+
+        # Item #94: the deterministic plan path gets the next turn, ahead of
+        # free-form generated SQL — same verified SQL engine as every other
+        # ranking answer, and it leaves a query plan behind so follow-ups to
+        # it compose instead of being stranded. See _plan_fallback_reply().
+        try:
+            _plan_fb = _plan_fallback_reply(raw_message, message, session)
+        except Exception:
+            logging.getLogger("pace_chatbot.main").exception("_plan_fallback_reply() raised")
+            _plan_fb = None
+        if _plan_fb is not None:
+            return ChatResponse(reply=_plan_fb[0], rows=_plan_fb[1])
 
         try:
             fallback_result = sql_fallback.answer(raw_message)
