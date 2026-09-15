@@ -430,15 +430,26 @@ _STABLE_INSTRUCTIONS = _SYSTEM_PROMPT + "\n\nExamples:\n" + "\n".join(_FEWSHOT_L
 
 
 def _classify_instructions():
-    """Item #94: the classifier prompt, with PACE_REFERENCE.md prepended.
+    """Item #94: the classifier prompt, with PACE_REFERENCE.md's TERMINOLOGY
+    sections prepended.
+
+    Deliberately NOT the whole reference. classify()'s entire job is to pick
+    one name from a closed list, so the parts it can actually act on are the
+    vocabulary (§3) and the metric-distinction rules; the plan CONCEPTS
+    (§6 — filters with operators, grouping, comparison, modification) are
+    things it structurally cannot express, and its guardrail for those is the
+    "return none and defer" instruction already in _SYSTEM_PROMPT. Loading
+    the full ~22KB document here measurably lengthened the hottest prompt in
+    the app for no decision it could make differently, so only the
+    terminology half is included. `extract_build_query()` — which DOES reason
+    over those concepts — still gets the complete document.
 
     Kept as a function (rather than the module constant it used to be) purely
-    so the reference file can be prepended at call time. The result is still
-    byte-identical on every call, so OpenAI's automatic prompt-caching prefix
-    match is unaffected — the reference block is STABLE content and sits
-    ahead of the variable user message, exactly like the rest of
-    `instructions`."""
-    return _reference_block() + _STABLE_INSTRUCTIONS
+    so the file can be read at call time. The result is byte-identical on
+    every call, so OpenAI's automatic prompt-caching prefix match is
+    unaffected — this is STABLE content sitting ahead of the variable user
+    message, exactly like the rest of `instructions`."""
+    return _reference_block(sections=("## 3.", "## 5.")) + _STABLE_INSTRUCTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -1168,10 +1179,25 @@ a column, or a number.
 """
 
 
-def _reference_block():
+def _reference_block(sections=None):
+    """The reference document, wrapped in its framing header.
+
+    `sections` — optional tuple of markdown heading prefixes (e.g. "## 3.");
+    when given, only those sections are included. Used by the classifier
+    prompt, which can only act on the terminology half (see
+    _classify_instructions)."""
     ref = _pace_reference_text()
     if not ref:
         return ""
+    if sections:
+        wanted = []
+        keep = False
+        for line in ref.splitlines():
+            if line.startswith("## "):
+                keep = any(line.startswith(s) for s in sections)
+            if keep:
+                wanted.append(line)
+        ref = "\n".join(wanted) or ref
     return _PACE_REFERENCE_HEADER + "\n" + ref + "\n\n"
 
 

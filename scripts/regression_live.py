@@ -266,7 +266,7 @@ def main():
     suite = [(c, s) for c, s in SUITE if only is None or c == only]
     print("Running %d conversations against %s\n" % (len(suite), host))
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         results = list(ex.map(lambda cs: run_conversation(host, cs[0], cs[1], verbose), suite))
 
     flat = [r for conv in results for r in conv]
