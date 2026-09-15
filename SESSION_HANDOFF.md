@@ -2261,3 +2261,168 @@ Schema, the PACE formula and its recomputation rule, status bands, the full NL-t
 **READY WITH KNOWN LIMITATIONS — materially more general than before.**
 
 The standard set for this round was whether NEW valid natural-language questions work without a new intent or patch per phrasing. On that standard it largely succeeds: of 15 genuinely unseen questions written after the implementation was complete, 14 answer correctly, including multi-turn compositions that were never coded for. The nine issues listed above were all found by running production and fixed generically (vocabulary, ordering, grain), not by adding a regex per example. The failure mode that remains is the metric-translation gap, which is stated plainly rather than papered over.
+
+
+---
+
+# ITEM #95 — RESULT CARDINALITY: AN EXPLICIT "ALL" / "TOP N" MUST NEVER BE OVERRIDDEN BY A DEFAULT
+
+**Mandate.** GPT-5-mini must be free to interpret valid natural-language
+questions with its own reasoning; `PACE_REFERENCE.md`, the 124 intents and
+the business rules are REFERENCE KNOWLEDGE, never an allowlist. The specific
+bug class to find and fix: a deterministic default silently changing the
+user's requested meaning — above all, "all employees" answered with a hidden
+row cap, and an explicit "top N" clobbered downstream.
+
+### Root cause (exact sites)
+
+"How many rows did the user ask for?" was represented everywhere as
+`int | None`. `None` meant **"the user said nothing"**, and every downstream
+site turned that into a default. There was no representation at all for the
+third, genuinely different state: **"the user explicitly asked for the whole
+population"** — so it was indistinguishable from silence and got the default.
+
+| File / line (pre-fix) | Default | Fired even for an explicit request? |
+|---|---|---|
+| `app/queries.py:6` `LIMIT = 10`, consumed by ~40 `lim = limit or LIMIT` sites | 10 rows | **Yes** — "all employees" reached them as `None` |
+| `app/main.py` `_execute_plan()` `limit = plan.get("limit") or (queries.LIMIT if ranking else 1)` | 10 | **Yes** — `or` cannot tell "everything" from "nothing" |
+| `app/main.py` `_extraction_llm_reply()` ranking branch `... or queries.LIMIT` | 10 | **Yes** |
+| `app/query_plan.py` `normalize()` `max(1, min(limit, 500))` | caps at 500 | **Yes** for an explicit larger N |
+| `app/llm_nlu.py` `extract_build_query()` `max(1, min(_raw_limit, 100))` | caps at 100 | **Yes** — "top 300" silently became 100 |
+| `app/sql_fallback.py:57` `_MAX_ROWS = 200` | 200 | **Yes** — and was quoted back to the user as "up to 200 employees" |
+| `app/main.py` 28x `limit=500` / `limit or 500` full-list closures | 500 | **Yes** for any org above 500 |
+| `app/main.py` `_BULK_ALL_EMPLOYEES_PATTERN` (4 literal shapes) | n/a | **Yes** — any other "whole population" phrasing fell through to "I couldn't find that employee" |
+
+**Live baseline, production, BEFORE any code change** (commit `1592d5c`):
+
+| Question | Rows returned | Verdict |
+|---|---|---|
+| show me all employees by engagement | **10** | BUG — true qualifying population is 331 |
+| rank the whole company by discipline | **10** | BUG |
+| list every employee's pace score | 331 | already correct (a different code path) |
+| top 10 employees by effectiveness | 10 | correct |
+| bottom 10 employees by engagement | 10 | correct |
+| bottom 5 employees in SCM by engagement | 5 | correct |
+
+### The fix — a representation change, not a phrase patch
+
+Cardinality is now **three explicit states**, carried end to end:
+
+    unspecified — the user named no count      -> the executor's default applies
+                                                  (the ONLY state a default may fill in)
+    exact       — the user named N             -> N is authoritative, untouched
+    unlimited   — the user asked for everyone  -> only a safety backstop applies
+
+- `app/query_plan.py`: new plan field **`limit_mode`** (`LIMIT_MODES`), a
+  `UNLIMITED_CEILING = 100000` pure safety backstop, and
+  **`effective_limit(plan, default)`** — the single place the three states
+  become a SQL number, so no executor can reintroduce
+  `plan["limit"] or <magic number>` (which *is* the bug). `patch()` moves the
+  two fields together, so "make it the top 5" after an unlimited request
+  switches the mode back to `exact` instead of dropping the number.
+  `normalize()`'s 500 clamp raised to the ceiling.
+- `app/entities.py`: **`UNLIMITED`** sentinel and **`wants_unlimited()`** —
+  a (quantifier x population-noun) product, *not* a phrase list, so "all
+  employees", "every employee", "each department", "the entire team", "the
+  whole company", "everyone", "company-wide", "the complete list of people",
+  "no limit" all resolve to the same state, and novel wordings compose for
+  free. `extract_limit()` returns it as its LAST arm, so any actual number
+  the user named still wins ("top 5 of all departments" = 5). A quantifier
+  after a scope preposition ("among all employees") is deliberately NOT a
+  cardinality request — that names a population to search, and still asks
+  for one answer.
+- `app/llm_nlu.py`: `limit_mode` added to `_BQ_EXTRACTION_SCHEMA` (required),
+  to the system prompt, and to four new few-shot examples demonstrating all
+  three states side by side. The prompt instructs the model to output
+  `unlimited` and **never to substitute a guessed number for "all"** — and
+  to judge it from MEANING, not from the example wordings. The 100-row clamp
+  became the shared safety backstop.
+- `app/main.py`: `_execute_plan()` uses `effective_limit()`;
+  `_plan_seed_delta_from_message()` emits the tri-state; the extraction
+  cascade honours both the regex sentinel and the LLM's `limit_mode`; the
+  plan FALLBACK now owns explicit-unlimited list requests (they name no
+  ranking direction, so they previously fell through to generated SQL — the
+  very place the 200-row cap lived); the 28 `limit=500` full-list closures
+  became `entities.UNLIMITED`; and the bulk gate now consults
+  `wants_unlimited()` (old regex kept as an OR so nothing can regress).
+- `app/sql_fallback.py`: `_MAX_ROWS` 200 -> 100000 (true backstop), a
+  separate `_MAX_RENDERED_ROWS = 1000` that says "... N more rows (M matched
+  in total)" instead of silently truncating, and the SQL-generation prompt
+  now states the same three-state rule.
+- `PACE_REFERENCE.md`: new section **6.7b "Result cardinality — THREE
+  states, never two"**, plus `{result cardinality}` added to the composable
+  dimensions in the header. Re-read the whole of the extraction prompt, the
+  classify prompt and PACE_REFERENCE.md as instructed: the framing is
+  already correct ("Read it as REFERENCE, NOT as an allowlist... You are
+  expected to handle NOVEL COMPOSITIONS"); nothing constrains the model to
+  known intents, so no wording needed loosening — only the cardinality rule
+  was missing.
+
+### Files changed
+
+`app/entities.py`, `app/query_plan.py`, `app/llm_nlu.py`, `app/main.py`,
+`app/sql_fallback.py`, `PACE_REFERENCE.md`, `scripts/test_query_plan.py`,
+`scripts/test_plan_pipeline.py`, `scripts/regression_live.py`.
+
+### Tests
+
+- `scripts/test_query_plan.py` — **213 passed, 0 failed** (15 new item #95
+  assertions: the three states, both follow-up transitions, the ceiling).
+- `scripts/test_plan_pipeline.py` — **121 passed, 0 failed** (new section P
+  asserts the `limit` the pipeline actually hands the DB layer for 8
+  unlimited phrasings, 7 explicit-N phrasings, the unspecified default, the
+  multi-turn transitions, and the LLM-reported `limit_mode`).
+- `scripts/regression_live.py` — **91 checks, 0 failed** against production,
+  including the pre-existing 76 (baseline/filters/grouping/comparison/
+  multiturn/context-reset all unchanged) plus a new `cardinality` category
+  of 15.
+
+### Live verification (production, after deploy)
+
+| # | Question | Rows | Note |
+|---|---|---|---|
+| L1 | show me all employees by engagement | **331** | was 10 — full qualifying population |
+| L2 | list every employee's pace score | 331 | unchanged |
+| L3 | rank the whole company by discipline | **350** | was 10 (discipline's qualifying population is larger) |
+| L4 | top 10 employees by effectiveness | **10** | explicit limit preserved |
+| L5 | bottom 5 employees in SCM by engagement | **5** | explicit limit + filter preserved |
+| L6 | bottom 10 employees by engagement | **10** | explicit limit preserved |
+| N2 | I want every single employee sorted by effectiveness, no limit | **331** | unseen phrasing |
+| N4 | pull up the entire staff ranked by discipline excluding Annotation | **300** | unseen; unlimited composes with an exclusion (350 - Annotation) |
+| N5 | who has the lowest pace score among all employees | 10 | correctly NOT unlimited — a population scope, not a row count |
+| N6 | top 3 departments by engagement | **3** | explicit N at department grain |
+| N7 | show me all employees in SCM by pace score | **8** | unlimited composes with a positive filter |
+| N8 | which employees have the lowest engagement | **10** | no count named -> the default still applies |
+| M1 | give me the complete list of people ranked by working hours percentage | **346** | round 2 fix; previously "I couldn't find that employee" |
+| — | bottom 10 -> "now show me all of them" -> "make it the top 5" | 10 -> 331 -> 5 | multi-turn, all three states |
+
+### Commit hashes this round
+
+`7c9f373` (the representation change), `7433595` (round 2: generalized the
+bulk-request gate found by live testing, plus bare "each <dim>" as a
+grouping). Both pushed to `origin/master` and `origin/main`; Render
+redeployed both (confirmed via `/api/health`: `pace_reference_chars`
+22406 -> 24122, `extraction_prompt_chars` 49043 -> 54123).
+
+### Remaining limitations (honest)
+
+- **"show each department's engagement, all of them"** still answers
+  "Which department did you mean?" on production. That is the pre-existing
+  department-name ambiguity resolver firing on the bare word "department"
+  before any cardinality or grouping logic runs — a *different* bug class
+  (entity resolution), not a cardinality one. `detect_group_by()` now
+  understands bare "each <dim>", which is the half of it this round could
+  fix safely; the resolver itself was left alone.
+- The safety ceiling (100000) is a real ceiling. It is ~300x the current
+  qualifying population, so it cannot act as a semantic default, but a
+  genuinely unbounded request would still stop there.
+- Very large replies are rendered in full by the table formatter (331 rows
+  is ~30s end to end on the first, cold call). No pagination exists.
+- `queries.LIMIT = 10` remains the default for the `unspecified` state, and
+  the qualifying-row defaults (`shift_type='Standard'`,
+  `ps_worked_flag_day=1`, `visit_flag='No'`) are untouched, per the mandate.
+- **No DB credentials** were available (none are documented in the repo), so
+  every row count above is what the live chatbot API returned, not a direct
+  SQL count. The 331/350/346 figures differ by metric because each metric
+  has its own qualifying population (capped-not-null rows), which is
+  expected, established behaviour.

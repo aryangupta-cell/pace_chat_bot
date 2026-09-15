@@ -83,6 +83,24 @@ def all_of(*checks):
     return _f
 
 
+def data_rows():
+    """Approximate number of DATA rows in a table reply (header excluded)."""
+    def _count(reply):
+        if "<tr>" in reply:
+            return max(reply.count("<tr>") - 1, 0)
+        return max(len([l for l in plain(reply).splitlines() if l.count("|") >= 2]) - 1, 0)
+    return _count
+
+
+def rows_between(lo, hi):
+    """Item #95: the row count IS the assertion — an explicit cardinality
+    must survive end to end, and an explicit "all" must not be capped."""
+    def _f(reply):
+        n = data_rows()(reply)
+        return lo <= n <= hi, "row count %d outside [%d, %d]" % (n, lo, hi)
+    return _f
+
+
 def rows_at_least(n):
     def _f(reply):
         count = plain(reply).count("|") // 2
@@ -237,6 +255,46 @@ SUITE = [
                        ("what is their weakest area?", NO_FAIL_TEXT),
                        ("which employee has the highest PACE score?",
                         all_of(NO_FAIL_TEXT, contains("pace score")))]),
+
+    # ---- 14. result cardinality (item #95) -------------------------------
+    # An EXPLICIT "all"/"every"/"whole" must return the true population (the
+    # qualifying population is in the 300s, so anything <= 50 means a
+    # default silently overrode the request); an EXPLICIT N must return
+    # exactly N; and a question naming no count must still get the small
+    # default. The phrasings are a deliberate mix of known and never-seen
+    # wordings — the fix is in the representation, not in any phrase.
+    ("cardinality", [("show me all employees by engagement",
+                      all_of(NO_FAIL_TEXT, rows_at_least(100)))]),
+    ("cardinality", [("list every employee's pace score",
+                      all_of(NO_FAIL_TEXT, rows_at_least(100)))]),
+    ("cardinality", [("rank the whole company by discipline",
+                      all_of(NO_FAIL_TEXT, rows_at_least(100)))]),
+    ("cardinality", [("I want every single employee sorted by effectiveness, no limit",
+                      all_of(NO_FAIL_TEXT, rows_at_least(100)))]),
+    ("cardinality", [("give me the complete list of people ranked by working hours percentage",
+                      all_of(NO_FAIL_TEXT, rows_at_least(100)))]),
+    ("cardinality", [("pull up the entire staff ranked by discipline excluding Annotation",
+                      all_of(NO_FAIL_TEXT, rows_at_least(100)))]),
+    ("cardinality", [("top 10 employees by effectiveness",
+                      all_of(NO_FAIL_TEXT, rows_between(10, 10)))]),
+    ("cardinality", [("bottom 5 employees in SCM by engagement",
+                      all_of(NO_FAIL_TEXT, rows_between(5, 5)))]),
+    ("cardinality", [("bottom 10 employees by engagement",
+                      all_of(NO_FAIL_TEXT, rows_between(10, 10)))]),
+    ("cardinality", [("top 3 departments by engagement",
+                      all_of(NO_FAIL_TEXT, rows_between(3, 3)))]),
+    # "among all employees" is a population SCOPE, not a row count.
+    ("cardinality", [("who has the lowest pace score among all employees",
+                      all_of(NO_FAIL_TEXT, rows_between(1, 15)))]),
+    # No cardinality named -> the established small default still applies.
+    ("cardinality", [("which employees have the lowest engagement",
+                      all_of(NO_FAIL_TEXT, rows_between(1, 15)))]),
+    # Multi-turn: unlimited lifts a previous explicit limit, and an explicit
+    # limit afterwards takes it straight back.
+    ("cardinality", [("bottom 10 employees by engagement",
+                      all_of(NO_FAIL_TEXT, rows_between(10, 10))),
+                     ("now show me all of them", all_of(NO_FAIL_TEXT, rows_at_least(100))),
+                     ("make it the top 5", all_of(NO_FAIL_TEXT, rows_between(5, 5)))]),
 ]
 
 
