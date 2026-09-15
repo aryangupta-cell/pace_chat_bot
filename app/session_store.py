@@ -159,7 +159,54 @@ def get_session(session_id):
         # slots (not a general N-entity history) - see push_context()'s
         # _push_comparison_entity() call for how this is kept in sync.
         "comparison_entities": {"first": None, "second": None},
+        # Item #94: THE current query plan — one structured object (see
+        # app/query_plan.py) describing the query currently under discussion,
+        # which a follow-up PATCHES rather than reconstructs.
+        #
+        # This is the unification of the four older stores above, done
+        # additively rather than by deletion: sticky_context/last_list/
+        # comparison_entities/query_context are all still written exactly as
+        # before (every one of the ~123 rule-based intents depends on them),
+        # but any answer produced by — or routed through — the plan layer
+        # also records a full plan here, and `query_plan.from_query_context()`
+        # can reconstruct a usable plan from the older `query_context` store
+        # so a plan-shaped follow-up composes with a RULE-BASED answer too.
+        # That was the deliberate choice over a big-bang migration: it gets
+        # the one-plan semantics without rewriting 123 intents' bookkeeping.
+        "current_plan": None,
     })
+
+
+def set_current_plan(session, plan):
+    """Record the query plan that produced the answer just given (item #94).
+    Overwrites unconditionally — this describes exactly the most recent
+    substantive answer, not a history."""
+    if session is not None:
+        session["current_plan"] = plan
+
+
+def get_current_plan(session):
+    """The plan currently under discussion, or None.
+
+    Falls back to reconstructing one from the older `query_context` store so
+    a follow-up can compose with an answer produced by any of the ~123
+    rule-based intents (which write query_context but know nothing about
+    plans). See query_plan.from_query_context()."""
+    if session is None:
+        return None
+    plan = session.get("current_plan")
+    if plan:
+        return plan
+    qc = session.get("query_context") or {}
+    if qc.get("last_operation"):
+        from . import query_plan as _qp
+        return _qp.from_query_context(qc)
+    return None
+
+
+def clear_current_plan(session):
+    if session is not None:
+        session["current_plan"] = None
 
 
 def _push_comparison_entity(session, entity_type, entity_id, entity_name):

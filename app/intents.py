@@ -410,7 +410,14 @@ _DATE_TOKEN = (
     r"(?:\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTHS_ALT + r"|" + _MONTHS_ALT + r"\s+\d{1,2}(?:st|nd|rd|th)?)"
 )
 _DAY_COMPARE_PATTERNS = [
-    _DATE_TOKEN + r"\b.{0,25}\b(?:vs\.?|versus|and|to|or)\b.{0,3}" + _DATE_TOKEN + r"\b",
+    # Item #94: "with"/"against"/"compared to"/"& " added to the connector
+    # alternation. Live-confirmed gap: "compare 11 sept with 10 sept for all
+    # employees" carried two perfectly good date tokens but the connector
+    # "with" was missing here, so day_compare never matched and the message
+    # fell through to employee_compare, which replied "I need two employee
+    # names to compare". This is a connector-vocabulary gap in an EXISTING
+    # pattern, not a new phrase-specific intent.
+    _DATE_TOKEN + r"\b.{0,25}\b(?:vs\.?|versus|and|to|or|with|against|compared\s+(?:to|with))\b.{0,3}" + _DATE_TOKEN + r"\b",
     # "which day was better/more productive" with no restated dates - relies
     # on the day-vs-day dates from the prior turn (sticky session context),
     # e.g. a same-session follow-up to the pattern above.

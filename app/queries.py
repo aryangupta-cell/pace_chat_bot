@@ -1839,6 +1839,128 @@ def day_compare_ranking(date1, date2, dept_name=None, employee_ids=None, metric_
     return rows, label
 
 
+COMPARE_GROUP_COLUMNS = {
+    "department": ("dept_name", "Department"),
+    "rm": ("reporting_manager_name", "Manager"),
+    "employee": ("employee_id, emp_name", "Employee"),
+    "grade": ("grade", "Grade"),
+    "designation": ("designation", "Designation"),
+}
+
+
+def compare_grouped(period_a, period_b, group_by, kind="day", metric_key=None,
+                     filter_sql=None, dept_name=None, dimension_filters=None, limit=None):
+    """Item #94: two-period comparison BROKEN DOWN BY a dimension.
+
+    The pre-existing `day_compare()`/`month_compare()` engines treat
+    `dept_name` purely as a scalar SCOPE filter — they can answer "compare
+    11 Sept with 10 Sept FOR department X" but have no concept of "compare
+    11 Sept with 10 Sept, one row PER department". That is the missing
+    GROUP BY on a comparison the item #94 mandate names explicitly: it is
+    what makes "compare 11 sept with 10 sept for all employees" → "tell me
+    dept wise" answerable while preserving BOTH dates AND the compare
+    operation, instead of collapsing to "which department did you mean?".
+
+    `kind`      — "day" (period_a/period_b are dates) or "month"
+                  (period_a/period_b are 'YYYY-MM' strings).
+    `group_by`  — any COMPARE_GROUP_COLUMNS key.
+    `metric_key`— a DAY_COMPARE_METRICS key (default: "pace"), so this
+                  engine shares the EXACT metric vocabulary/labels the two
+                  existing comparison engines already use — no second
+                  metric mapping was introduced.
+    `filter_sql`— the same full population-filter string day_compare()/
+                  month_compare() already take from main.py's
+                  _resolve_population_filter(); the established default
+                  filters are therefore applied identically here.
+    `dimension_filters` — the generic query-plan filter list (see
+                  BUILD_QUERY_FILTER_COLUMNS), so a comparison composes
+                  with "excluding SCM" the same way a ranking does.
+
+    Returns (rows, label). Each row: {group_key, group_label, val_a, val_b,
+    delta, n_a, n_b}, ordered by delta descending (biggest improvement
+    first).
+    """
+    key = metric_key or DEFAULT_DAY_COMPARE_METRIC
+    col, label = DAY_COMPARE_METRICS.get(key, DAY_COMPARE_METRICS[DEFAULT_DAY_COMPARE_METRIC])
+    group_col, group_label = COMPARE_GROUP_COLUMNS.get(
+        group_by, COMPARE_GROUP_COLUMNS["department"])
+    # employee grain needs two columns (id for identity, name for display)
+    if group_by == "employee":
+        select_group, join_group, out_group = "employee_id, emp_name", "employee_id", "emp_name"
+    else:
+        select_group, join_group, out_group = group_col, group_col, group_col
+
+    pop_filter = f"and {filter_sql}" if filter_sql else "and shift_type = 'Standard'"
+
+    if kind == "month":
+        period_expr = "to_char(worked_day,'YYYY-MM')"
+    else:
+        period_expr = "worked_day"
+
+    extra = []
+    params = {"pa": period_a, "pb": period_b, "dept_name": dept_name}
+    for _i, _df in enumerate(dimension_filters or []):
+        _c = BUILD_QUERY_FILTER_COLUMNS.get((_df or {}).get("field"))
+        _op = (_df or {}).get("operator")
+        if not _c:
+            continue
+        _p = "cmp_filter_%d" % _i
+        if _op == "eq":
+            extra.append(f"and {_c} = %({_p})s")
+            params[_p] = _df.get("value")
+        elif _op == "ne":
+            extra.append(f"and {_c} is distinct from %({_p})s")
+            params[_p] = _df.get("value")
+        elif _op == "in":
+            extra.append(f"and {_c} = any(%({_p})s)")
+            params[_p] = list(_df.get("value") or [])
+        elif _op == "not_in":
+            extra.append(f"and ({_c} is null or {_c} <> all(%({_p})s))")
+            params[_p] = list(_df.get("value") or [])
+        elif _op == "is_null":
+            extra.append(f"and {_c} is null")
+        elif _op == "is_not_null":
+            extra.append(f"and {_c} is not null")
+    extra_sql = "\n              ".join(extra)
+
+    lim = limit or 50
+
+    sql = f"""
+        with a as (
+            select {select_group}, avg({col}) as val, count(*) as n
+            from public.pace_1
+            where {period_expr} = %(pa)s
+              and {col} is not null
+              and {join_group} is not null
+              and (%(dept_name)s is null or dept_name = %(dept_name)s)
+              {extra_sql}
+              {pop_filter}
+            group by {select_group}
+        ),
+        b as (
+            select {join_group}, avg({col}) as val, count(*) as n
+            from public.pace_1
+            where {period_expr} = %(pb)s
+              and {col} is not null
+              and {join_group} is not null
+              and (%(dept_name)s is null or dept_name = %(dept_name)s)
+              {extra_sql}
+              {pop_filter}
+            group by {join_group}
+        )
+        select a.{out_group} as group_key,
+               a.val as val_a, b.val as val_b,
+               (b.val - a.val) as delta,
+               a.n as n_a, b.n as n_b
+        from a
+        join b on a.{join_group} = b.{join_group}
+        order by delta desc
+        limit {lim}
+    """
+    rows = run_query(sql, params)
+    return rows, label, group_label
+
+
 def month_compare(month1, month2, dept_name=None, employee_id=None, metric_keys=None, filter_sql=None):
     """Company-wide (or dept/employee-scoped) average comparison of one or
     more metrics between two full calendar months ('YYYY-MM' strings) -
@@ -2940,9 +3062,26 @@ def default_period_last_60_days():
 _build_query_default_period = default_period_last_60_days
 
 
+# Item #94: the generic FILTERABLE-DIMENSION registry used by build_query()'s
+# `dimension_filters` param. Each entry maps a query-plan filter `field` (see
+# app/query_plan.py's FILTER_FIELDS, the single source of truth for the
+# vocabulary) to the real public.pace_1 column it filters on. This replaces
+# item #93's department-specific `exclude_scope` special case with ONE
+# operator-aware mechanism that works for ANY of these dimensions — adding a
+# new filterable dimension is a one-line addition here plus a resolver, never
+# a new regex or a new code path per phrase.
+BUILD_QUERY_FILTER_COLUMNS = {
+    "department": "dept_name",
+    "employee": "employee_id",
+    "rm": "reporting_manager_name",
+    "grade": "grade",
+    "designation": "designation",
+}
+
+
 def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None, scope=None,
                  ascending=False, latest_n_days=None, employee_ids=None, latest_n_days_offset=0,
-                 reporting_user_id=None, exclude_scope=None):
+                 reporting_user_id=None, exclude_scope=None, dimension_filters=None):
     """General parametrized engine: SELECT <metrics> GROUP BY <dimension> FROM
     public.pace_1 WHERE <filters> AND <period>.
 
@@ -3111,6 +3250,41 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         # NULL comparison semantics.
         where.append(f"{excl_col} is distinct from %(exclude_scope_name)s")
         params["exclude_scope_name"] = excl_name
+
+    # Item #94: generic, OPERATOR-AWARE dimension filters. `dimension_filters`
+    # is a list of {"field", "operator", "value"} dicts produced by
+    # app/query_plan.py (already validated/normalized there against
+    # FILTER_FIELDS/FILTER_OPERATORS, so anything reaching here is known-good;
+    # unknown fields are still skipped defensively rather than trusted).
+    # Operators: eq | ne | in | not_in | is_null | is_not_null.
+    #
+    # `ne`/`not_in` deliberately use IS DISTINCT FROM / "is null or <> all"
+    # so a NULL on that column counts as "not the excluded value" rather than
+    # being silently dropped by SQL's NULL comparison semantics — the same
+    # decision item #93 made for `exclude_scope`, now applied uniformly.
+    for _i, _df in enumerate(dimension_filters or []):
+        _col = BUILD_QUERY_FILTER_COLUMNS.get((_df or {}).get("field"))
+        _op = (_df or {}).get("operator")
+        if not _col:
+            continue
+        _p = "dim_filter_%d" % _i
+        _val = _df.get("value")
+        if _op == "eq":
+            where.append(f"{_col} = %({_p})s")
+            params[_p] = _val
+        elif _op == "ne":
+            where.append(f"{_col} is distinct from %({_p})s")
+            params[_p] = _val
+        elif _op == "in":
+            where.append(f"{_col} = any(%({_p})s)")
+            params[_p] = list(_val) if isinstance(_val, (list, tuple)) else [_val]
+        elif _op == "not_in":
+            where.append(f"({_col} is null or {_col} <> all(%({_p})s))")
+            params[_p] = list(_val) if isinstance(_val, (list, tuple)) else [_val]
+        elif _op == "is_null":
+            where.append(f"{_col} is null")
+        elif _op == "is_not_null":
+            where.append(f"{_col} is not null")
 
     where_clause = " and ".join(where) if where else "true"
 

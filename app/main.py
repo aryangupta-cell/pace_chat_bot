@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from . import entities, queries, intents, team, session_store, spellcheck, llm_nlu, sql_fallback
+from . import query_plan
 
 app = FastAPI(title="Pace Chatbot (Phase 1)")
 
@@ -1271,20 +1272,22 @@ _ASCENDING_WORDS = re.compile(
     r"\b(least|lowest|worst|fewest|bottom|smallest|struggling|worse|declin\w*|drop\w*)\b",
     re.IGNORECASE)
 
-# Item #93: department FILTER operator detection - a department name sitting
-# next to a NEGATION word is a NOT-IN/exclude filter, never the query's
-# primary subject; next to an "only"/"just" word it's a positive scope
-# filter, same mechanism, opposite operator. See _extraction_llm_reply's
-# "Item #93" block for the full root-cause writeup and how this composes
-# with an in-progress ranking. Deliberately broader than the pre-existing
-# queries._EXCLUDE_PATTERN (a DIFFERENT feature - excluding one named
-# EMPLOYEE from a day-flag list) - "exclude" itself was missing from that
-# one and is exactly the word in the reported bug, so this is a new,
-# separate regex rather than a reuse of that one.
-_DEPT_FILTER_NEGATION = re.compile(
-    r"\b(exclude|excluding|except|excepting|other than|outside(?:\s+of)?|without|besides|beside|not\s+in)\b",
-    re.IGNORECASE)
-_DEPT_FILTER_POSITIVE_SCOPE = re.compile(r"\b(only|just)\b", re.IGNORECASE)
+# Item #94: item #93's `_DEPT_FILTER_NEGATION`/`_DEPT_FILTER_POSITIVE_SCOPE`
+# pair used to live here. They were a DEPARTMENT-SPECIFIC workaround —
+# exactly what this round's mandate forbids — and they lived four cascade
+# stages downstream of where the decision actually gets made, so they
+# demonstrably never fired reliably (live-confirmed in this round's baseline
+# run: "bottom 10 emps based on Engagement" → "exclude Sales - Digital Fleet"
+# fell all the way through to the raw-SQL fallback, and the single-turn form
+# scoped INTO the excluded department).
+#
+# They are superseded, not merely disabled, by ONE generic mechanism:
+# `query_plan.detect_dimension_filters()` (operator-aware, field-generic,
+# driven by query_plan.FILTER_FIELDS, unit-tested offline in
+# scripts/test_query_plan.py), consumed both by the new pre-classification
+# interceptor `_handle_query_plan_message()` and by `_extraction_llm_reply()`
+# below. There is deliberately only one implementation of "what does
+# exclude/only/except mean" in this codebase now.
 
 # Item #86: the 4 comparable pct sub-metrics used by every "strongest/
 # weakest area" computation (item #76/#78's original single-entity version,
@@ -1350,6 +1353,442 @@ def _resolve_period_and_filters(text, base_filters=None):
             if mentioned_m and month_str:
                 period = _month_str_to_range(month_str)
     return period, latest_n_days, filters
+
+
+# ===========================================================================
+# Item #94 — the QUERY PLAN layer's application-side wiring.
+#
+# app/query_plan.py holds the pure, DB-free, LLM-free plan vocabulary and
+# patching semantics. This block is the part that has to touch real data:
+# entity resolution, metric-key translation, plan execution against
+# queries.build_query()/queries.compare_grouped(), and the one new
+# pre-classification interceptor that finally gives the plan path a fair
+# shot at conversational follow-ups.
+#
+# WHY AN INTERCEPTOR AND NOT A DEEPER CASCADE STAGE (the item #93 lesson):
+# item #93 put its department-exclude fix INSIDE _extraction_llm_reply(),
+# the 4th of 5 cascade stages. Live re-testing proved it never reliably
+# fired, because two upstream layers could claim the message first:
+#   * intents.match_intent() — for a single-turn message like "exclude X
+#     dept and then tell bottom 10 emps by engagement", which matches
+#     engagement_low and was then SCOPED INTO the excluded department
+#     (the exact inverse of what the user asked for); and
+#   * llm_nlu.classify() — a CLOSED-VOCABULARY intent-name classifier with
+#     no filter/grouping concepts at all — for a bare follow-up like
+#     "exclude SCM" or "tell me dept wise", which it confidently mapped to
+#     dept_avg/dept_summary, producing a single-department lookup.
+#
+# The fix is ordering, not more patching. This interceptor runs BEFORE
+# match_intent(), but fires ONLY for shapes the plan layer is unambiguously
+# the right owner of:
+#   (a) a NEGATIVE dimension filter, in any message (negation is never a
+#       "scope to this" signal, so no existing intent can be right about it); or
+#   (b) a filter / grouping / filter-removal modification in a message that
+#       matches NO rule intent at all AND follows an existing plan.
+# Condition (b) is deliberately gated on `match_intent(...) is None`, so the
+# 123 intents' behaviour on every question they already handle is BIT-FOR-BIT
+# unchanged — this only ever takes precedence over classify(), which is
+# exactly what the mandate asks for.
+# ===========================================================================
+
+def _plan_resolvers():
+    """Entity resolvers for query_plan.detect_dimension_filters(), wrapping
+    the EXISTING fuzzy-safe extractors in entities.py. Never invents its own
+    name matching — same "one resolver, reused" discipline as every other
+    entity call site in this file. Each returns (value, candidates)."""
+    def _dept(text):
+        try:
+            return entities.extract_department(text)
+        except Exception:
+            return None, None
+
+    def _rm(text):
+        try:
+            mgr_id, mgr_name = entities.extract_manager(text)
+        except entities.Ambiguous as e:
+            return None, list(e.candidates)
+        except Exception:
+            return None, None
+        return (mgr_name if mgr_id else None), None
+
+    def _emp(text):
+        try:
+            emp_id, _emp_name = entities.extract_employee(text)
+        except entities.Ambiguous as e:
+            return None, list(e.candidates)
+        except Exception:
+            return None, None
+        return emp_id, None
+
+    return {"department": _dept, "rm": _rm, "employee": _emp}
+
+
+# The older rule-based ranking path (queries.METRICS, used by metric_ranking())
+# and the generalized engine (queries.BUILD_QUERY_METRICS, used by
+# build_query()) grew independently and use DIFFERENT key spellings for the
+# same concepts. A plan recovered from a rule-based answer therefore has to be
+# translated before it can be executed by build_query(). Anything with no
+# equivalent is reported as untranslatable, and the plan path declines the
+# message rather than silently answering about a different metric — the same
+# "never substitute a metric the user didn't ask for" rule item #72/#76
+# established.
+_PLAN_METRIC_ALIASES = {
+    "engagement": "engagement_pct",
+    "effectiveness": "effectiveness_pct",
+    "discipline": "discipline_pct",
+    "working": "working_pct",
+    "working_pct": "working_pct",
+    "pace_score": "pace_score",
+    "pace": "pace_score",
+    "productive_min": "productive_minutes",
+}
+
+
+def _plan_metrics_for_build_query(metrics):
+    """(translated_metrics, ok). ok=False means at least one metric has no
+    build_query() equivalent, so the caller must decline rather than guess."""
+    out = []
+    valid = set(queries.BUILD_QUERY_METRICS.keys()) | {
+        "pace_score", "pace_status", "dept_status_60_days_derived",
+    }
+    for m in metrics or []:
+        key = m if m in valid else _PLAN_METRIC_ALIASES.get(m)
+        if not key or key not in valid:
+            return [], False
+        if key not in out:
+            out.append(key)
+    return (out or ["pace_score"]), True
+
+
+# DAY_COMPARE_METRICS key -> BUILD_QUERY_METRICS key, so a comparison plan
+# speaks the same metric vocabulary as every other plan.
+_DAY_COMPARE_TO_PLAN_METRIC = {
+    "pace": "pace_score", "engagement": "engagement_pct",
+    "discipline": "discipline_pct", "working": "working_pct",
+    "effectiveness": "effectiveness_pct",
+}
+
+_PLAN_COMPARE_METRIC_ALIASES = {
+    "pace_score": "pace", "pace": "pace",
+    "engagement_pct": "engagement", "engagement": "engagement",
+    "effectiveness_pct": "effectiveness", "effectiveness": "effectiveness",
+    "discipline_pct": "discipline", "discipline": "discipline",
+    "working_pct": "working", "working": "working",
+}
+
+# Dimensions queries.build_query() can actually GROUP BY.
+_PLAN_BQ_DIMENSIONS = ("employee", "department", "rm")
+
+
+def _plan_effective_dimension(plan):
+    """The grain the answer is produced at.
+
+    This is where the entity-vs-grouping distinction becomes concrete: when a
+    plan carries a `group_by`, THAT is the output grain; otherwise the plan's
+    `entity` is. "employees in Sales" keeps entity=employee (Sales is a
+    filter); "show it department wise" sets group_by=department and the very
+    same plan now answers one row per department.
+    """
+    gb = plan.get("group_by")
+    if gb in _PLAN_BQ_DIMENSIONS:
+        return gb
+    return plan.get("entity") if plan.get("entity") in _PLAN_BQ_DIMENSIONS else "employee"
+
+
+def _format_compare_grouped(rows, metric_label, group_label, label_a, label_b, footer=None):
+    if not rows:
+        return "No data found for that comparison."
+    headers = [group_label, f"{metric_label} ({label_a})", f"{metric_label} ({label_b})", "Change"]
+    data = []
+    for r in rows:
+        va, vb, d = r.get("val_a"), r.get("val_b"), r.get("delta")
+        data.append([
+            r.get("group_key"), _fmt(va), _fmt(vb),
+            ("+" if (d or 0) > 0 else "") + _fmt(d),
+        ])
+    out = f"Comparing {metric_label} — {label_a} vs {label_b}, by {group_label.lower()}:\n\n" + _render_table(headers, data)
+    if footer:
+        out += f"\n\n({footer})"
+    return out
+
+
+def _execute_plan(plan, session, raw_message=""):
+    """Run a normalized QueryPlan. Returns (reply, rows) or None to decline.
+
+    Declining (rather than guessing) whenever the plan names something this
+    engine cannot express is deliberate and matches the cascade's standing
+    fail-safe contract — the caller then lets the normal pipeline continue.
+    """
+    plan = query_plan.normalize(plan)
+
+    # ---- comparison (with optional GROUP BY) ----------------------------
+    cmp_ = plan.get("comparison")
+    if plan["operation"] == "compare" and cmp_:
+        gb = plan.get("group_by") or cmp_.get("group_by")
+        if gb not in queries.COMPARE_GROUP_COLUMNS:
+            return None  # a plain (ungrouped) comparison is the old engines' job
+        raw_metric = (plan.get("metrics") or ["pace_score"])[0]
+        cmp_metric = _PLAN_COMPARE_METRIC_ALIASES.get(raw_metric)
+        if cmp_metric is None:
+            return None
+        filter_sql, filter_footer = _resolve_population_filter(raw_message or "")
+        try:
+            rows, metric_label, group_label = queries.compare_grouped(
+                cmp_["period_a"], cmp_["period_b"], gb, kind=cmp_.get("kind") or "day",
+                metric_key=cmp_metric, filter_sql=filter_sql,
+                dimension_filters=plan.get("filters"),
+            )
+        except Exception:
+            logging.getLogger("pace_chatbot.main").exception("compare_grouped() raised")
+            return None
+        label_a, label_b = cmp_["period_a"], cmp_["period_b"]
+        if (cmp_.get("kind") or "day") == "month":
+            label_a, label_b = _month_label(label_a), _month_label(label_b)
+        footer = ", ".join(x for x in [query_plan.describe(plan) or None, filter_footer] if x)
+        reply = _format_compare_grouped(rows, metric_label, group_label,
+                                        str(label_a), str(label_b), footer=footer or None)
+        if session is not None:
+            session_store.set_current_plan(session, plan)
+        return reply, rows
+
+    if plan["operation"] == "compare":
+        return None
+
+    # ---- value / ranking -------------------------------------------------
+    gb = plan.get("group_by")
+    if gb is not None and gb not in _PLAN_BQ_DIMENSIONS:
+        # "day wise"/"month wise"/"grade wise" grouping is only expressible
+        # on the comparison engine today — decline rather than silently
+        # answering an ungrouped version of the question.
+        return None
+
+    metrics, ok = _plan_metrics_for_build_query(plan.get("metrics"))
+    if not ok:
+        return None
+
+    dimension = _plan_effective_dimension(plan)
+    ranking = query_plan.is_ranking(plan)
+    limit = plan.get("limit") or (queries.LIMIT if ranking else 1)
+    name_filter = plan.get("name_filter") if not ranking else None
+
+    try:
+        rows = queries.build_query(
+            dimension, metrics,
+            filters=plan.get("population_filters") or {},
+            period=plan.get("period"),
+            name_filter=name_filter,
+            limit=limit,
+            ascending=plan.get("ascending", False),
+            latest_n_days=plan.get("latest_n_days"),
+            dimension_filters=plan.get("filters"),
+        )
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception("build_query() raised inside _execute_plan")
+        return None
+
+    if not rows:
+        return ("No data found for that combination of filters in this period.", [])
+
+    metric_label = _BUILD_QUERY_METRIC_LABELS.get(metrics[0], metrics[0])
+    if ranking or len(rows) > 1:
+        header = f"Ranked by {metric_label}"
+        reply = header + ":\n\n" + _format_build_query_rows(rows, dimension, metrics, name_label=None)
+    else:
+        reply = _format_build_query_rows(rows, dimension, metrics,
+                                          name_label=plan.get("name_label"))
+    footer = query_plan.describe(plan)
+    if footer:
+        reply += f"\n\n({footer})"
+
+    if session is not None:
+        session_store.set_current_plan(session, plan)
+        _id_key = {"employee": "employee_id", "department": "dept_name",
+                   "rm": "reporting_manager_name"}.get(dimension)
+        _ids = [r.get(_id_key) for r in rows if r.get(_id_key) is not None] if _id_key else []
+        _dept_f = next((f for f in plan.get("filters") or [] if f["field"] == "department"), None)
+        session_store.set_query_context(
+            session,
+            last_operation=plan["operation"] if ranking else "value",
+            last_dimension=dimension, last_result_ids=_ids,
+            ascending=plan.get("ascending") if ranking else None,
+            metric=metrics, period_phrase=plan.get("period_phrase"),
+            limit=limit,
+            dept_filter=({"operator": _dept_f["operator"], "value": _dept_f["value"]}
+                         if _dept_f else None),
+        )
+        session_store.set_last_list(
+            session, kind="ranking", answer_kind="list",
+            employee_ids=_ids if dimension == "employee" else None,
+            date_range=plan.get("period"), ascending=plan.get("ascending"),
+        )
+    return reply, rows
+
+
+def _plan_seed_delta_from_message(raw_message, message):
+    """Everything this ONE message says about a query, as a plan delta.
+
+    Only keys the message genuinely carries are included — that is what makes
+    `query_plan.patch()` preserve every field the user did not mention. This
+    is entirely deterministic (regex + the existing entity/period parsers);
+    no LLM is consulted, which is why the filter/grouping follow-ups fixed
+    this round work even when the LLM is slow, unavailable, or guesses wrong.
+    """
+    delta = {}
+    text = raw_message or message or ""
+
+    detected_metrics = _detect_build_query_metrics(message)
+    # _detect_build_query_metrics() returns ["pace_score"] as a DEFAULT when
+    # nothing is named, so "did this message name a metric?" needs an
+    # independent check rather than trusting that default.
+    named_metric = (detected_metrics != ["pace_score"]
+                    or re.search(r"\bpace\b|\bscore\b", text, re.IGNORECASE) is not None)
+    if named_metric:
+        delta["metrics"] = detected_metrics
+
+    limit = entities.extract_limit(text, default=None)
+    if limit:
+        delta["limit"] = limit
+
+    if _RANKING_WORDS.search(text):
+        delta["operation"] = "rank_bottom" if _ASCENDING_WORDS.search(text) else "rank_top"
+    elif _ASCENDING_WORDS.search(text):
+        delta["ascending"] = True
+
+    pop = _detect_build_query_filters(text)
+    period, latest_n, pop = _resolve_period_and_filters(text, pop)
+    if pop:
+        delta["population_filters"] = pop
+    if period is not None:
+        delta["period"] = period
+    if latest_n is not None:
+        delta["latest_n_days"] = latest_n
+
+    gb = query_plan.detect_group_by(text) or query_plan.detect_group_by(message)
+    if gb:
+        delta["group_by"] = gb
+    return delta
+
+
+def _handle_query_plan_message(raw_message, message, session):
+    """The item #94 pre-classification interceptor. Returns a ChatResponse,
+    or None to let the normal pipeline continue untouched.
+
+    See the big comment block above this section for exactly when it fires
+    and why that gating keeps the 123 rule intents bit-for-bit unchanged.
+    """
+    if session is None:
+        return None
+    text = raw_message or message or ""
+    resolvers = _plan_resolvers()
+
+    try:
+        filters, ambiguous = query_plan.detect_dimension_filters(text, resolvers)
+        if not filters and not ambiguous and message and message != text:
+            filters, ambiguous = query_plan.detect_dimension_filters(message, resolvers)
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception("query_plan.detect_dimension_filters() raised")
+        return None
+
+    group_by = query_plan.detect_group_by(text) or query_plan.detect_group_by(message)
+    wants_remove = query_plan.detect_context_modification(text) == "remove_filter"
+    has_negative = any(f["operator"] in query_plan.NEGATIVE_OPERATORS for f in filters)
+
+    prior = session_store.get_current_plan(session)
+    try:
+        rule_free = intents.match_intent(message) is None
+    except Exception:
+        rule_free = False
+    follow_up_mode = prior is not None and rule_free
+
+    # A message carrying its own interrogative subject ("who's in red in
+    # Founders Office?", "which employees are in Annotation?") is a FRESH
+    # question, not a modification of the previous one — even though it
+    # contains words that look like filter markers. Only the unambiguous
+    # NEGATION markers are acted on in that case; everything softer is left
+    # to the existing pipeline, which already answers these correctly.
+    _interrogative = re.search(r"\b(who|whom|which|what|whats|what's|how|when|why|where|"
+                               r"list|name)\b", text, re.IGNORECASE) is not None
+    _short = len((text or "").split()) <= 6
+
+    # In follow-up mode the whole message IS the modification, so the broad
+    # positive markers ("in SCM", "from SCM") become safe to act on — but
+    # only for a genuinely BARE message, for exactly the reason above.
+    if (follow_up_mode and not filters and not ambiguous
+            and _short and not _interrogative):
+        try:
+            filters, ambiguous = query_plan.detect_dimension_filters(
+                text, resolvers, allow_weak_positive=True)
+        except Exception:
+            filters, ambiguous = [], []
+
+    if ambiguous and (has_negative or follow_up_mode):
+        return ChatResponse(
+            reply=f"Multiple departments match that name: {', '.join(ambiguous)}. Which one did you mean?",
+            needs_clarification=True, clarification_options=list(ambiguous),
+        )
+
+    delta = _plan_seed_delta_from_message(raw_message, message)
+    # A "bare modification": the message changes the ranking, the metric or
+    # the period of the question already under discussion and says nothing
+    # else. These carry no filter and no grouping, so they need their own
+    # firing condition — they are exactly the "make it the top 5" / "show me
+    # effectiveness instead" / "same thing for August" family the mandate
+    # requires, and no rule intent or closed-vocabulary intent name can
+    # represent them.
+    _bare_modification = (
+        not _interrogative
+        and any(k in delta for k in ("limit", "operation", "ascending", "metrics",
+                                     "period", "latest_n_days"))
+    )
+
+    if has_negative:
+        fire = True
+    elif follow_up_mode and (filters or group_by or wants_remove or _bare_modification):
+        fire = True
+    else:
+        fire = False
+    if not fire:
+        return None
+
+    if wants_remove:
+        delta["filters"] = query_plan.CLEAR
+    elif filters:
+        delta["filters"] = filters
+
+    # "ALSO exclude Y" / "and exclude Y too" accumulates onto the existing
+    # filter for that field (becoming a not_in list) rather than replacing it.
+    _accumulate = re.search(r"\b(also|too|as well|additionally|and)\b", text, re.IGNORECASE) is not None
+    if prior is not None:
+        plan = query_plan.patch(prior, delta,
+                                filter_mode="accumulate" if _accumulate else "add")
+    else:
+        # A single-turn question with a negative filter and no prior context:
+        # build the plan from this message alone. Note this is the SAME delta
+        # the multi-turn path applies to a prior plan — which is precisely why
+        # the single-turn and multi-turn forms of the same request produce an
+        # identical plan (asserted in scripts/test_query_plan.py).
+        base = query_plan.new_plan(entity="employee", metrics=["pace_score"], source="plan_interceptor")
+        plan = query_plan.patch(base, delta)
+        if not query_plan.is_ranking(plan) and plan.get("limit"):
+            plan = query_plan.patch(plan, {"operation": "rank_top"})
+
+    # A plan with a filter but no ranking and no named subject would collapse
+    # to a meaningless 1-row aggregate — treat it as a ranking of the grain
+    # it is grouped/entity'd at, which is what "exclude X" after a list means.
+    if (not query_plan.is_ranking(plan) and plan["operation"] == "value"
+            and not plan.get("name_filter") and plan.get("comparison") is None):
+        plan = query_plan.patch(plan, {"operation": "rank_bottom" if plan.get("ascending") else "rank_top"})
+
+    plan["source"] = "plan_interceptor"
+    try:
+        result = _execute_plan(plan, session, raw_message=text)
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception("_execute_plan() raised")
+        return None
+    if result is None:
+        return None
+    reply, rows = result
+    return ChatResponse(reply=reply, rows=rows)
 
 
 def _handle_driving_performance(raw_message, message, session):
@@ -1503,12 +1942,23 @@ def _handle_rank_both_ends(raw_message, message, session):
     the filtered population, or build_query() itself raised)."""
     dimension = "employee"
     scope = None
+    # Item #94: a department named with a NEGATION word here is a FILTER with
+    # a `ne` operator, not a scope — the same generic detector the plan layer
+    # and the extraction cascade use. Without this, "highest and lowest PACE
+    # excluding SCM" scoped INTO SCM, the exact inversion item #93 was
+    # supposed to have fixed.
+    try:
+        _be_dim_filters, _be_amb = query_plan.detect_dimension_filters(raw_message, _plan_resolvers())
+    except Exception:
+        _be_dim_filters, _be_amb = [], []
+    _be_negated = {f["value"] for f in _be_dim_filters
+                   if f["operator"] in query_plan.NEGATIVE_OPERATORS}
     if re.search(r"\bwhich departments?\b|\bdepartments? (?:has|have)\b|\bdepartment ranking\b",
                  raw_message, re.IGNORECASE):
         dimension = "department"
     else:
         dept_name, candidates = entities.extract_department(raw_message, fallback_text=raw_message)
-        if dept_name and not candidates:
+        if dept_name and not candidates and dept_name not in _be_negated:
             scope = ("department", dept_name)
 
     metrics = _detect_build_query_metrics(raw_message)
@@ -1526,6 +1976,8 @@ def _handle_rank_both_ends(raw_message, message, session):
         rows = queries.build_query(
             dimension, metrics, filters=filters, period=period, name_filter=None,
             scope=scope, limit=100000, ascending=True, latest_n_days=latest_n_days,
+            dimension_filters=[f for f in _be_dim_filters
+                               if not (f["field"] == "department" and dimension == "department")],
         )
     except Exception:
         logging.getLogger("pace_chatbot.main").exception(
@@ -1537,6 +1989,9 @@ def _handle_rank_both_ends(raw_message, message, session):
     lowest = rows[0]
     highest = rows[-1]
     reply = _format_rank_both_ends(lowest, highest, dimension, metrics)
+    _be_footer = query_plan.describe({"filters": _be_dim_filters})
+    if _be_footer:
+        reply += "\n\n(%s)" % _be_footer
 
     if session is not None:
         dim_col = {"employee": "employee_id", "rm": "reporting_manager_name",
@@ -1847,24 +2302,46 @@ def _extraction_llm_reply(raw_message, message, session):
     # "Only"/"just" name a POSITIVE scope filter the same way ("only Sales
     # - Digital Fleet"), symmetric with the negative case, same mechanism.
     # -------------------------------------------------------------------
+    # Item #94: this is now the SAME generic, operator-aware, field-generic
+    # detector the pre-classification interceptor uses — not a second,
+    # department-only copy. Any FILTER_FIELDS dimension (department, employee,
+    # rm, grade, designation) with any of eq/ne/in/not_in is expressed here;
+    # the LLM extraction schema also carries a `filters` LIST now (see
+    # llm_nlu._BQ_EXTRACTION_SCHEMA), and the deterministic detector below
+    # overrides it wherever both speak, per this cascade's standing "narrow
+    # deterministic check beats a probabilistic guess" rule.
+    try:
+        _plan_dim_filters, _plan_amb = query_plan.detect_dimension_filters(
+            raw_message, _plan_resolvers())
+    except Exception:
+        _plan_dim_filters, _plan_amb = [], []
+    if _plan_amb:
+        return (
+            f"Multiple departments match that name: {', '.join(_plan_amb)}. Which one did you mean?",
+            [],
+        )
+    if not _plan_dim_filters:
+        for _lf in (extracted.get("dimension_filters") or []):
+            if (isinstance(_lf, dict) and _lf.get("field") in query_plan.FILTER_FIELDS
+                    and _lf.get("operator") in query_plan.FILTER_OPERATORS and _lf.get("value")):
+                # The LLM's own filter list still has to be re-resolved
+                # against real entities — never trust its name transcription.
+                _rs = _plan_resolvers().get(query_plan.FILTER_FIELDS[_lf["field"]].get("resolver") or "")
+                if _rs is None:
+                    continue
+                try:
+                    _v, _c = _rs(str(_lf["value"]))
+                except Exception:
+                    _v, _c = None, None
+                if _v:
+                    _plan_dim_filters.append({"field": _lf["field"], "operator": _lf["operator"],
+                                              "value": _v})
+
     _dept_filter_value = None
-    _dept_filter_op = None  # "eq" | "ne"
-    _neg_match = _DEPT_FILTER_NEGATION.search(raw_message)
-    _pos_match = None if _neg_match else _DEPT_FILTER_POSITIVE_SCOPE.search(raw_message)
-    if _neg_match or _pos_match:
-        _dept_candidate_text = extracted.get("dimension_name") or raw_message
-        try:
-            _dn, _dn_candidates = entities.extract_department(_dept_candidate_text, fallback_text=raw_message)
-        except Exception:
-            _dn, _dn_candidates = None, None
-        if _dn_candidates:
-            return (
-                f"Multiple departments match that name: {', '.join(_dn_candidates)}. Which one did you mean?",
-                [],
-            )
-        if _dn:
-            _dept_filter_value = _dn
-            _dept_filter_op = "ne" if _neg_match else "eq"
+    _dept_filter_op = None  # "eq" | "ne" — kept for the dimension-recovery
+    _dept_f = next((f for f in _plan_dim_filters if f["field"] == "department"), None)
+    if _dept_f:
+        _dept_filter_value, _dept_filter_op = _dept_f["value"], _dept_f["operator"]
 
     _filter_only_followup = False
     if _dept_filter_value:
@@ -2368,27 +2845,39 @@ def _extraction_llm_reply(raw_message, message, session):
         # itself (filtering departments by a department name doesn't
         # compose meaningfully) - the detection block above already routes
         # dimension away from "department" in the common case.
+        # Item #94: one generic `dimension_filters` list replaces item #93's
+        # scope/exclude_scope department special case. `_rank_scope` (the
+        # sticky "...there" referential cue) still uses `scope=`, since that
+        # is a CONTEXT-derived scope rather than a filter the user stated in
+        # this message.
         _dept_scope = _rank_scope
-        _dept_exclude_scope = None
-        if _dept_filter_value and dimension != "department":
-            if _dept_filter_op == "eq" and _dept_scope is None:
-                _dept_scope = ("department", _dept_filter_value)
-            elif _dept_filter_op == "ne":
-                _dept_exclude_scope = ("department", _dept_filter_value)
+        _rank_dim_filters = [f for f in _plan_dim_filters
+                             if not (f["field"] == "department" and dimension == "department")]
+        if _dept_scope is not None:
+            # An explicit same-message "...there" scope wins over a positive
+            # department filter for the same dimension; the negative ones
+            # still compose with it.
+            _rank_dim_filters = [f for f in _rank_dim_filters
+                                 if not (f["field"] == "department" and f["operator"] == "eq")]
         try:
             rows = queries.build_query(dimension, metrics, filters=filters, period=period,
                                         name_filter=None, limit=limit, ascending=ascending,
-                                        scope=_dept_scope, exclude_scope=_dept_exclude_scope,
+                                        scope=_dept_scope, dimension_filters=_rank_dim_filters,
                                         latest_n_days=latest_n_days)
         except Exception:
             logging.getLogger("pace_chatbot.main").exception(
                 "build_query() raised inside extraction-LLM cascade step (ranking)")
             return None
         reply = _format_build_query_rows(rows, dimension, metrics, name_label=None)
-        if _dept_exclude_scope:
-            reply += f"\n\n(excluding {_dept_exclude_scope[1]})"
-        elif _dept_scope and _dept_scope is not _rank_scope:
-            reply += f"\n\n(scoped to {_dept_scope[1]} only)"
+        _plan_footer = query_plan.describe({"filters": _rank_dim_filters})
+        if _plan_footer:
+            reply += f"\n\n({_plan_footer})"
+        _dept_exclude_scope = next(
+            (("department", f["value"]) for f in _rank_dim_filters
+             if f["field"] == "department" and f["operator"] in query_plan.NEGATIVE_OPERATORS), None)
+        _dept_pos = next(
+            (("department", f["value"]) for f in _rank_dim_filters
+             if f["field"] == "department" and f["operator"] == "eq"), None)
         if session is not None:
             # Item #84 (confirmed root cause of failures G/H/L/M/N, item
             # #83 section 1): this branch previously never registered ANY
@@ -2413,8 +2902,20 @@ def _extraction_llm_reply(raw_message, message, session):
             _dept_filter_state = None
             if _dept_exclude_scope:
                 _dept_filter_state = {"operator": "ne", "value": _dept_exclude_scope[1]}
+            elif _dept_pos:
+                _dept_filter_state = {"operator": "eq", "value": _dept_pos[1]}
             elif _dept_scope:
                 _dept_filter_state = {"operator": "eq", "value": _dept_scope[1]}
+            # Item #94: record the full structured plan too, so a follow-up
+            # PATCHES this answer rather than reconstructing it.
+            session_store.set_current_plan(session, query_plan.new_plan(
+                entity=dimension, metrics=list(metrics),
+                operation="rank_bottom" if ascending else "rank_top",
+                limit=limit, ascending=ascending, period=period,
+                period_phrase=extracted.get("period_phrase"),
+                latest_n_days=latest_n_days, population_filters=dict(filters or {}),
+                filters=list(_rank_dim_filters), source="extraction_cascade",
+            ))
             session_store.set_query_context(
                 session,
                 last_operation="rank_bottom" if ascending else "rank_top",
@@ -2443,17 +2944,12 @@ def _extraction_llm_reply(raw_message, message, session):
     # nonsensical combination in practice for an employee lookup, but for a
     # manager/rm-dimension lookup scoped to one department minus another it
     # is meaningful) - same eq/ne threading as the ranking branch above.
-    _dept_scope_v = None
-    _dept_exclude_scope_v = None
-    if _dept_filter_value and dimension != "department":
-        if _dept_filter_op == "eq":
-            _dept_scope_v = ("department", _dept_filter_value)
-        elif _dept_filter_op == "ne":
-            _dept_exclude_scope_v = ("department", _dept_filter_value)
+    _value_dim_filters = [f for f in _plan_dim_filters
+                          if not (f["field"] == "department" and dimension == "department")]
     try:
         rows = queries.build_query(dimension, metrics, filters=filters, period=period,
                                     name_filter=name_filter, limit=1, latest_n_days=latest_n_days,
-                                    scope=_dept_scope_v, exclude_scope=_dept_exclude_scope_v)
+                                    dimension_filters=_value_dim_filters)
     except Exception:
         logging.getLogger("pace_chatbot.main").exception("build_query() raised inside extraction-LLM cascade step")
         return None
@@ -2684,6 +3180,21 @@ def _handle_day_compare(message, raw_message, session):
         rank_rows, label = queries.day_compare_ranking(
             d1, d2, dept_name=dept_name, metric_key=metric_key, filter_sql=filter_sql, ascending=ascending)
         if session is not None:
+            # Item #94: the per-EMPLOYEE two-date comparison branch also has
+            # to leave a comparison plan behind — this is the branch
+            # "compare 11 sept with 10 sept for all employees" actually takes
+            # (the phrase "employees" matches _DAY_COMPARE_PER_EMPLOYEE_PATTERN),
+            # and it is the exact case the mandate names for the "...tell me
+            # dept wise" follow-up.
+            session_store.set_current_plan(session, query_plan.new_plan(
+                entity="employee",
+                metrics=[_DAY_COMPARE_TO_PLAN_METRIC.get(metric_key, metric_key)],
+                operation="compare",
+                comparison={"kind": "day", "period_a": d1, "period_b": d2, "group_by": "employee"},
+                filters=([{"field": "department", "operator": "eq", "value": dept_name}]
+                         if dept_name else []),
+                ascending=ascending, source="day_compare_ranking",
+            ))
             _pe_result_ids = [r.get("employee_id") for r in rank_rows if r.get("employee_id") is not None]
             session_store.set_query_context(
                 session, last_operation="rank_bottom" if ascending else "rank_top",
@@ -2699,6 +3210,20 @@ def _handle_day_compare(message, raw_message, session):
 
     results = queries.day_compare(d1, d2, dept_name=dept_name, employee_id=employee_id, metric_keys=metric_keys, filter_sql=filter_sql)
     if session is not None:
+        # Item #94: a comparison answer now leaves behind a real plan (it
+        # previously left NO structured state of any kind — day_compare/
+        # month_compare wrote to none of the four stores), so a follow-up
+        # like "tell me dept wise" can add a GROUP BY to it while preserving
+        # both dates and the compare operation, instead of being read as
+        # "which department did you mean?".
+        session_store.set_current_plan(session, query_plan.new_plan(
+            entity="employee" if employee_id else ("department" if dept_name else "company"),
+            metrics=[_DAY_COMPARE_TO_PLAN_METRIC.get(k, k) for k in metric_keys],
+            operation="compare",
+            comparison={"kind": "day", "period_a": d1, "period_b": d2, "group_by": None},
+            name_filter=employee_id or dept_name, name_label=subject_label,
+            source="day_compare",
+        ))
         session_store.set_last_answer_filters(
             session, label=f"the {_strip_leading_the(subject_label)} comparison ({d1} vs {d2})",
             **_default_filters_from_message(message))
@@ -2780,6 +3305,15 @@ def _handle_month_compare(message, raw_message, session):
                                      metric_keys=metric_keys, filter_sql=filter_sql)
     label1, label2 = _month_label(m1), _month_label(m2)
     if session is not None:
+        # Item #94: same comparison-plan bookkeeping as _handle_day_compare.
+        session_store.set_current_plan(session, query_plan.new_plan(
+            entity="employee" if employee_id else ("department" if dept_name else "company"),
+            metrics=[_DAY_COMPARE_TO_PLAN_METRIC.get(k, k) for k in metric_keys],
+            operation="compare",
+            comparison={"kind": "month", "period_a": m1, "period_b": m2, "group_by": None},
+            name_filter=employee_id or dept_name, name_label=subject_label,
+            source="month_compare",
+        ))
         session_store.set_last_answer_filters(
             session, label=f"the {_strip_leading_the(subject_label)} comparison ({label1} vs {label2})",
             **_default_filters_from_message(message))
@@ -3813,7 +4347,27 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 session, last_operation="rank_bottom" if ascending else "rank_top",
                 last_dimension="employee", last_result_ids=_mr_result_ids,
                 ascending=ascending, metric=[metric_key], period_phrase=None,
+                limit=limit,
             )
+            # Item #94: the RULE-BASED ranking path now also leaves behind a
+            # real query plan, so a plan-shaped follow-up ("exclude SCM",
+            # "dept wise", "make it top 5") composes with an answer produced
+            # by one of the 123 intents exactly as well as with one produced
+            # by the plan layer itself. `metric_key` here is a queries.METRICS
+            # key; _plan_metrics_for_build_query() translates it on execution.
+            session_store.set_current_plan(session, query_plan.new_plan(
+                entity="employee", metrics=[metric_key],
+                operation="rank_bottom" if ascending else "rank_top",
+                limit=limit, ascending=ascending,
+                period=(_mr_date_range or (_month_str_to_range(_mr_month)
+                                           if isinstance(_mr_month, str) and len(_mr_month) == 7
+                                           else None)),
+                period_phrase=(_mr_month if isinstance(_mr_month, str) else None),
+                population_filters=dict(_mr_filters or {}),
+                filters=([{"field": "department", "operator": "eq", "value": dept_name}]
+                         if dept_name else []),
+                source="metric_ranking",
+            ))
         if session is not None:
             def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=_mr_month, date_range=_mr_date_range, limit=500,
                        _metric_key=metric_key, _ascending=ascending, _label=label, _rid=manager_id, _filters=_mr_filters):
@@ -5505,6 +6059,31 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     _list_pronoun_response = _handle_list_pronoun_metric_followup(message, session)
     if _list_pronoun_response is not None:
         return _list_pronoun_response
+
+    # --- Item #94: the QUERY PLAN interceptor -----------------------------
+    # Runs here, ahead of BOTH intents.match_intent() and llm_nlu.classify(),
+    # because those two layers are structurally incapable of representing
+    # what these messages mean: a filter OPERATOR ("exclude X" is not "scope
+    # to X") and a GROUP BY ("dept wise" is not "which department?"). Item
+    # #93 placed the same fix four stages downstream and it demonstrably
+    # never fired. Deliberately narrow — see _handle_query_plan_message()'s
+    # own gating: a negative filter in any message, or a filter/grouping/
+    # filter-removal modification in a message that matches NO rule intent
+    # and follows an existing plan. Every question the 123 rule intents
+    # already answer correctly still reaches them unchanged.
+    try:
+        _plan_response = _handle_query_plan_message(raw_message, message, session)
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception("_handle_query_plan_message() raised unexpectedly")
+        _plan_response = None
+    if _plan_response is not None:
+        return _plan_response
+    # The plan layer declined this message, so whatever answers it next owns
+    # the conversation from here. Dropping the stored plan means the next
+    # follow-up resolves against THAT answer (via query_context, bridged by
+    # query_plan.from_query_context) instead of a stale plan — this is the
+    # context-reset guarantee: an unrelated question genuinely resets state.
+    session_store.clear_current_plan(session)
 
     # --- LLM-first intent classification (Gemini), with rule-based fallback
     # and safety cross-check ---

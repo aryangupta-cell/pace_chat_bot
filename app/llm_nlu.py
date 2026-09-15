@@ -189,6 +189,32 @@ than guessing when:
     score or status specifically (distinct wording from the existing
     dept_avg/dept_summary intents, which compute a different, live-
     recomputed number).
+  - ITEM #94 — CONVERSATIONAL FOLLOW-UPS AND FILTER/GROUPING MODIFICATIONS.
+    You are a CLOSED-VOCABULARY intent classifier: you have no way to express
+    a filter operator, a grouping, a row count, or "keep everything from the
+    last question and change only this". A downstream query-plan extractor
+    can express all of those precisely. So return "none" (low/zero
+    confidence) rather than guessing whenever the message is a MODIFICATION
+    of a previous question rather than a self-contained new one. In
+    particular:
+      * a negation/exclusion filter anywhere in the message — "exclude X",
+        "excluding X", "except X", "other than X", "outside X", "without X",
+        "not in X", "apart from X", "leaving out X", "omit X". An excluded
+        department is NOT a question about that department; guessing
+        dept_avg/dept_summary/status_list here silently inverts what the user
+        asked for.
+      * a bare scope modification — "only X", "just X", "in X" on its own.
+      * a breakdown request — "dept wise", "department wise", "employee
+        wise", "manager wise", "day wise", "month wise", "per employee",
+        "for each department", "broken down by X", "grouped by X". These ask
+        for a GROUP BY of the previous answer, NOT "which department did you
+        mean?" and NOT a fresh department summary.
+      * a bare modification of the previous question's shape — "make it top
+        5", "show effectiveness instead", "same thing for August", "remove
+        that filter", "show everyone again", "now the bottom 10".
+    None of the ~123 intents can represent any of these, so ANY intent name
+    you return for them is wrong by construction. Return "none".
+
 When genuinely unsure whether a message matches an existing intent well
 versus needing this more precise handling, prefer "none" with low confidence
 over a confident wrong guess.
@@ -403,6 +429,18 @@ for _text, _out in _FEW_SHOT_EXAMPLES:
 _STABLE_INSTRUCTIONS = _SYSTEM_PROMPT + "\n\nExamples:\n" + "\n".join(_FEWSHOT_LINES)
 
 
+def _classify_instructions():
+    """Item #94: the classifier prompt, with PACE_REFERENCE.md prepended.
+
+    Kept as a function (rather than the module constant it used to be) purely
+    so the reference file can be prepended at call time. The result is still
+    byte-identical on every call, so OpenAI's automatic prompt-caching prefix
+    match is unaffected — the reference block is STABLE content and sits
+    ahead of the variable user message, exactly like the rest of
+    `instructions`."""
+    return _reference_block() + _STABLE_INSTRUCTIONS
+
+
 # ---------------------------------------------------------------------------
 # Gemini path (kept fully intact from the pre-migration version)
 # ---------------------------------------------------------------------------
@@ -442,7 +480,7 @@ def _classify_gemini(raw_message, timeout):
         logger.exception("google-genai SDK not available")
         return None
 
-    prompt = _STABLE_INSTRUCTIONS + f'\n\nNow classify this message.\nUser: "{raw_message}"\nJSON:'
+    prompt = _classify_instructions() + f'\n\nNow classify this message.\nUser: "{raw_message}"\nJSON:'
 
     t0 = time.time()
     try:
@@ -537,7 +575,7 @@ def _classify_openai(raw_message, timeout):
             model=OPENAI_MODEL,
             # STABLE content first (system prompt + few-shot) so OpenAI's
             # automatic prompt-caching prefix-match can hit on repeat calls.
-            instructions=_STABLE_INSTRUCTIONS,
+            instructions=_classify_instructions(),
             # VARIABLE content last (this call's user message only).
             input=f'Now classify this message.\nUser: "{raw_message}"\nJSON:',
             text={
@@ -674,17 +712,78 @@ _BQ_EXTRACTION_SCHEMA = {
         "limit": {"type": ["integer", "null"], "description": "the EXACT row count explicitly requested, e.g. 5 for '5 employees with the lowest engagement' or 'give me 5 worst performers' or 'top 5' - null if no explicit count was requested (the caller applies a sensible default)"},
         "operation": {
             "type": "string",
-            "enum": ["value", "rank_top", "rank_bottom", "strongest_weakest", "trend"],
+            "enum": ["value", "rank_top", "rank_bottom", "rank_both_ends",
+                     "strongest_weakest", "trend", "compare"],
             "description": (
                 "'value': a plain lookup for one named/implied scope, no ranking. "
                 "'rank_top': a multi-row ranking, highest/best first (e.g. 'top 5', 'highest discipline department'). "
                 "'rank_bottom': a multi-row ranking, lowest/worst first (e.g. 'bottom 5', '5 lowest engagement employees'). "
+                "'rank_both_ends': 'highest AND lowest' in one question - exactly the top-1 and bottom-1 of the SAME filtered population. "
                 "'strongest_weakest': the 'strongest/weakest area' derived comparison across the 4 pct sub-metrics for ONE scope. "
-                "'trend': a month-over-month or period-over-period CHANGE question ('declined', 'improved', 'going up or down') rather than a snapshot value."
+                "'trend': a month-over-month or period-over-period CHANGE question ('declined', 'improved', 'going up or down') rather than a snapshot value. "
+                "'compare': an explicit A-vs-B comparison between two named periods (two dates, or two months)."
+            ),
+        },
+        # ---------------------------------------------------------------
+        # Item #94 additions. The three fields below are what the schema
+        # was structurally missing: a filter OPERATOR, a GROUP BY that is
+        # distinct from the query's subject, and a description of how a
+        # follow-up relates to the previous question.
+        # ---------------------------------------------------------------
+        "group_by": {
+            "type": ["string", "null"],
+            "enum": ["employee", "department", "rm", "day", "month", "grade", "designation", None],
+            "description": (
+                "A dimension to BREAK THE ANSWER DOWN BY - completely distinct from `dimension`, "
+                "which is the SUBJECT of the question. 'employees in Sales' is a FILTER on department "
+                "(dimension stays 'employee', put Sales in dimension_filters); 'show it department wise' "
+                "is a GROUP BY (group_by='department'); 'which department has the lowest score' is a "
+                "question ABOUT departments (dimension='department', group_by=null). Set this for "
+                "'X wise' / 'per X' / 'for each X' / 'broken down by X' / 'grouped by X' phrasing. "
+                "null when the user asked for no breakdown."
+            ),
+        },
+        "dimension_filters": {
+            "type": "array",
+            "description": (
+                "Filters on WHO/WHAT is included, each with an explicit OPERATOR. This is how a "
+                "department/manager/employee/grade/designation mention that is NOT the subject of the "
+                "question gets represented. CRITICAL: the operator carries the negation. "
+                "'in SCM' / 'from SCM' / 'only SCM' / 'just SCM' -> operator 'eq'. "
+                "'excluding SCM' / 'except SCM' / 'other than SCM' / 'outside SCM' / 'without SCM' / "
+                "'not in SCM' / 'apart from SCM' / 'leaving out SCM' -> operator 'ne'. "
+                "Several named values for the same field -> 'in' / 'not_in' with a list. "
+                "Never drop the negation and never turn an excluded name into dimension_name."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "field": {"type": "string",
+                              "enum": ["department", "employee", "rm", "grade", "designation"]},
+                    "operator": {"type": "string",
+                                 "enum": ["eq", "ne", "in", "not_in", "is_null", "is_not_null"]},
+                    "value": {"type": ["string", "null"],
+                              "description": "the value AS WRITTEN by the user; for 'in'/'not_in' a comma-separated list"},
+                },
+                "required": ["field", "operator", "value"],
+                "additionalProperties": False,
+            },
+        },
+        "context_modification": {
+            "type": "string",
+            "enum": ["none", "add_filter", "remove_filter", "replace_filter", "change_metric",
+                     "change_group_by", "change_period", "change_ranking", "change_population"],
+            "description": (
+                "How this message MODIFIES the question already under discussion, when it is a "
+                "follow-up rather than a fresh question. 'none' for a self-contained new question. "
+                "Everything the user did NOT change is carried over from the previous query by the "
+                "caller, so only describe what actually changed."
             ),
         },
     },
-    "required": ["dimension", "dimension_name", "metrics", "filters", "period_phrase", "unrecognized_metric_phrase", "limit", "operation"],
+    "required": ["dimension", "dimension_name", "metrics", "filters", "period_phrase",
+                 "unrecognized_metric_phrase", "limit", "operation",
+                 "group_by", "dimension_filters", "context_modification"],
     "additionalProperties": False,
 }
 
@@ -830,6 +929,52 @@ month-over-month or period-over-period CHANGE question - "declined",
 (dimension_name null); pick "value" for anything naming one specific
 employee/department/RM with no superlative wording.
 
+--- Item #94 additions: filters-with-operators, grouping, comparison ---
+
+dimension_filters: a LIST of {{field, operator, value}}. This is where a
+department / manager / employee / grade / designation goes when it restricts
+WHO is included rather than being what the question is ABOUT. The operator
+carries any negation, and this is the single most important thing to get
+right:
+  positive (operator "eq"):  "in SCM", "from SCM", "within SCM", "only SCM",
+                             "just SCM", "restricted to SCM", "for SCM"
+  negative (operator "ne"):  "excluding SCM", "except SCM", "other than SCM",
+                             "outside SCM", "without SCM", "not in SCM",
+                             "apart from SCM", "leaving out SCM", "omit SCM",
+                             "besides SCM", "barring SCM"
+  several values:            operator "in" / "not_in" with a comma-separated value
+An EXCLUDED name must NEVER become dimension_name, and the negation must
+never be dropped: "bottom 10 employees by engagement excluding Sales -
+Digital Fleet" is a ranking of EMPLOYEES (dimension "employee",
+dimension_name null) with dimension_filters
+[{{"field":"department","operator":"ne","value":"Sales - Digital Fleet"}}] -
+it is NOT a question about the Sales - Digital Fleet department.
+This works the same way for EVERY filterable field, not just department.
+
+group_by: the dimension to BREAK THE ANSWER DOWN BY. It is a different thing
+from `dimension` (the subject) and from a filter. Compare:
+  "employees in Sales"        -> dimension "employee", FILTER department eq Sales
+  "show it department wise"   -> group_by "department" (subject unchanged)
+  "which department is worst" -> dimension "department", group_by null
+Set group_by for "X wise", "per X", "for each X", "broken down by X",
+"grouped by X", "split by X", where X is employee/department/manager/day/
+month/grade/designation. Never set it just because a dimension word appears.
+
+operation "compare": an explicit A-vs-B comparison between two periods (two
+dates, or two months). Put both periods, as written, in period_phrase.
+Comparison does NOT mean "two named employees" - it applies equally to an
+employee population, a department, the whole company, a date pair, or a
+month pair. A comparison can ALSO carry group_by ("compare 11 Sept with 10
+Sept, department wise" = one row per department, both dates preserved).
+
+context_modification: when the message is a FOLLOW-UP that changes the
+question already under discussion, say what changed - add_filter,
+remove_filter, replace_filter, change_metric, change_group_by, change_period,
+change_ranking, change_population - and leave every field the user did NOT
+change empty/null. The caller carries unchanged fields over from the previous
+query itself; restating them is unnecessary and restating them WRONG is
+harmful. Use "none" for a self-contained fresh question.
+
 Respond with JSON matching the given schema only."""
 
 _BQ_FEW_SHOT = [
@@ -879,12 +1024,165 @@ _BQ_FEW_SHOT = [
 ]
 
 
+_BQ_FEW_SHOT_DEFAULTS = {
+    "group_by": None, "dimension_filters": [], "context_modification": "none",
+}
+
+# --- Item #94: the new fields, demonstrated ---------------------------------
+# These are REFERENCE EXAMPLES of the CONCEPTS (operator-carrying filters,
+# grouping distinct from subject, comparison, follow-up modification), not a
+# whitelist of phrasings. PACE_REFERENCE.md (prepended below) says this
+# explicitly, and novel compositions of these concepts are expected to work.
+_BQ_FEW_SHOT_V2 = [
+    # Negative filter, single turn. The excluded department is a FILTER and
+    # must never become dimension_name.
+    ("exclude Sales - Digital Fleet dept and then tell bottom 10 emps based on Engagement",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": 10, "operation": "rank_bottom",
+      "group_by": None,
+      "dimension_filters": [{"field": "department", "operator": "ne", "value": "Sales - Digital Fleet"}],
+      "context_modification": "none"}),
+    # Bare negative-filter FOLLOW-UP: everything else is carried over.
+    ("exclude SCM",
+     {"dimension": "employee", "dimension_name": None, "metrics": [], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "rank_bottom",
+      "group_by": None,
+      "dimension_filters": [{"field": "department", "operator": "ne", "value": "SCM"}],
+      "context_modification": "add_filter"}),
+    # Positive filter follow-up — same mechanism, opposite operator.
+    ("only SCM",
+     {"dimension": "employee", "dimension_name": None, "metrics": [], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "rank_bottom",
+      "group_by": None,
+      "dimension_filters": [{"field": "department", "operator": "eq", "value": "SCM"}],
+      "context_modification": "replace_filter"}),
+    # Negative filter on a DIFFERENT dimension — the operator is generic.
+    ("top 10 employees by discipline excluding anyone reporting to Nikhil Kumar",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["discipline_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": 10, "operation": "rank_top",
+      "group_by": None,
+      "dimension_filters": [{"field": "rm", "operator": "ne", "value": "Nikhil Kumar"}],
+      "context_modification": "none"}),
+    # GROUP BY, as a follow-up. Not "which department?" — a breakdown.
+    ("tell me dept wise",
+     {"dimension": "employee", "dimension_name": None, "metrics": [], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "value",
+      "group_by": "department", "dimension_filters": [], "context_modification": "change_group_by"}),
+    ("show me engagement manager wise for the last 2 weeks",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["engagement_pct"], "filters": {},
+      "period_phrase": "last 2 weeks", "unrecognized_metric_phrase": None, "limit": None,
+      "operation": "value", "group_by": "rm", "dimension_filters": [], "context_modification": "none"}),
+    # FILTER vs GROUP BY on the very same word — the distinction that matters.
+    ("bottom 5 employees by effectiveness in Annotation",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["effectiveness_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": 5, "operation": "rank_bottom",
+      "group_by": None,
+      "dimension_filters": [{"field": "department", "operator": "eq", "value": "Annotation"}],
+      "context_modification": "none"}),
+    ("which department has the lowest effectiveness",
+     {"dimension": "department", "dimension_name": None, "metrics": ["effectiveness_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": 1, "operation": "rank_bottom",
+      "group_by": None, "dimension_filters": [], "context_modification": "none"}),
+    # COMPARISON, including one that is NOT two named employees.
+    ("compare 11 sept with 10 sept for all employees",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["pace_score"], "filters": {},
+      "period_phrase": "11 sept and 10 sept", "unrecognized_metric_phrase": None, "limit": None,
+      "operation": "compare", "group_by": None, "dimension_filters": [], "context_modification": "none"}),
+    # Comparison + grouping follow-up: BOTH dates and the compare operation
+    # survive; only the breakdown is added.
+    ("now show that dept wise",
+     {"dimension": "employee", "dimension_name": None, "metrics": [], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "compare",
+      "group_by": "department", "dimension_filters": [], "context_modification": "change_group_by"}),
+    # Filter REMOVAL.
+    ("remove that filter and show me everyone again",
+     {"dimension": "employee", "dimension_name": None, "metrics": [], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "rank_bottom",
+      "group_by": None, "dimension_filters": [], "context_modification": "remove_filter"}),
+    # Ranking / metric / period modification follow-ups.
+    ("make it the top 5 instead",
+     {"dimension": "employee", "dimension_name": None, "metrics": [], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": 5, "operation": "rank_top",
+      "group_by": None, "dimension_filters": [], "context_modification": "change_ranking"}),
+    ("show discipline instead",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["discipline_pct"], "filters": {},
+      "period_phrase": None, "unrecognized_metric_phrase": None, "limit": None, "operation": "rank_bottom",
+      "group_by": None, "dimension_filters": [], "context_modification": "change_metric"}),
+    ("same thing for August",
+     {"dimension": "employee", "dimension_name": None, "metrics": [], "filters": {},
+      "period_phrase": "August", "unrecognized_metric_phrase": None, "limit": None, "operation": "rank_bottom",
+      "group_by": None, "dimension_filters": [], "context_modification": "change_period"}),
+    # Highest AND lowest in one question.
+    ("highest and lowest PACE score among WFH employees",
+     {"dimension": "employee", "dimension_name": None, "metrics": ["pace_score"],
+      "filters": {"work_mode": "wfh"}, "period_phrase": None, "unrecognized_metric_phrase": None,
+      "limit": None, "operation": "rank_both_ends", "group_by": None, "dimension_filters": [],
+      "context_modification": "none"}),
+]
+
+
+def _pace_reference_text():
+    """PACE_REFERENCE.md — the authoritative schema/business/terminology
+    knowledge file at the repo root (item #94). Loaded ONCE, at import time,
+    and prepended to BOTH LLM prompts so the model reasons over the real PACE
+    semantics rather than only over a handful of few-shot examples.
+
+    Read failures are non-fatal by design (same hard safety contract as every
+    other LLM path here): a missing file just means the prompts fall back to
+    exactly what they contained before this round."""
+    global _PACE_REFERENCE_CACHE
+    if _PACE_REFERENCE_CACHE is not None:
+        return _PACE_REFERENCE_CACHE
+    text = ""
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "PACE_REFERENCE.md")
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        logger.info("Loaded PACE_REFERENCE.md (%d chars) into LLM prompts", len(text))
+    except Exception:
+        logger.warning("PACE_REFERENCE.md not loaded — prompts fall back to built-in guidance only",
+                       exc_info=True)
+        text = ""
+    _PACE_REFERENCE_CACHE = text
+    return text
+
+
+_PACE_REFERENCE_CACHE = None
+
+_PACE_REFERENCE_HEADER = """
+=== PACE REFERENCE KNOWLEDGE (authoritative) ===
+The document below is the authoritative description of the PACE_1 dataset:
+its schema, metric definitions, business rules, terminology, and the semantic
+CONCEPTS this system supports (ranking, filtering with operators, grouping,
+comparison, period semantics, conversational modification).
+
+Read it as REFERENCE, NOT as an allowlist. The example question->meaning
+mappings in it show HOW natural language maps onto the data and the rules;
+they are not the only questions you may answer. You are expected to handle
+NOVEL COMPOSITIONS that never appear in it whenever the data and the rules
+support them. Where they genuinely do not, say so / leave the relevant field
+empty so the caller can ask a clarifying question — never invent a metric,
+a column, or a number.
+=== END PACE REFERENCE KNOWLEDGE ===
+"""
+
+
+def _reference_block():
+    ref = _pace_reference_text()
+    if not ref:
+        return ""
+    return _PACE_REFERENCE_HEADER + "\n" + ref + "\n\n"
+
+
 def _bq_stable_instructions():
     prompt = _BQ_SYSTEM_PROMPT.format(metric_keys=", ".join(_bq_metric_key_list()))
     lines = []
-    for text, out in _BQ_FEW_SHOT:
-        lines.append(f'User: "{text}"\nJSON: {json.dumps(out)}')
-    return prompt + "\n\nExamples:\n" + "\n".join(lines)
+    for text, out in (_BQ_FEW_SHOT + _BQ_FEW_SHOT_V2):
+        full = dict(_BQ_FEW_SHOT_DEFAULTS)
+        full.update(out)
+        lines.append(f'User: "{text}"\nJSON: {json.dumps(full)}')
+    return _reference_block() + prompt + "\n\nExamples:\n" + "\n".join(lines)
 
 
 def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS):
@@ -976,8 +1274,34 @@ def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS
         _limit = max(1, min(_raw_limit, 100))
 
     _operation = data.get("operation")
-    if _operation not in ("value", "rank_top", "rank_bottom", "strongest_weakest", "trend"):
+    if _operation not in ("value", "rank_top", "rank_bottom", "rank_both_ends",
+                          "strongest_weakest", "trend", "compare"):
         _operation = "value"  # hallucinated/missing enum value -> safest default (no ranking assumed)
+
+    # Item #94: the three new fields. Everything here is still only a
+    # PROPOSAL - app/query_plan.py re-validates the vocabulary and
+    # app/main.py's deterministic detectors override these wherever both
+    # speak, per this cascade's standing "narrow deterministic check beats a
+    # probabilistic guess" rule.
+    _group_by = data.get("group_by")
+    if _group_by not in ("employee", "department", "rm", "day", "month", "grade", "designation"):
+        _group_by = None
+
+    _dim_filters = []
+    for _f in (data.get("dimension_filters") or []):
+        if not isinstance(_f, dict):
+            continue
+        if _f.get("field") not in ("department", "employee", "rm", "grade", "designation"):
+            continue
+        if _f.get("operator") not in ("eq", "ne", "in", "not_in", "is_null", "is_not_null"):
+            continue
+        _dim_filters.append({"field": _f["field"], "operator": _f["operator"],
+                             "value": _f.get("value")})
+
+    _ctx_mod = data.get("context_modification")
+    if _ctx_mod not in ("none", "add_filter", "remove_filter", "replace_filter", "change_metric",
+                        "change_group_by", "change_period", "change_ranking", "change_population"):
+        _ctx_mod = "none"
 
     return {
         "dimension": data.get("dimension"),
@@ -988,5 +1312,8 @@ def extract_build_query(raw_message, context_hint=None, timeout=_TIMEOUT_SECONDS
         "unrecognized_metric_phrase": data.get("unrecognized_metric_phrase") or None,
         "limit": _limit,
         "operation": _operation,
+        "group_by": _group_by,
+        "dimension_filters": _dim_filters,
+        "context_modification": _ctx_mod,
         "_latency": latency,
     }
