@@ -2942,7 +2942,7 @@ _build_query_default_period = default_period_last_60_days
 
 def build_query(dimension, metrics, filters=None, period=None, name_filter=None, limit=None, scope=None,
                  ascending=False, latest_n_days=None, employee_ids=None, latest_n_days_offset=0,
-                 reporting_user_id=None):
+                 reporting_user_id=None, exclude_scope=None):
     """General parametrized engine: SELECT <metrics> GROUP BY <dimension> FROM
     public.pace_1 WHERE <filters> AND <period>.
 
@@ -2994,6 +2994,22 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         every employee IN that department (item #59: response-shape
         switching from a department summary to its per-employee list reuses
         this, same rerun_list mechanism as the older ranking functions).
+    exclude_scope: item #93 addition - same (scope_dimension, scope_name)
+        shape as `scope` above, but the NEGATIVE counterpart: adds
+        "<scope_col> <> scope_name" (or IS NULL/DISTINCT FROM, so a NULL
+        value on that column still counts as "not equal to the excluded
+        name") instead of "=". This is the general fix for the "exclude
+        Sales - Digital Fleet" class of bug (SESSION_HANDOFF.md item #93):
+        a department/RM/employee named with a NEGATION word ("exclude",
+        "excluding", "except", "other than", "outside", "without") is a
+        FILTER with a NOT-IN/NOT-EQUAL operator, never the primary subject
+        of the query (which `name_filter`/`dimension`/`dimension_name`
+        represent) - see app/main.py's _extraction_llm_reply for where this
+        is detected and threaded through. `scope` and `exclude_scope` can
+        both be set at once (e.g. dimension="employee" scoped to one
+        department while excluding one shift_type is out of scope here, but
+        scoped to one manager's team while excluding one specific
+        department is a real, supported combination).
     employee_ids: optional list of employee_id values to restrict the
         qualifying population to (item #88 addition, additive - None means
         no filter, unchanged behaviour). Used for team-scoped callers (a
@@ -3085,6 +3101,16 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
         scope_col = {"employee": "employee_id", "rm": "reporting_manager_name", "department": "dept_name"}[scope_dim]
         where.append(f"{scope_col} = %(scope_name)s")
         params["scope_name"] = scope_name
+
+    if exclude_scope:
+        excl_dim, excl_name = exclude_scope
+        excl_col = {"employee": "employee_id", "rm": "reporting_manager_name", "department": "dept_name"}[excl_dim]
+        # IS DISTINCT FROM (not plain <>) so a NULL on that column (e.g. an
+        # employee with no dept_name) is correctly treated as "not equal to
+        # the excluded name" rather than silently dropped by SQL's normal
+        # NULL comparison semantics.
+        where.append(f"{excl_col} is distinct from %(exclude_scope_name)s")
+        params["exclude_scope_name"] = excl_name
 
     where_clause = " and ".join(where) if where else "true"
 

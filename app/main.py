@@ -1271,6 +1271,21 @@ _ASCENDING_WORDS = re.compile(
     r"\b(least|lowest|worst|fewest|bottom|smallest|struggling|worse|declin\w*|drop\w*)\b",
     re.IGNORECASE)
 
+# Item #93: department FILTER operator detection - a department name sitting
+# next to a NEGATION word is a NOT-IN/exclude filter, never the query's
+# primary subject; next to an "only"/"just" word it's a positive scope
+# filter, same mechanism, opposite operator. See _extraction_llm_reply's
+# "Item #93" block for the full root-cause writeup and how this composes
+# with an in-progress ranking. Deliberately broader than the pre-existing
+# queries._EXCLUDE_PATTERN (a DIFFERENT feature - excluding one named
+# EMPLOYEE from a day-flag list) - "exclude" itself was missing from that
+# one and is exactly the word in the reported bug, so this is a new,
+# separate regex rather than a reuse of that one.
+_DEPT_FILTER_NEGATION = re.compile(
+    r"\b(exclude|excluding|except|excepting|other than|outside(?:\s+of)?|without|besides|beside|not\s+in)\b",
+    re.IGNORECASE)
+_DEPT_FILTER_POSITIVE_SCOPE = re.compile(r"\b(only|just)\b", re.IGNORECASE)
+
 # Item #86: the 4 comparable pct sub-metrics used by every "strongest/
 # weakest area" computation (item #76/#78's original single-entity version,
 # item #84's per-employee-group version, and item #86's new department-
@@ -1797,6 +1812,98 @@ def _extraction_llm_reply(raw_message, message, session):
     }
     _qc = (session or {}).get("query_context") or {}
 
+    # -------------------------------------------------------------------
+    # Item #93 (this round): NEGATIVE/POSITIVE department SCOPE FILTER
+    # detection - the general fix for the "exclude X dept" class of bug.
+    #
+    # Root cause (confirmed live + by code trace): the extraction schema
+    # had NO operator concept for a department at all - a department name
+    # always meant "this IS the dimension/dimension_name" (the query's
+    # PRIMARY subject), so "exclude Sales - Digital Fleet" right after a
+    # "bottom 10 employees by engagement" ranking silently became a
+    # single-department VALUE lookup (dimension="department", metrics
+    # defaulting to pace_score) - losing the ranking operation, the
+    # original metric, AND the negation semantic all at once. The same
+    # failure fires single-turn too ("exclude X dept and then tell bottom
+    # 10 emps...") because the extraction LLM has nowhere else to route a
+    # bare department mention regardless of surrounding ranking words.
+    #
+    # Fix: detect a NEGATION word (exclude/excluding/except/other than/
+    # outside/without/besides/not in) sitting anywhere in the message next
+    # to a resolvable department name, deterministically - same "narrow
+    # regex beats a probabilistic LLM guess" precedent as every other
+    # override in this cascade (_detect_pct_capped_metrics/
+    # _repair_new_vocab_metric/_detect_build_query_filters) - and route it
+    # into build_query()'s new `exclude_scope` param instead of ever
+    # letting it become dimension/dimension_name/name_filter. When the
+    # LLM's own dimension guess was "department" purely because it had
+    # nowhere else to put this filter, that guess is discarded in favour of
+    # whatever this message's own wording independently implies (its own
+    # ranking words -> "employee" grain, same as any other message), or -
+    # for a pure filter-only follow-up with no ranking words of its own -
+    # the STICKY ranking dimension/operation/metric/limit the prior turn
+    # already established (query_context), so a filter-only follow-up
+    # COMPOSES with an in-progress ranking instead of resetting it.
+    # "Only"/"just" name a POSITIVE scope filter the same way ("only Sales
+    # - Digital Fleet"), symmetric with the negative case, same mechanism.
+    # -------------------------------------------------------------------
+    _dept_filter_value = None
+    _dept_filter_op = None  # "eq" | "ne"
+    _neg_match = _DEPT_FILTER_NEGATION.search(raw_message)
+    _pos_match = None if _neg_match else _DEPT_FILTER_POSITIVE_SCOPE.search(raw_message)
+    if _neg_match or _pos_match:
+        _dept_candidate_text = extracted.get("dimension_name") or raw_message
+        try:
+            _dn, _dn_candidates = entities.extract_department(_dept_candidate_text, fallback_text=raw_message)
+        except Exception:
+            _dn, _dn_candidates = None, None
+        if _dn_candidates:
+            return (
+                f"Multiple departments match that name: {', '.join(_dn_candidates)}. Which one did you mean?",
+                [],
+            )
+        if _dn:
+            _dept_filter_value = _dn
+            _dept_filter_op = "ne" if _neg_match else "eq"
+
+    _filter_only_followup = False
+    if _dept_filter_value:
+        # If the LLM's own dimension_name guess resolves to this SAME
+        # department, it was almost certainly just this filter mention
+        # misread as the primary subject - clear it so it can never become
+        # name_filter/dimension below.
+        _llm_dim_name = extracted.get("dimension_name")
+        if _llm_dim_name:
+            try:
+                _llm_dn, _ = entities.extract_department(_llm_dim_name)
+            except Exception:
+                _llm_dn = None
+            if _llm_dn == _dept_filter_value:
+                extracted["dimension_name"] = None
+        if dimension == "department" and not extracted.get("dimension_name"):
+            # Nothing else independently names "department" as the real
+            # subject any more - fall back to whatever dimension the prior
+            # turn's ranking used, defaulting to "employee" (the
+            # overwhelmingly common real case: "bottom N employees ...
+            # exclude X").
+            dimension = _qc.get("last_dimension") or "employee"
+        # A pure filter-only follow-up: this message carries no ranking
+        # words of its own and named no metrics, AND the prior turn was a
+        # genuine ranking - restore that ranking's shape (metric/limit/
+        # direction) instead of collapsing to a single-row lookup.
+        if (not _RANKING_WORDS.search(raw_message)
+                and _qc.get("last_operation") in ("rank_top", "rank_bottom")
+                and not (extracted.get("metrics") or [])):
+            _filter_only_followup = True
+            # This message named no metric of its own (that's part of the
+            # filter-only-followup test above) - `metrics` was already
+            # defaulted to ["pace_score"] further up before this block ran;
+            # restore the PRIOR turn's actual metric instead, so "exclude X"
+            # alone continues ranking by the SAME metric ("engagement", not
+            # a silent switch to PACE score).
+            if _qc.get("metric"):
+                metrics = list(_qc["metric"])
+
     # Item #86 follow-up 4 (part of the K/L/M/N/O chain, step d - "what is
     # their weakest area" right after a ranking/singular-lookup that
     # narrowed to a specific employee): this group-pronoun resolution MUST
@@ -2067,7 +2174,13 @@ def _extraction_llm_reply(raw_message, message, session):
         dimension in ("employee", "department", "rm")
         and not name_filter
         and not _area_match
-        and (_RANKING_WORDS.search(raw_message) is not None or _op in ("rank_top", "rank_bottom"))
+        and (_RANKING_WORDS.search(raw_message) is not None or _op in ("rank_top", "rank_bottom")
+             # Item #93: a filter-only follow-up ("exclude X dept") right
+             # after a ranking carries no ranking word of its own - the
+             # detection block above already confirmed the prior turn WAS a
+             # ranking, so this composes with it rather than falling
+             # through to a single-row lookup.
+             or _filter_only_followup)
     )
 
     if dimension in ("employee", "department", "rm") and not name_filter and not is_ranking:
@@ -2203,8 +2316,22 @@ def _extraction_llm_reply(raw_message, message, session):
         # field (already sanity-clamped 1-100 in llm_nlu.py), then finally
         # queries.LIMIT - same "narrow deterministic check wins" precedent
         # as every other field in this cascade.
-        limit = entities.extract_limit(raw_message, default=None) or extracted.get("limit") or queries.LIMIT
-        ascending = _ASCENDING_WORDS.search(raw_message) is not None or _op == "rank_bottom"
+        # Item #93: a filter-only follow-up names no count/direction of its
+        # own - restore the PRIOR turn's limit/direction (query_context) so
+        # "exclude X" alone continues the same "bottom 10" ranking instead
+        # of resetting to the generic default/descending. Any count or
+        # direction word actually present in THIS message still wins first
+        # (unchanged precedence for every other case).
+        limit = (entities.extract_limit(raw_message, default=None) or extracted.get("limit")
+                 or (_qc.get("limit") if _filter_only_followup else None) or queries.LIMIT)
+        if _ASCENDING_WORDS.search(raw_message) is not None:
+            ascending = True
+        elif _op == "rank_bottom":
+            ascending = True
+        elif _filter_only_followup and _qc.get("ascending") is not None:
+            ascending = _qc.get("ascending")
+        else:
+            ascending = False
         # Item #86 (failure M, part of the K/L/M/N/O conversational chain):
         # an employee-level ranking phrased as "...there"/"...in that
         # department"/"...in the department" right after a department is
@@ -2232,15 +2359,36 @@ def _extraction_llm_reply(raw_message, message, session):
             re.IGNORECASE)
         if _SINGULAR_WHICH_ENTITY.search(raw_message):
             limit = 1
+        # Item #93: thread the detected department scope FILTER through -
+        # "eq" (positive, "only X") reuses the existing `scope` mechanism
+        # (unless a sticky "...there" scope already claimed it, which wins
+        # since it's a more explicit same-message referential cue);
+        # "ne" (negative, "exclude X") uses the new `exclude_scope` param.
+        # Never applied when the dimension being ranked IS department
+        # itself (filtering departments by a department name doesn't
+        # compose meaningfully) - the detection block above already routes
+        # dimension away from "department" in the common case.
+        _dept_scope = _rank_scope
+        _dept_exclude_scope = None
+        if _dept_filter_value and dimension != "department":
+            if _dept_filter_op == "eq" and _dept_scope is None:
+                _dept_scope = ("department", _dept_filter_value)
+            elif _dept_filter_op == "ne":
+                _dept_exclude_scope = ("department", _dept_filter_value)
         try:
             rows = queries.build_query(dimension, metrics, filters=filters, period=period,
                                         name_filter=None, limit=limit, ascending=ascending,
-                                        scope=_rank_scope, latest_n_days=latest_n_days)
+                                        scope=_dept_scope, exclude_scope=_dept_exclude_scope,
+                                        latest_n_days=latest_n_days)
         except Exception:
             logging.getLogger("pace_chatbot.main").exception(
                 "build_query() raised inside extraction-LLM cascade step (ranking)")
             return None
         reply = _format_build_query_rows(rows, dimension, metrics, name_label=None)
+        if _dept_exclude_scope:
+            reply += f"\n\n(excluding {_dept_exclude_scope[1]})"
+        elif _dept_scope and _dept_scope is not _rank_scope:
+            reply += f"\n\n(scoped to {_dept_scope[1]} only)"
         if session is not None:
             # Item #84 (confirmed root cause of failures G/H/L/M/N, item
             # #83 section 1): this branch previously never registered ANY
@@ -2258,11 +2406,21 @@ def _extraction_llm_reply(raw_message, message, session):
                 dept_name=None, employee_ids=_result_ids if dimension == "employee" else None,
                 team_label=None, month=None, date_range=period, ascending=ascending,
             )
+            # Item #93: persist limit + the department filter actually in
+            # effect so a LATER filter-only follow-up ("also exclude Y")
+            # can restore/compose with THIS turn's shape too, not just the
+            # metric/direction tracked before this round.
+            _dept_filter_state = None
+            if _dept_exclude_scope:
+                _dept_filter_state = {"operator": "ne", "value": _dept_exclude_scope[1]}
+            elif _dept_scope:
+                _dept_filter_state = {"operator": "eq", "value": _dept_scope[1]}
             session_store.set_query_context(
                 session,
                 last_operation="rank_bottom" if ascending else "rank_top",
                 last_dimension=dimension, last_result_ids=_result_ids,
                 ascending=ascending, metric=metrics, period_phrase=extracted.get("period_phrase"),
+                limit=limit, dept_filter=_dept_filter_state,
             )
             # Item #86 (failure K/L, part of the same chain): push the
             # RESULT (the actual department winner/loser this ranking just
@@ -2280,9 +2438,22 @@ def _extraction_llm_reply(raw_message, message, session):
                     session_store.push_context(session, dept_name=_top_dept)
         return reply, rows
 
+    # Item #93: a single-scope lookup can still carry an independent
+    # department FILTER (e.g. "Aryan Gupta's engagement excluding SCM" is a
+    # nonsensical combination in practice for an employee lookup, but for a
+    # manager/rm-dimension lookup scoped to one department minus another it
+    # is meaningful) - same eq/ne threading as the ranking branch above.
+    _dept_scope_v = None
+    _dept_exclude_scope_v = None
+    if _dept_filter_value and dimension != "department":
+        if _dept_filter_op == "eq":
+            _dept_scope_v = ("department", _dept_filter_value)
+        elif _dept_filter_op == "ne":
+            _dept_exclude_scope_v = ("department", _dept_filter_value)
     try:
         rows = queries.build_query(dimension, metrics, filters=filters, period=period,
-                                    name_filter=name_filter, limit=1, latest_n_days=latest_n_days)
+                                    name_filter=name_filter, limit=1, latest_n_days=latest_n_days,
+                                    scope=_dept_scope_v, exclude_scope=_dept_exclude_scope_v)
     except Exception:
         logging.getLogger("pace_chatbot.main").exception("build_query() raised inside extraction-LLM cascade step")
         return None

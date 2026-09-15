@@ -134,6 +134,20 @@ def get_session(session_id):
             "ascending": None,        # True = last_result_ids[0] is the LOWEST
             "metric": None,           # the metrics list actually used for that answer
             "period_phrase": None,
+            # Item #93 addition (additive, backward compatible - None means
+            # "not tracked", same as before this field existed): the row
+            # count (limit) actually used for that ranking answer, so a
+            # later FILTER-ONLY follow-up ("exclude X dept") that names no
+            # new count of its own can restore the SAME row count instead of
+            # silently resetting to the generic default.
+            "limit": None,
+            # Item #93 addition: the (dimension, value, operator) department
+            # filter actually in effect for that ranking, if any - so a
+            # follow-up that only ADDS another filter ("also exclude Y") can
+            # be composed with, rather than overwrite, what a prior
+            # "exclude X" turn already established. operator is "eq" (scope
+            # to X) or "ne" (exclude X).
+            "dept_filter": None,
         },
         # Item #84 (item #83 Phase 2 design, section 4(iii)): up to TWO
         # named employee/department references, most-recent-first-shifted -
@@ -220,7 +234,7 @@ def get_comparison_entities(session):
 
 
 def set_query_context(session, last_operation=None, last_dimension=None, last_result_ids=None,
-                       ascending=None, metric=None, period_phrase=None):
+                       ascending=None, metric=None, period_phrase=None, limit=None, dept_filter=None):
     """Item #84 (item #83 Phase 2 design): records the structured shape of
     the single most-recent SUBSTANTIVE ranking/lookup answer produced by the
     extraction-LLM cascade (app/main.py's _extraction_llm_reply), so a later
@@ -234,6 +248,7 @@ def set_query_context(session, last_operation=None, last_dimension=None, last_re
         "last_operation": last_operation, "last_dimension": last_dimension,
         "last_result_ids": last_result_ids, "ascending": ascending,
         "metric": metric, "period_phrase": period_phrase,
+        "limit": limit, "dept_filter": dept_filter,
     }
 
 
