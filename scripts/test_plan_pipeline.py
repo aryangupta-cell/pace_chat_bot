@@ -426,6 +426,34 @@ check_true("K3 unseen negation + inline limit change",
            repr(c and (c["limit"], dim_filters(c))))
 
 # ==========================================================================
+# L. Refinements found by LIVE testing (item #94, round 2)
+# ==========================================================================
+
+# explicit multi-value exclusion is a not_in filter, not an ambiguity
+resp, calls = ask("L1", "top 10 employees by effectiveness, leaving out Ops - Cement and Annotation")
+c = last_bq()
+check_true("L1 explicit multi-value exclusion",
+           c is not None and dim_filters(c) == [("department", "not_in", ["Ops - Cement", "Annotation"])],
+           repr(c and dim_filters(c)))
+
+# an explicit interrogative subject sets the entity; "weakest" means ascending
+resp, calls = ask("L2", "which managers have the weakest discipline outside Annotation?")
+c = last_bq()
+check_true("L2 subject sets entity=rm", c is not None and c["dimension"] == "rm",
+           repr(c and c["dimension"]))
+check_true("L2 'weakest' ranks ascending", c is not None and c["ascending"] is True,
+           repr(c and c["ascending"]))
+check_true("L2 exclusion still applied",
+           c is not None and dim_filters(c) == [("department", "ne", "Annotation")],
+           repr(c and dim_filters(c)))
+
+# an incidental dimension word is NOT mistaken for the subject
+resp, calls = ask("L3", "exclude Sales - Digital Fleet dept and then tell bottom 10 emps based on Engagement")
+c = last_bq()
+check_true("L3 'dept' in a filter phrase does not become the entity",
+           c is not None and c["dimension"] == "employee", repr(c and c["dimension"]))
+
+# ==========================================================================
 
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:

@@ -1,0 +1,534 @@
+[
+ {
+  "category": "baseline",
+  "q": "top 5 employees by PACE score",
+  "reply": "Ranked by avg PACE score (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg PACE score</th></tr></thead><tbody><tr><td>1</td><td>Tanu Mehra</td><td>Ops - Inbound</td><td>100</td></tr><tr><td>2</td><td>Gagandeep Singh</td><td>IT-Projects</td><td>97</td></tr><tr><td>3</td><td>Sandeep kumar vyas</td><td>Ops - Inbound</td><td>96</td></tr><tr><td>4</td><td>Garima Sharma</td><td>Annotation</td><td>96</td></tr><tr><td>5</td><td>Rohit Gothwal</td><td>Ops - Cement</td><td>95</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "which department has the lowest PACE score?",
+  "reply": "Departments ranked by avg PACE score:\n\nCustomer Success - CPL (7 employees) \u2014 avg PACE score: 50",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "bottom 10 emps based on Engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "who is making progress in PACE?",
+  "reply": "Who is improving (latest 20 vs previous 20 qualifying Standard-shift rows):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>Change (pts)</th><th>Latest avg</th><th>Previous avg</th><th>Rows (latest/prev)</th></tr></thead><tbody><tr><td>1</td><td>Pradeep Singh</td><td>Control Tower</td><td>+29</td><td>71</td><td>42</td><td>20/20</td></tr><tr><td>2</td><td>Dharmendra Jaiman</td><td>Walle8</td><td>+27</td><td>88</td><td>61</td><td>20/20</td></tr><tr><td>3</td><td>Kartik Maheshwari</td><td>Solutions - Enterprise</td><td>+26</td><td>89</td><td>63</td><td>20/16</td></tr><tr><td>4</td><td>Tarun Jain</td><td>IT-Development</td><td>+19</td><td>86</td><td>67</td><td>20/13</td></tr><tr><td>5</td><td>Himanshu Kaloya</td><td>Product Support - AT</td><td>+19</td><td>60</td><td>41</td><td>20/20</td></tr><tr><td>6</td><td>Manita Rathore</td><td>Implementation - US</td><td>+18</td><td>64</td><td>46</td><td>20/20</td></tr><tr><td>7</td><td>Krishn Gopal Agrwal</td><td>Annotation</td><td>+16</td><td>90</td><td>74</td><td>20/20</td></tr><tr><td>8</td><td>Narendra Singh</td><td>Control Tower</td><td>+15</td><td>59</td><td>44</td><td>20/20</td></tr><tr><td>9</td><td>Divyansh Gupta</td><td>Annotation</td><td>+14</td><td>97</td><td>83</td><td>20/20</td></tr><tr><td>10</td><td>Mohammad Kaif</td><td>Annotation</td><td>+14</td><td>93</td><td>79</td><td>20/20</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "highest and lowest PACE score among WFH employees",
+  "reply": "Highest and lowest in this filtered population:\n\n<table class=\"pace-table\"><thead><tr><th>Which</th><th>Employee</th><th>PACE score</th><th>PACE status</th></tr></thead><tbody><tr><td>Highest</td><td>Anushi Agrawal</td><td>100</td><td>Green</td></tr><tr><td>Lowest</td><td>Mainak Mukherjee</td><td>33</td><td>Black</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "top 5 WFH employees by pace score",
+  "reply": "Ranked by avg PACE score (WFH employees) (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg PACE score</th></tr></thead><tbody><tr><td>1</td><td>Anushi Agrawal</td><td>Ops - Cement</td><td>100</td></tr><tr><td>2</td><td>Abhi jain</td><td>Data Science &amp; Analytics</td><td>100</td></tr><tr><td>3</td><td>Megha Jangid</td><td>Annotation</td><td>100</td></tr><tr><td>4</td><td>Rohan Kumar</td><td>Annotation</td><td>99</td></tr><tr><td>5</td><td>Akshat Jain</td><td>Data Science &amp; Analytics</td><td>99</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "who's in red in Founders Office?",
+  "reply": "Returns up to 200 employees in the 'Founders Office' department whose current PACE status bucket is Red, with their IDs, names, codes, department info and scores.\n\nemployee_id | emp_name | emp_code | dept_id | dept_name | overall_std_pace_status | overall_pace_score | pace_score_prev_month | pace_score_delta\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 53 | 4\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | -1\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | 54 | 0\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35678 | Ajay Gaur | TP0016 | 348 | Founders Office | Red | 54.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 57 | -2\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 55 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | 54 | -1\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n35950 | Amit Sharma | AT0608 | 348 | Founders Office | Red | 55.00 | None | None\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 52 | -5\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 66 | -14\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | 74 | -8\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | None | None\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | None | None\n31527 | Rahul Kanwaria | AT0247 | 348 | Founders Office | Red | 58.00 | None | None\n\n_This answer was generated dynamically by AI and hasn't been manually verified \u2014 treat with appropriate caution. If it looks wrong, please flag it so it can be checked._",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "top 10 PACE improvers in the last 4 weeks",
+  "reply": "Computes each employee's PACE score for the most recent 28-day window and the preceding 28-day window (using the capped-* averaging rule and only Standard shifts), then returns the top 10 employees with the largest increase (with both periods having at least 10 days).\n\nemployee_id | emp_name | dept_name | prior_score | current_score | score_delta | current_days | prior_days\n36540 | Bharat Singh  | Walle8 | 60 | 92 | 32 | 20 | 13\n36496 | Kartik Maheshwari | Solutions - Enterprise | 55 | 86 | 31 | 19 | 21\n36232 | Pradeep Singh | Control Tower | 50 | 78 | 28 | 15 | 21\n36193 | Aaditay Jangid | Annotation | 65 | 91 | 26 | 19 | 23\n30571 | Dharmendra Jaiman | Walle8 | 63 | 86 | 23 | 21 | 22\n30881 | Rahul Goyal | IT-Development | 67 | 89 | 22 | 18 | 21\n36130 | Seyed Mohammed Irfan | Annotation | 68 | 88 | 20 | 22 | 14\n32128 | Tarun Jain | IT-Development | 67 | 86 | 19 | 15 | 21\n36437 | Nitin Kumar | Control Tower | 54 | 72 | 18 | 22 | 24\n36007 | Krishn Gopal Agrwal | Annotation | 74 | 90 | 16 | 21 | 22\n\n_This answer was generated dynamically by AI and hasn't been manually verified \u2014 treat with appropriate caution. If it looks wrong, please flag it so it can be checked._",
+  "ok": false,
+  "why": "missing ['gainer']"
+ },
+ {
+  "category": "baseline",
+  "q": "average engagement percentage for the whole company",
+  "reply": "The whole company \u2014 331 employee(s)\nengagement %: 62",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "which employee has the lowest PACE score?",
+  "reply": "Ranked by avg PACE score (2026-07-18 to 2026-09-15):\n\nDivyansh Sharma (IT-Development) \u2014 avg PACE score: 30",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "what is their weakest area?",
+  "reply": "For each employee this query computes the average engagement/effectiveness/discipline/working percentages across available Standard-shift rows, picks the lowest average as that employee's weakest area, and returns the metric name and its average (up to 200 employees).\n\nemployee_id | emp_name | weakest_metric | weakest_value\n36475 | Manish Kumar Mahawar | engagement_pct | 16.2952631578947368\n31891 | Yash Mukeshbhai Pandya | engagement_pct | 17.1624050632911392\n36581 | Itti Jain | engagement_pct | 18.6000000000000000\n36474 | Preetam Singh | engagement_pct | 20.3041538461538462\n32182 | Balakrishnan Venkatesan | engagement_pct | 23.1182432432432432\n36364 | Shiv Shakti Ashish Narayen Pandey | engagement_pct | 23.9971621621621622\n36450 | Ramsingh Karnawat | engagement_pct | 24.2207575757575758\n36039 | Mangesh Suresh Alat | engagement_pct | 25.1980519480519481\n32223 | Amit Priyadarshi | engagement_pct | 26.2996296296296296\n36388 | Ayush Sthapak | engagement_pct | 26.8838961038961039\n35496 | Divyansh Sharma | effectiveness_pct | 27.2370967741935484\n35938 | Umashankar Sharma  | engagement_pct | 28.5656521739130435\n36255 | Utkarsh Sharma | engagement_pct | 28.5667123287671233\n36428 | Nishant Patel | engagement_pct | 29.8477922077922078\n36444 | Sahil | engagement_pct | 29.9072727272727273\n35908 | Bharat Bhushan | engagement_pct | 30.1510256410256410\n35441 | Himanshu Kaloya | engagement_pct | 30.3162962962962963\n30556 | Mohan Raman | engagement_pct | 30.3407352941176471\n35961 | Palash Balani | engagement_pct | 30.8051898734177215\n36513 | Ankur Sharma | engagement_pct | 31.0804878048780488\n36443 | Parag Saini | engagement_pct | 32.0383783783783784\n31399 | Shubham Singh Chouhan | engagement_pct | 32.0863013698630137\n35495 | Mahender Kumar | engagement_pct | 33.5640697674418605\n36181 | Chaitanya Manjrekar | engagement_pct | 33.6388000000000000\n35659 | Saket Agrawal | engagement_pct | 33.6496052631578947\n31191 | Manish Raigar | engagement_pct | 33.6733333333333333\n32144 | Mohsin Qureshi | engagement_pct | 35.1001333333333333\n30838 | Mohit Kaushal | engagement_pct | 35.3680519480519481\n36216 | Shubham Khanra | engagement_pct | 35.5814117647058824\n30571 | Dharmendra Jaiman | engagement_pct | 35.9433333333333333\n30898 | Rachit Agarwal | engagement_pct | 36.3127777777777778\n36367 | Ganeshram Raghuvanshi | engagement_pct | 36.9786206896551724\n35987 | Siddhant Rajendra Pawar | engagement_pct | 37.2996052631578947\n35681 | Priyanshu Verma | discipline_pct | 37.3239436619718310\n31546 | Ankit Barredia | engagement_pct | 37.8038356164383562\n31555 | Vikash Kumar | engagement_pct | 38.3996385542168675\n36471 | Prateek Maheshwari | engagement_pct | 38.4278125000000000\n36387 | Saikat Chakraborty  | effectiveness_pct | 38.8567441860465116\n36186 | Chetan Kumar Suthar | engagement_pct | 40.1113888888888889\n36507 | Dhruvesh Hiteshkumar Dave | engagement_pct | 40.1257446808510638\n36402 | Shahil Akhtar | engagement_pct | 40.3173015873015873\n32306 | Deependra Verma | engagement_pct | 40.6025301204819277\n35896 | Atul Mangal | engagement_pct | 40.6608108108108108\n35947 | Lokesh Chandel | engagement_pct | 41.2105555555555556\n30615 | Kishor Sharma | engagement_pct | 41.4636486486486486\n36361 | Sri Krishna V B | engagement_pct | 42.0186301369863014\n36366 | Madhusudhan Jangid | effectiveness_pct | 42.5647222222222222\n35670 | Hayat Khan | engagement_pct | 42.7951190476190476\n36015 | Niraj Puri Goswami | engagement_pct | 43.1028048780487805\n31456 | sanwarmal Pareek | engagement_pct | 43.5880000000000000\n36159 | Aman Verma | engagement_pct | 43.7256338028169014\n35820 | Akash Gurjar | engagement_pct | 43.7686301369863014\n36401 | Manita Rathore | engagement_pct | 44.3651851851851852\n36403 |  Ujjawal Sharma | engagement_pct | 44.5709411764705882\n36410 | Akash Parihar  | engagement_pct | 44.6982051282051282\n31328 | Yadav Vinay Singh | engagement_pct | 44.8398734177215190\n30668 | Hari Kishan Pradhan | engagement_pct | 44.8833783783783784\n32076 | Pramod Saini | engagement_pct | 44.8885915492957746\n36209 | Pushpendra Jain | engagement_pct | 44.9138888888888889\n35886 | Abhishek | engagement_pct | 45.0610389610389610\n30587 | Dilip Yadav | engagement_pct | 45.1254545454545455\n36165 | Ayushman Gurjar | engagement_pct | 45.2819718309859155\n35998 | Gaurav Sharma  | engagement_pct | 45.5575903614457831\n36232 | Pradeep Singh | engagement_pct | 45.5588157894736842\n35906 | Mohd Asif | engagement_pct | 45.9983333333333333\n32133 | Hardik Khandelwal | engagement_pct | 46.1910666666666667\n36035 | Shubham Sharma | engagement_pct | 46.3875000000000000\n31846 | Anant Sharma | engagement_pct | 46.5850000000000000\n36424 | Mohammed Sameer  | engagement_pct | 46.9234246575342466\n35503 | Pawan Kumar | engagement_pct | 47.1601149425287356\n35701 | Raju Ram Bohra | engagement_pct | 47.2219540229885057\n30820 | Ashutosh Maheshwari | engagement_pct | 47.4080000000000000\n30685 | Mukul Khatri | effectiveness_pct | 47.7645679012345679\n32294 | Vaibhav Khandelwal | engagement_pct | 48.2104000000000000\n35982 | Taiyab  | engagement_pct | 48.3871264367816092\n31467 | Adnan Khokar | engagement_pct | 48.4450649350649351\n36456 | Shivam Verma | engagement_pct | 48.5519402985074627\n35795 | Mohammed Roman | engagement_pct | 48.6610588235294118\n36205 | Yogesh Kumar | engagement_pct | 49.0444318181818182\n35614 | Salini Burnwal | engagement_pct | 49.0671621621621622\n36470 | Pankaj Singh Bisht  | engagement_pct | 49.1450704225352113\n36189 | Anusha Khare | engagement_pct | 49.2255555555555556\n36058 | Anirban Patra | engagement_pct | 49.3977777777777778\n30708 | Ranjai Banerji | effectiveness_pct | 49.4236486486486486\n36168 | Charan Penumarthi | engagement_pct | 49.5747297297297297\n30846 | Kunal Singh Shekhawat | engagement_pct | 49.5933333333333333\n36397 | Nitin Kothiyal | engagement_pct | 49.7087012987012987\n30877 | Ankur Agrawal | effectiveness_pct | 49.8400000000000000\n35864 | Kunal Sain | engagement_pct | 49.8563953488372093\n30830 | Himanshu Chaturvedi | engagement_pct | 49.9038356164383562\n36390 | Vishal Johri | engagement_pct | 49.9912820512820513\n35950 | Amit Sharma | engagement_pct | 49.9966666666666667\n36577 | Pratik Laxman Shinde | engagement_pct | 49.9966666666666667\n35696 | Sobhit Sinha | engagement_pct | 49.9996052631578947\n31511 | Mahendra Kumar Bairwa | engagement_pct | 49.9997333333333333\n35862 | Devansh Sharma | engagement_pct | 49.9997619047619048\n36365 | Kalpesh Nandkumar Thakur | engagement_pct | 49.9998795180722892\n30714 | Rehan Anwar Kazi | engagement_pct | 50.0006024096385542\n30653 | Dilip Kumar Jangir | engagement_pct | 50.0025316455696203\n32217 | Rayapureddi Santhosh | engagement_pct | 50.0030000000000000\n35678 | Ajay Gaur | engagement_pct | 50.0034210526315789\n30610 | Ashok Yadav | engagement_pct | 50.0368831168831169\n36512 | Jahanvi Banjara | engagement_pct | 50.0962162162162162\n36041 | Vishvendra Sharma | engagement_pct | 50.1183750000000000\n35782 | Rishabh Ratnakar  | engagement_pct | 50.1830985915492958\n30812 | Manoj P. Hanagandi | engagement_pct | 50.2212328767123288\n30604 | MM Gehlot | engagement_pct | 50.3126760563380282\n30715 | Sonu Sharma | engagement_pct | 50.4504411764705882\n30729 | Manmohan Yadav | engagement_pct | 50.4709459459459459\n36031 | Naveen Gaur | engagement_pct | 50.5131764705882353\n36256 | Payal Bansal | engagement_pct | 50.5783076923076923\n36222 | Tushar Butta | effectiveness_pct | 50.6173809523809524\n36247 | Ali Shakoor | engagement_pct | 50.7406666666666667\n30762 | Ashish Kumar | engagement_pct | 50.7624390243902439\n35691 | Kaushal Singh Rao | engagement_pct | 51.0276470588235294\n31713 | Brijesh Khatana | engagement_pct | 51.0806666666666667\n35802 | Simran Bairwa | effectiveness_pct | 51.1566233766233766\n32114 | Deepak Kumar Rout | engagement_pct | 51.2159210526315789\n36248 | Gopal Yadav | engagement_pct | 51.3509859154929577\n32305 | Mohit Bairwa | engagement_pct | 51.4709876543209877\n30842 | Hari prasad godwal | engagement_pct | 51.5015068493150685\n32329 | Shubham Nagar | engagement_pct | 51.5083333333333333\n31741 | Abhishek Singh Jadon | engagement_pct | 51.5666666666666667\n35794 | Vishakha Khorwal | effectiveness_pct | 51.7252238805970149\n36572 | Faresh | engagement_pct | 51.7650000000000000\n36455 | Prateek Kabra | engagement_pct | 51.8304225352112676\n36435 | Vidhan Samir Patel | engagement_pct | 52.0210000000000000\n35983 | Chirag Karadia | engagement_pct | 52.0397260273972603\n35689 | Kuldeep Singh Shekhawat | engagement_pct | 52.1235211267605634\n35892 | Ajay Gour | engagement_pct | 52.2524358974358974\n32277 | Namrata Jain | engagement_pct | 52.2855844155844156\n36197 | Priyansh Agrawal  | engagement_pct | 52.6940540540540541\n30839 | Chandresh Singh | engagement_pct | 52.7700000000000000\n35814 | Shankar Yadav | engagement_pct | 52.8223529411764706\n30795 | Dinesh Sharma | engagement_pct | 52.9414925373134328\n36042 | Narendra Singh | engagement_pct | 53.1496250000000000\n32137 | Yuvraj Saini | engagement_pct | 53.2308536585365854\n36437 | Nitin Kumar | discipline_pct | 53.3333333333333333\n35905 | Surendra Singh | engagement_pct | 53.3681707317073171\n35703 | Namit Upadhyay | engagement_pct | 53.4508695652173913\n31365 | Saloni Bansal | engagement_pct | 53.5432876712328767\n36386 | Lakshya Upadhyay  | engagement_pct | 53.6927941176470588\n30656 | Mohit Tanwar | engagement_pct | 54.0005681818181818\n36030 | Nirmal | engagement_pct | 54.0798701298701299\n32101 | Pragya Tripathi | engagement_pct | 54.0831081081081081\n36555 | Jayprakash Anant | engagement_pct | 54.1652631578947368\n36252 | Anil Bairva | engagement_pct | 54.1954166666666667\n30797 | Aditya Khandal | effectiveness_pct | 54.2923437500000000\n31127 | Sumit Kumar | effectiveness_pct | 54.4610588235294118\n36349 | Shiva Kant Tiwari | engagement_pct | 54.6827631578947368\n36251 | Himanshu Parihar | engagement_pct | 54.7608955223880597\n30647 | Radhika Sharma | effectiveness_pct | 54.8352702702702703\n36537 | Karan Maheshwari | engagement_pct | 54.8660000000000000\n36538 | Vivek Kumar Soni | engagement_pct | 55.0413333333333333\n36254 | Deepanshu Saini | discipline_pct | 55.2941176470588235\n30876 | Manish Garg | engagement_pct | 55.3695180722891566\n35988 | Abhishek Awasthi | engagement_pct | 55.4079729729729730\n35786 | Manish Bhambhu | engagement_pct | 55.4462962962962963\n35924 | Bharti Aswani | effectiveness_pct | 55.5974418604651163\n36362 | Tanisha Jain  | engagement_pct | 55.7264285714285714\n30804 | Mahendra Singh Dhaka | effectiveness_pct | 55.9540229885057471\n30881 | Rahul Goyal | engagement_pct | 56.1890540540540541\n36179 | Vaibhav Bansal  | engagement_pct | 56.3052238805970149\n30888 | Naman Sharma | engagement_pct | 56.3131506849315068\n30529 | Ravish Kumar Jakhar | engagement_pct | 56.3758024691358025\n30553 | Suraj Kumar | engagement_pct | 56.4623076923076923\n35986 | Raghav Bihani | engagement_pct | 56.6158666666666667\n31535 | Anushi Agrawal | engagement_pct | 56.7924358974358974\n36496 | Kartik Maheshwari | engagement_pct | 56.8020408163265306\n36451 | Adarsh Sikarwar | engagement_pct | 56.8061038961038961\n32272 | Govind Chhipa | effectiveness_pct | 57.0002247191011236\n35922 | Prakhar Jain | engagement_pct | 57.0193150684931507\n32128 | Tarun Jain | engagement_pct | 57.0200000000000000\n36236 | Ashish Thakur | engagement_pct | 57.0462352941176471\n35972 | Mohit Kumar | effectiveness_pct | 57.0668235294117647\n35688 | Shakti Singh | engagement_pct | 57.1126136363636364\n30721 | Abhilash Jain | engagement_pct | 57.4872151898734177\n36002 | Garvit Chohira | engagement_pct | 57.9957142857142857\n35847 | Rahul | engagement_pct | 58.0143055555555556\n30850 | Khemraj Singh Rajput | engagement_pct | 58.1269047619047619\n36028 | Ravindra Singh Chandawat | engagement_pct | 58.1796341463414634\n36510 | Amit Barman | engagement_pct | 58.2292682926829268\n30692 | Deepak Khandelwal | engagement_pct | 58.3965333333333333\n35956 | Rohit Saini  | engagement_pct | 58.4414117647058824\n36541 | Saurabh Sharma | discipline_pct | 58.6206896551724138\n36235 | Divya Agarwal | engagement_pct | 58.7157500000000000\n35803 | Parth | effectiveness_pct | 58.7861111111111111\n31527 | Rahul Kanwaria | engagement_pct | 58.8362121212121212\n30828 | Rakesh Barman | engagement_pct | 58.9807792207792208\n31351 | Manish Yadav | engagement_pct | 59.0339285714285714\n31350 | Manish Swarnkar | engagement_pct | 59.2452112676056338\n36373 | Lokendra Singh Rana | engagement_pct | 59.4666666666666667\n30912 | Jitendra Kumar Jangir | engagement_pct | 59.5514473684210526\n36166 | Yashpal | engagement_pct | 59.5761538461538462\n36473 | Sahaj Kaushik | engagement_pct | 59.7198181818181818\n36571 | Shivam Jha | engagement_pct | 59.7560000000000000\n35940 | Mohammed Junaid | discipline_pct | 59.7701149425287356\n35904 | Abhi jain | engagement_pct | 59.7973684210526316\n35863 | Firoz Khan | engagement_pct | 59.8373684210526316\n36459 | Khushal Sharma | engagement_pct | 59.9955555555555556\n\n_This answer was generated dynamically by AI and hasn't been manually verified \u2014 treat with appropriate caution. If it looks wrong, please flag it so it can be checked._",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "which department has the lowest PACE score?",
+  "reply": "Departments ranked by avg PACE score:\n\nCustomer Success - CPL (7 employees) \u2014 avg PACE score: 50",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "how many employees are in that department?",
+  "reply": "Customer Success - CPL has 7 employees for 2026-09.",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "which employee there has the lowest PACE score?",
+  "reply": "Ranked by avg PACE score in Customer Success - CPL (2026-07-18 to 2026-09-15):\n\nKalpesh Nandkumar Thakur (Customer Success - CPL) \u2014 avg PACE score: 43",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "what is their weakest area?",
+  "reply": "Weakest area per employee (from the last ranking shown):\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>Weakest area</th><th>Value</th></tr></thead><tbody><tr><td>Kalpesh Nandkumar Thakur</td><td>Engagement</td><td>50%</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "baseline",
+  "q": "is that also the weakest area for the department overall?",
+  "reply": "Customer Success - CPL's weakest area is Engagement (44%).\nAll 4 areas: Engagement 44%, Effectiveness 81%, Discipline 82%, Working hours 101%",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "pos_filter",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Finds the 10 employees with the lowest average daily engagement percentage (computed from available rows in the view) and shows their department and number of days used in the average.\n\nemployee_id | emp_name | dept_name | avg_engagement_pct | days_count\n36475 | Manish Kumar Mahawar | SCM | 16.30 | 57\n31891 | Yash Mukeshbhai Pandya | Customer Success - Enterprise | 17.16 | 79\n36581 | Itti Jain | Annotation | 18.60 | 3\n36474 | Preetam Singh | Channel Sales | 20.30 | 65\n32182 | Balakrishnan Venkatesan | Sales - Digital Fleet | 23.12 | 74\n36364 | Shiv Shakti Ashish Narayen Pandey | Sales - Digital Fleet | 24.00 | 74\n36450 | Ramsingh Karnawat | SCM | 24.22 | 66\n36039 | Mangesh Suresh Alat | Sales - Digital Fleet | 25.20 | 77\n32223 | Amit Priyadarshi | Sales - Digital Fleet | 26.30 | 81\n36388 | Ayush Sthapak | Sales - Enterprise | 26.88 | 77\n\n_This answer was generated dynamically by AI and hasn't been manually verified \u2014 treat with appropriate caution. If it looks wrong, please flag it so it can be checked._",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "pos_filter",
+  "q": "only SCM",
+  "reply": "Returns up to 200 rows of employees who are in the SCM department with their basic identifiers, current PACE status/score, prior-month score, and the row's worked_day.\n\nemployee_id | emp_name | emp_code | dept_name | overall_std_pace_status | overall_pace_score | pace_score_prev_month | worked_day\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-07\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-18\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-16\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-17\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-06\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-11\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-14\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-26\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-15\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-31\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-17\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-12\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-29\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-24\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-31\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-10\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-16\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-20\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-09\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-03\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-08\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-22\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-21\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-11\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-03\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-08\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-04\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-20\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-24\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-25\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-05\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-06\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-01\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-05\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-17\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-13\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-21\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-27\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-29\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-04\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-02\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-01\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-18\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-01\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-10\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-02\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-11\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-03\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-08\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-23\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-07\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-09\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-24\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-10\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-19\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-19\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-05\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-30\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-14\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-09\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-23\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-13\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-04\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-22\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-01\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-02\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-07\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-12\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-04\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 66 | 2026-09-10\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | None | 2026-06-25\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 64 | 2026-08-03\n35820 | Akash Gurjar | AT0532 | SCM | Red | 62.00 | 56 | 2026-07-06\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-04\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-09\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-05\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-07\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-21\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-10\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-08\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-11\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-01\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-12\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-13\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-10\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-14\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-30\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-17\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-20\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-18\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-20\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-13\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-21\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-24\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-24\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-28\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-25\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-03\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-17\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-12\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-27\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-06\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-16\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-31\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-30\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-14\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-29\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-18\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-11\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-03\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-13\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-01\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-27\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-25\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-16\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-15\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-04\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-26\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-04\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-26\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-23\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-24\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-05\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-10\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-06\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-06\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-10\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-02\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-08\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-15\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-02\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-23\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-11\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-01\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-07\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-07\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-02\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-14\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-08\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-03\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-19\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 56 | 2026-09-09\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 62 | 2026-07-22\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-01\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | None | 2026-06-17\n30842 | Hari prasad godwal | AT0140 | SCM | Red | 58.00 | 54 | 2026-08-31\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-26\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-21\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-24\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-07\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-31\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-06\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-19\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-04\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-14\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-02\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-13\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-31\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-20\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-28\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-17\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-09\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-08\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-22\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-16\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-24\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-15\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-01\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-25\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-23\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-12\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-26\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-10\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-11\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-30\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-15\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-29\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-08\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-24\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-23\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-09\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-21\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-27\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-10\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-04\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-03\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-17\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-18\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-03\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 54 | 2026-07-29\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-22\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-02\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-01\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-19\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-30\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-06\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | None | 2026-06-16\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-12\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-27\n35947 | Lokesh Chandel | AT0605 | SCM | Red | 51.00 | 58 | 2026-08-13\n\n_This answer was generated dynamically by AI and hasn't been manually verified \u2014 treat with appropriate caution. If it looks wrong, please flag it so it can be checked._",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "pos_filter",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "pos_filter",
+  "q": "just Annotation",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Itti Jain</td><td>19</td></tr><tr><td>sanwarmal Pareek</td><td>45</td></tr><tr><td>Nikhil Kumar</td><td>54</td></tr><tr><td>Roshan Saini</td><td>55</td></tr><tr><td>Rohit Saini </td><td>60</td></tr><tr><td>Rohan Kumar</td><td>61</td></tr><tr><td>Krishn Gopal Agrwal</td><td>66</td></tr><tr><td>Ashok Bairwa</td><td>66</td></tr><tr><td>Garvit Chohira</td><td>67</td></tr><tr><td>Narendra singh</td><td>67</td></tr></tbody></table>\n\n(Annotation only)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_filter",
+  "q": "bottom 10 emps based on Engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_filter",
+  "q": "exclude Sales - Digital Fleet",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Manish Kumar Mahawar</td><td>12</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Umashankar Sharma </td><td>18</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Manish Raigar</td><td>24</td></tr></tbody></table>\n\n(excluding Sales - Digital Fleet)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_filter",
+  "q": "exclude Sales - Digital Fleet dept and then tell bottom 10 emps based on Engagement",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Manish Kumar Mahawar</td><td>12</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Umashankar Sharma </td><td>18</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Manish Raigar</td><td>24</td></tr></tbody></table>\n\n(excluding Sales - Digital Fleet)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_filter",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_filter",
+  "q": "exclude SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "exclude SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "only SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Manish Kumar Mahawar</td><td>12</td></tr><tr><td>Umashankar Sharma </td><td>18</td></tr><tr><td>Manish Raigar</td><td>24</td></tr><tr><td>Ramsingh Karnawat</td><td>25</td></tr><tr><td>Lokesh Chandel</td><td>33</td></tr><tr><td>Akash Gurjar</td><td>38</td></tr></tbody></table>\n\n(SCM only)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "exclude SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "remove that filter and show everyone again",
+  "reply": "I'm not able to expand that previous answer into a list right now \u2014 could you re-ask your question with the specifics (department/time period/status)?",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "exclude SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "filter_mod",
+  "q": "also exclude Annotation",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr><tr><td>Deependra Verma</td><td>26</td></tr></tbody></table>\n\n(excluding SCM, Annotation)",
+  "ok": false,
+  "why": "missing ['excluding annotation']"
+ },
+ {
+  "category": "grouping",
+  "q": "top 5 employees by PACE score",
+  "reply": "Ranked by avg PACE score (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg PACE score</th></tr></thead><tbody><tr><td>1</td><td>Tanu Mehra</td><td>Ops - Inbound</td><td>100</td></tr><tr><td>2</td><td>Gagandeep Singh</td><td>IT-Projects</td><td>97</td></tr><tr><td>3</td><td>Sandeep kumar vyas</td><td>Ops - Inbound</td><td>96</td></tr><tr><td>4</td><td>Garima Sharma</td><td>Annotation</td><td>96</td></tr><tr><td>5</td><td>Rohit Gothwal</td><td>Ops - Cement</td><td>95</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "grouping",
+  "q": "show it department wise",
+  "reply": "Ranked by PACE score:\n\n<table class=\"pace-table\"><thead><tr><th>Department</th><th>PACE score</th></tr></thead><tbody><tr><td>Ops - Cement</td><td>91</td></tr><tr><td>HR - Talent Acquisition</td><td>88</td></tr><tr><td>Ops - Inbound</td><td>87</td></tr><tr><td>CRM</td><td>86</td></tr><tr><td>IT-Projects</td><td>86</td></tr></tbody></table>\n\n(grouped by department)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "grouping",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "grouping",
+  "q": "tell me dept wise",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Department</th><th>engagement %</th></tr></thead><tbody><tr><td>SCM</td><td>25</td></tr><tr><td>Implementation</td><td>36</td></tr><tr><td>Sales - Enterprise</td><td>37</td></tr><tr><td>Sales - Digital Fleet</td><td>41</td></tr><tr><td>Customer Success - CPL</td><td>44</td></tr><tr><td>Admin</td><td>46</td></tr><tr><td>Implementation - US</td><td>47</td></tr><tr><td>Product</td><td>56</td></tr><tr><td>Customer Success - Enterprise</td><td>57</td></tr><tr><td>Channel Sales</td><td>57</td></tr></tbody></table>\n\n(grouped by department)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "grouping",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "grouping",
+  "q": "manager wise",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Rm</th><th>engagement %</th></tr></thead><tbody><tr><td>Rachit Agarwal</td><td>3</td></tr><tr><td>Lokesh Chandel</td><td>23</td></tr><tr><td>SP Yadav</td><td>31</td></tr><tr><td>Charan Penumarthi</td><td>32</td></tr><tr><td>Abhilash Jain</td><td>33</td></tr><tr><td>Deepak Kumar Rout</td><td>34</td></tr><tr><td>Mohsin Qureshi</td><td>42</td></tr><tr><td>Manmohan Yadav</td><td>45</td></tr><tr><td>Atul Kumar</td><td>47</td></tr><tr><td>Ashok Yadav</td><td>50</td></tr></tbody></table>\n\n(grouped by rm)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "ranking",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "ranking",
+  "q": "exclude SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "ranking",
+  "q": "make it the top 5",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Tripti goyal</td><td>92</td></tr><tr><td>Manisha Kumhar</td><td>89</td></tr><tr><td>Garima Sharma</td><td>87</td></tr><tr><td>Sachin Sharma</td><td>87</td></tr><tr><td>Rishabh Jain</td><td>85</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "metric_mod",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "metric_mod",
+  "q": "exclude SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "metric_mod",
+  "q": "show me effectiveness instead",
+  "reply": "Ranked by effectiveness %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>effectiveness %</th></tr></thead><tbody><tr><td>Divyansh Sharma</td><td>18</td></tr><tr><td>Ranjai Banerji</td><td>26</td></tr><tr><td>Saikat Chakraborty </td><td>28</td></tr><tr><td>Vishakha Khorwal</td><td>29</td></tr><tr><td>Simran Bairwa</td><td>32</td></tr><tr><td>Madhusudhan Jangid</td><td>35</td></tr><tr><td>Deependra Verma</td><td>40</td></tr><tr><td>Mukul Khatri</td><td>45</td></tr><tr><td>Tushar Butta</td><td>48</td></tr><tr><td>Govind Chhipa</td><td>55</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "period_mod",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "period_mod",
+  "q": "exclude SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "period_mod",
+  "q": "same thing for August",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Ankur Sharma</td><td>5</td></tr><tr><td>Ayush Sthapak</td><td>9</td></tr><tr><td>Hayat Khan</td><td>13</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>17</td></tr><tr><td>Prakhar Jain</td><td>19</td></tr><tr><td>Bharat Bhushan</td><td>24</td></tr><tr><td>Raju Ram Bohra</td><td>24</td></tr><tr><td>Shubham Khanra</td><td>24</td></tr><tr><td>Vikash Kumar</td><td>24</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "comparison",
+  "q": "compare 11 sept with 10 sept for all employees",
+  "reply": "Employees ranked by change in PACE score from 2026-09-10 to 2026-09-11:\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>2026-09-10</th><th>2026-09-11</th><th>Change</th></tr></thead><tbody><tr><td>1</td><td>Sumit Kumar</td><td>Walle8</td><td>95</td><td>17</td><td>-78</td></tr><tr><td>2</td><td>Sanjana</td><td>Ops - Cement</td><td>95</td><td>24</td><td>-71</td></tr><tr><td>3</td><td>Rishabh Gupta</td><td>Ops - Automobile</td><td>82</td><td>17</td><td>-65</td></tr><tr><td>4</td><td>Mohammad Sahil</td><td>Ops - Cement</td><td>99</td><td>36</td><td>-63</td></tr><tr><td>5</td><td>Faresh</td><td>Control Tower</td><td>77</td><td>21</td><td>-56</td></tr><tr><td>6</td><td>Avishi Vijay</td><td>Customer Success - Enterprise</td><td>95</td><td>41</td><td>-54</td></tr><tr><td>7</td><td>Namrata Jain</td><td>IT-Development</td><td>91</td><td>38</td><td>-53</td></tr><tr><td>8</td><td>Yash Rautela</td><td>Customer Success - Enterprise</td><td>85</td><td>36</td><td>-49</td></tr><tr><td>9</td><td>Deependra Singh Chauhan</td><td>Ops - Automobile</td><td>79</td><td>32</td><td>-47</td></tr><tr><td>10</td><td>Rahul</td><td>Channel Sales</td><td>62</td><td>17</td><td>-45</td></tr></tbody></table>\n\nBy default showing data for non visit and PS working days.",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "comparison",
+  "q": "compare 11 sept with 10 sept for all employees",
+  "reply": "Employees ranked by change in PACE score from 2026-09-10 to 2026-09-11:\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>2026-09-10</th><th>2026-09-11</th><th>Change</th></tr></thead><tbody><tr><td>1</td><td>Sumit Kumar</td><td>Walle8</td><td>95</td><td>17</td><td>-78</td></tr><tr><td>2</td><td>Sanjana</td><td>Ops - Cement</td><td>95</td><td>24</td><td>-71</td></tr><tr><td>3</td><td>Rishabh Gupta</td><td>Ops - Automobile</td><td>82</td><td>17</td><td>-65</td></tr><tr><td>4</td><td>Mohammad Sahil</td><td>Ops - Cement</td><td>99</td><td>36</td><td>-63</td></tr><tr><td>5</td><td>Faresh</td><td>Control Tower</td><td>77</td><td>21</td><td>-56</td></tr><tr><td>6</td><td>Avishi Vijay</td><td>Customer Success - Enterprise</td><td>95</td><td>41</td><td>-54</td></tr><tr><td>7</td><td>Namrata Jain</td><td>IT-Development</td><td>91</td><td>38</td><td>-53</td></tr><tr><td>8</td><td>Yash Rautela</td><td>Customer Success - Enterprise</td><td>85</td><td>36</td><td>-49</td></tr><tr><td>9</td><td>Deependra Singh Chauhan</td><td>Ops - Automobile</td><td>79</td><td>32</td><td>-47</td></tr><tr><td>10</td><td>Rahul</td><td>Channel Sales</td><td>62</td><td>17</td><td>-45</td></tr></tbody></table>\n\nBy default showing data for non visit and PS working days.",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "comparison",
+  "q": "tell me dept wise",
+  "reply": "Comparing PACE score \u2014 2026-09-10 vs 2026-09-11, by department:\n\n<table class=\"pace-table\"><thead><tr><th>Department</th><th>PACE score (2026-09-10)</th><th>PACE score (2026-09-11)</th><th>Change</th></tr></thead><tbody><tr><td>HR - Operations</td><td>42</td><td>72</td><td>+30</td></tr><tr><td>IT-Projects</td><td>67</td><td>91</td><td>+24</td></tr><tr><td>Data Science &amp; Analytics</td><td>74</td><td>98</td><td>+24</td></tr><tr><td>Billing</td><td>64</td><td>82</td><td>+18</td></tr><tr><td>Solutions - Digital Fleet</td><td>72</td><td>80</td><td>+9</td></tr><tr><td>IT-Development</td><td>71</td><td>75</td><td>+3</td></tr><tr><td>Product</td><td>75</td><td>79</td><td>+3</td></tr><tr><td>HR - Talent Acquisition</td><td>89</td><td>91</td><td>+2</td></tr><tr><td>Founders Office</td><td>85</td><td>86</td><td>+2</td></tr><tr><td>CRM</td><td>82</td><td>83</td><td>+1</td></tr><tr><td>Inside Sales</td><td>73</td><td>73</td><td>+0</td></tr><tr><td>Admin</td><td>50</td><td>49</td><td>-1</td></tr><tr><td>Sales - Enterprise</td><td>54</td><td>52</td><td>-2</td></tr><tr><td>Accounts</td><td>86</td><td>83</td><td>-3</td></tr><tr><td>Control Tower</td><td>56</td><td>52</td><td>-3</td></tr><tr><td>Product Support - xSwift</td><td>84</td><td>79</td><td>-5</td></tr><tr><td>Annotation</td><td>81</td><td>75</td><td>-6</td></tr><tr><td>Product Support - AT</td><td>72</td><td>64</td><td>-8</td></tr><tr><td>Marketing</td><td>76</td><td>66</td><td>-10</td></tr><tr><td>Walle8</td><td>81</td><td>72</td><td>-10</td></tr><tr><td>Ops - Inbound</td><td>85</td><td>73</td><td>-12</td></tr><tr><td>Sales Operations</td><td>73</td><td>61</td><td>-12</td></tr><tr><td>Customer Success - Enterprise</td><td>70</td><td>58</td><td>-12</td></tr><tr><td>Ops - Automobile</td><td>78</td><td>64</td><td>-14</td></tr><tr><td>Implementation - US</td><td>79</td><td>65</td><td>-15</td></tr><tr><td>Customer Success - Digital Fleet</td><td>68</td><td>54</td><td>-15</td></tr><tr><td>Customer Success - CPL</td><td>65</td><td>45</td><td>-19</td></tr><tr><td>Channel Sales</td><td>67</td><td>47</td><td>-20</td></tr><tr><td>Ops - Cement</td><td>93</td><td>68</td><td>-25</td></tr><tr><td>Solutions - Enterprise</td><td>97</td><td>69</td><td>-28</td></tr></tbody></table>\n\n(grouped by department, By default showing data for non visit and PS working days.)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "comparison",
+  "q": "compare 2 sept vs 7 sept",
+  "reply": "Comparing the full company on 2026-09-02 vs 2026-09-07:\n\nPACE score: 2026-09-02 = 72, 2026-09-07 = 71 \u2014 2026-09-02 was better (+1 pts)\n\nBy default showing data for non visit and PS working days.",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "multiturn",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "multiturn",
+  "q": "exclude Sales - Digital Fleet",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Manish Kumar Mahawar</td><td>12</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Umashankar Sharma </td><td>18</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Manish Raigar</td><td>24</td></tr></tbody></table>\n\n(excluding Sales - Digital Fleet)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "multiturn",
+  "q": "make it the top 5",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Tripti goyal</td><td>92</td></tr><tr><td>Manisha Kumhar</td><td>89</td></tr><tr><td>Garima Sharma</td><td>87</td></tr><tr><td>Sachin Sharma</td><td>87</td></tr><tr><td>Rishabh Jain</td><td>85</td></tr></tbody></table>\n\n(excluding Sales - Digital Fleet)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "multiturn",
+  "q": "show me discipline instead",
+  "reply": "Ranked by discipline %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>discipline %</th></tr></thead><tbody><tr><td>Kapil Sharma</td><td>100</td></tr><tr><td>Pramod Saini</td><td>100</td></tr><tr><td>Ashok Yadav</td><td>100</td></tr><tr><td>Rahul Kanwaria</td><td>100</td></tr><tr><td>Deepak Kumar Rout</td><td>100</td></tr></tbody></table>\n\n(excluding Sales - Digital Fleet)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "multiturn",
+  "q": "now tell me dept wise",
+  "reply": "Ranked by discipline %:\n\n<table class=\"pace-table\"><thead><tr><th>Department</th><th>discipline %</th></tr></thead><tbody><tr><td>IT-Projects</td><td>96</td></tr><tr><td>Inside Sales</td><td>95</td></tr><tr><td>Customer Success - Digital Fleet</td><td>95</td></tr><tr><td>Ops - Cement</td><td>94</td></tr><tr><td>Implementation</td><td>94</td></tr></tbody></table>\n\n(grouped by department, excluding Sales - Digital Fleet)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "equivalence",
+  "q": "bottom 10 employees by engagement excluding SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "unseen",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "unseen",
+  "q": "barring Annotation",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Manish Kumar Mahawar</td><td>12</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Umashankar Sharma </td><td>18</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr></tbody></table>\n\n(excluding Annotation)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "unseen",
+  "q": "top 5 employees by PACE score",
+  "reply": "Ranked by avg PACE score (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg PACE score</th></tr></thead><tbody><tr><td>1</td><td>Tanu Mehra</td><td>Ops - Inbound</td><td>100</td></tr><tr><td>2</td><td>Gagandeep Singh</td><td>IT-Projects</td><td>97</td></tr><tr><td>3</td><td>Sandeep kumar vyas</td><td>Ops - Inbound</td><td>96</td></tr><tr><td>4</td><td>Garima Sharma</td><td>Annotation</td><td>96</td></tr><tr><td>5</td><td>Rohit Gothwal</td><td>Ops - Cement</td><td>95</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "unseen",
+  "q": "segmented by department",
+  "reply": "Ranked by PACE score:\n\n<table class=\"pace-table\"><thead><tr><th>Department</th><th>PACE score</th></tr></thead><tbody><tr><td>Ops - Cement</td><td>91</td></tr><tr><td>HR - Talent Acquisition</td><td>88</td></tr><tr><td>Ops - Inbound</td><td>87</td></tr><tr><td>CRM</td><td>86</td></tr><tr><td>IT-Projects</td><td>86</td></tr></tbody></table>\n\n(grouped by department)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "unseen",
+  "q": "which employees have the weakest discipline outside Ops - Cement?",
+  "reply": "Ranked by discipline %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>discipline %</th></tr></thead><tbody><tr><td>Siddhant Rajendra Pawar</td><td>100</td></tr><tr><td>Ali Shakoor</td><td>100</td></tr><tr><td>Deepak Kumar Rout</td><td>100</td></tr><tr><td>Divyam Khetan</td><td>100</td></tr><tr><td>Prakhar Jain</td><td>100</td></tr><tr><td>Kapil Sharma</td><td>100</td></tr><tr><td>Rahul Kanwaria</td><td>100</td></tr><tr><td>Pramod Saini</td><td>100</td></tr><tr><td>Ashok Yadav</td><td>100</td></tr><tr><td>Anil Bairva</td><td>100</td></tr></tbody></table>\n\n(excluding Ops - Cement)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_generic",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_generic",
+  "q": "exclude IT-Development",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Manish Kumar Mahawar</td><td>12</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Umashankar Sharma </td><td>18</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr></tbody></table>\n\n(excluding IT-Development)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_generic",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_generic",
+  "q": "exclude Annotation",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Manish Kumar Mahawar</td><td>12</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Umashankar Sharma </td><td>18</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr></tbody></table>\n\n(excluding Annotation)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_generic",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "neg_generic",
+  "q": "exclude Channel Sales",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Manish Kumar Mahawar</td><td>12</td></tr><tr><td>Umashankar Sharma </td><td>18</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Manish Raigar</td><td>24</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding Channel Sales)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "context_reset",
+  "q": "bottom 10 employees by engagement",
+  "reply": "Ranked by avg engagement % (2026-07-18 to 2026-09-15):\n\n<table class=\"pace-table\"><thead><tr><th>#</th><th>Employee</th><th>Department</th><th>avg engagement %</th></tr></thead><tbody><tr><td>1</td><td>Manish Kumar Mahawar</td><td>SCM</td><td>17</td></tr><tr><td>2</td><td>Itti Jain</td><td>Annotation</td><td>19</td></tr><tr><td>3</td><td>Preetam Singh</td><td>Channel Sales</td><td>20</td></tr><tr><td>4</td><td>Yash Mukeshbhai Pandya</td><td>Customer Success - Enterprise</td><td>20</td></tr><tr><td>5</td><td>Mangesh Suresh Alat</td><td>Sales - Digital Fleet</td><td>21</td></tr><tr><td>6</td><td>Balakrishnan Venkatesan</td><td>Sales - Digital Fleet</td><td>23</td></tr><tr><td>7</td><td>Palash Balani</td><td>Sales - Digital Fleet</td><td>24</td></tr><tr><td>8</td><td>Bharat Bhushan</td><td>Sales - Enterprise</td><td>24</td></tr><tr><td>9</td><td>Shiv Shakti Ashish Narayen Pandey</td><td>Sales - Digital Fleet</td><td>26</td></tr><tr><td>10</td><td>Parag Saini</td><td>IT-Development</td><td>27</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "context_reset",
+  "q": "exclude SCM",
+  "reply": "Ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>engagement %</th></tr></thead><tbody><tr><td>Ayush Sthapak</td><td>3</td></tr><tr><td>Yash Mukeshbhai Pandya</td><td>4</td></tr><tr><td>Sahil</td><td>6</td></tr><tr><td>Siddhant Rajendra Pawar</td><td>11</td></tr><tr><td>Ankur Sharma</td><td>15</td></tr><tr><td>Dhruvesh Hiteshkumar Dave</td><td>16</td></tr><tr><td>Hayat Khan</td><td>18</td></tr><tr><td>Itti Jain</td><td>19</td></tr><tr><td>Shiv Shakti Ashish Narayen Pandey</td><td>22</td></tr><tr><td>Mangesh Suresh Alat</td><td>25</td></tr></tbody></table>\n\n(excluding SCM)",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "context_reset",
+  "q": "which department has the highest engagement?",
+  "reply": "Departments ranked by engagement %:\n\n<table class=\"pace-table\"><thead><tr><th>Department</th><th>engagement %</th></tr></thead><tbody><tr><td>CRM</td><td>74</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "context_reset",
+  "q": "which employee has the lowest PACE score?",
+  "reply": "Ranked by avg PACE score (2026-07-18 to 2026-09-15):\n\nDivyansh Sharma (IT-Development) \u2014 avg PACE score: 30",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "context_reset",
+  "q": "what is their weakest area?",
+  "reply": "Weakest area per employee (from the last ranking shown):\n\n<table class=\"pace-table\"><thead><tr><th>Employee</th><th>Weakest area</th><th>Value</th></tr></thead><tbody><tr><td>Divyansh Sharma</td><td>Effectiveness</td><td>18%</td></tr></tbody></table>",
+  "ok": true,
+  "why": ""
+ },
+ {
+  "category": "context_reset",
+  "q": "which employee has the highest PACE score?",
+  "reply": "Ranked by avg PACE score (2026-07-18 to 2026-09-15):\n\nTanu Mehra (Ops - Inbound) \u2014 avg PACE score: 100",
+  "ok": true,
+  "why": ""
+ }
+]

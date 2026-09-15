@@ -160,8 +160,10 @@ SUITE = [
                      all_of(NO_FAIL_TEXT, excludes("excluding scm")))]),
     ("filter_mod", [("bottom 10 employees by engagement", NO_FAIL_TEXT),
                     ("exclude SCM", contains("excluding scm")),
+                    # both exclusions accumulate into one not_in filter, so
+                    # the footer reads "excluding SCM, Annotation"
                     ("also exclude Annotation",
-                     all_of(NO_FAIL_TEXT, contains("excluding annotation")))]),
+                     all_of(NO_FAIL_TEXT, contains("excluding", "scm", "annotation")))]),
 
     # ---- 4. grouping -----------------------------------------------------
     ("grouping", [("top 5 employees by PACE score", NO_FAIL_TEXT),

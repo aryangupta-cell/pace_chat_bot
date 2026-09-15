@@ -195,7 +195,7 @@ def _resolve_window(window, resolvers):
         except Exception:
             continue
         if candidates:
-            return ("__ambiguous__", candidates)
+            return ("__ambiguous__", (field, candidates))
         if value:
             return (field, value)
     return None
@@ -237,7 +237,24 @@ def detect_dimension_filters(text, resolvers, allow_weak_positive=False):
                     continue
                 field, value = hit
                 if field == "__ambiguous__":
-                    return [], list(value)
+                    # A resolver reporting several candidates usually means a
+                    # genuinely ambiguous name ("exclude Sales") and the user
+                    # must be asked. But when EVERY candidate is spelled out
+                    # in the window ("leaving out Ops - Cement and
+                    # Annotation"), the user named a LIST — that is an
+                    # in/not_in filter, not an ambiguity. Resolved here, in
+                    # the one generic detector, so it works for any field.
+                    amb_field, candidates = value
+                    named = sorted((c for c in candidates if c.lower() in window.lower()),
+                                   key=lambda c: window.lower().index(c.lower()))
+                    if len(named) > 1 and len(named) == len(candidates):
+                        filters.append({
+                            "field": amb_field,
+                            "operator": "not_in" if operator == "ne" else "in",
+                            "value": named, "marker": m.group(0).lower(),
+                        })
+                        break
+                    return [], list(candidates)
                 key = (field, operator, value)
                 if key in seen:
                     break

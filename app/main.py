@@ -1624,6 +1624,16 @@ def _execute_plan(plan, session, raw_message=""):
     return reply, rows
 
 
+_PLAN_RANKING_EXTRA = re.compile(
+    r"\b(weakest|strongest|poorest|struggling|leading|trailing)\b", re.IGNORECASE)
+_PLAN_ASCENDING_EXTRA = re.compile(
+    r"\b(weakest|poorest|struggling|trailing|underperform\w*)\b", re.IGNORECASE)
+_PLAN_ENTITY_SUBJECT = re.compile(
+    r"\b(?:which|who|what|show\s+me|give\s+me|list)\b[\w\s]{0,12}?\b"
+    r"(managers?|reporting\s+managers?|rms?|departments?|depts?|employees?|emps?|people|persons?)\b",
+    re.IGNORECASE)
+
+
 def _plan_seed_delta_from_message(raw_message, message):
     """Everything this ONE message says about a query, as a plan delta.
 
@@ -1649,10 +1659,32 @@ def _plan_seed_delta_from_message(raw_message, message):
     if limit:
         delta["limit"] = limit
 
-    if _RANKING_WORDS.search(text):
-        delta["operation"] = "rank_bottom" if _ASCENDING_WORDS.search(text) else "rank_top"
-    elif _ASCENDING_WORDS.search(text):
+    # `_RANKING_WORDS`/`_ASCENDING_WORDS` are load-bearing for the extraction
+    # cascade and must not be widened there. These two plan-local additions
+    # cover superlatives that read as a ranking direction in plan messages but
+    # deliberately mean something else to the cascade ("weakest" is its
+    # strongest/weakest-AREA trigger). Found by live testing: "which managers
+    # have the weakest discipline outside Annotation?" ranked DESCENDING.
+    _rank_word = _RANKING_WORDS.search(text) or _PLAN_RANKING_EXTRA.search(text)
+    _asc_word = _ASCENDING_WORDS.search(text) or _PLAN_ASCENDING_EXTRA.search(text)
+    if _rank_word:
+        delta["operation"] = "rank_bottom" if _asc_word else "rank_top"
+    elif _asc_word:
         delta["ascending"] = True
+
+    # The question's SUBJECT, when it states one explicitly. Deliberately
+    # requires an interrogative immediately before the noun, so an incidental
+    # dimension word ("exclude Sales - Digital Fleet dept and then ...") can
+    # never be mistaken for the subject — that exact message contains "dept".
+    _subj = _PLAN_ENTITY_SUBJECT.search(text)
+    if _subj:
+        word = _subj.group(1).lower()
+        if word.startswith("manager") or word.startswith("rm") or word.startswith("reporting"):
+            delta["entity"] = "rm"
+        elif word.startswith("dept") or word.startswith("department"):
+            delta["entity"] = "department"
+        else:
+            delta["entity"] = "employee"
 
     pop = _detect_build_query_filters(text)
     period, latest_n, pop = _resolve_period_and_filters(text, pop)

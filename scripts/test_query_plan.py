@@ -402,6 +402,17 @@ amb_filters, amb = qp.detect_dimension_filters("exclude Sales", RESOLVERS)
 check_true("ambiguous dept surfaces candidates", bool(amb) and amb_filters == [],
            "got filters=%r amb=%r" % (amb_filters, amb))
 
+# multi-value negative filter: an explicit LIST is not an ambiguity
+check("multi-value not_in from an explicit list",
+      filters_of("leaving out Ops - Cement and Annotation")[0],
+      [("department", "not_in", ["Ops - Cement", "Annotation"])])
+check("multi-value in from an explicit list",
+      filters_of("only SCM and Annotation")[0],
+      [("department", "in", ["SCM", "Annotation"])])
+# a genuinely ambiguous fragment is still surfaced, not guessed
+_f, _a = filters_of("exclude Sales")
+check_true("genuinely ambiguous name still asks", _f == [] and len(_a) > 1, repr((_f, _a)))
+
 # ---------------------------------------------------------------------------
 # 13. Context reset
 # ---------------------------------------------------------------------------
