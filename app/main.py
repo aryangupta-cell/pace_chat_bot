@@ -1659,6 +1659,14 @@ _PLAN_WORD_NUMBERS = {
     "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15,
     "twenty": 20,
 }
+_PLAN_METRIC_ADJECTIVES = {
+    "effective": "effectiveness_pct",
+    "engaged": "engagement_pct",
+    "disciplined": "discipline_pct",
+}
+_PLAN_METRIC_ADJECTIVE = re.compile(
+    r"\b(" + "|".join(_PLAN_METRIC_ADJECTIVES) + r")\b", re.IGNORECASE)
+
 _PLAN_WORD_LIMIT = re.compile(
     r"\b(?:top|bottom|best|worst|highest|lowest|first|last|give\s+me|show\s+me|the)\s+"
     r"(" + "|".join(_PLAN_WORD_NUMBERS) + r")\b", re.IGNORECASE)
@@ -1677,6 +1685,16 @@ def _plan_seed_delta_from_message(raw_message, message):
     text = raw_message or message or ""
 
     detected_metrics = _detect_build_query_metrics(message)
+    # Adjective forms of the sub-metrics ("the five least EFFECTIVE people",
+    # "who is most ENGAGED"). Kept plan-local rather than widened into the
+    # shared _PCT_CAPPED_METRIC_PATTERN, which encodes the item #73
+    # capped-vs-percentage business rule and is relied on by rule-based
+    # paths this round must not disturb. Only consulted when the shared
+    # detector fell back to its ["pace_score"] default.
+    if detected_metrics == ["pace_score"]:
+        _adj = _PLAN_METRIC_ADJECTIVE.search(text)
+        if _adj:
+            detected_metrics = [_PLAN_METRIC_ADJECTIVES[_adj.group(1).lower()]]
     # _detect_build_query_metrics() returns ["pace_score"] as a DEFAULT when
     # nothing is named, so "did this message name a metric?" needs an
     # independent check rather than trusting that default.
@@ -6022,9 +6040,17 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # to express one, so it would silently re-run the previous query
     # unfiltered. Found by live testing. The guard is the same generic
     # detector used everywhere else, not a new phrase match.
-    _neg_filter_msg = _message_has_negative_dimension_filter(raw_message) or \
-        _message_has_negative_dimension_filter(message)
-    if last_list is not None and not _neg_filter_msg and (
+    # A GROUP BY request ("employee wise instead", "break it down by
+    # department") is likewise a precise modification this older handler
+    # cannot express — it re-ran the previous query at its ORIGINAL grain,
+    # just expanded to a full list. Live-found alongside the negation case.
+    _precise_modification_msg = (
+        _message_has_negative_dimension_filter(raw_message)
+        or _message_has_negative_dimension_filter(message)
+        or query_plan.detect_group_by(raw_message) is not None
+        or query_plan.detect_group_by(message) is not None
+    )
+    if last_list is not None and not _precise_modification_msg and (
         _VAGUE_LIST_EXPAND_PATTERN.search(message) is not None
         or _VAGUE_RESCOPE_PATTERN.search(message) is not None
         # Explicit scope-broadening override ("in the whole company",
@@ -6300,6 +6326,48 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     )
     if (rule_intent in _EMPLOYEE_LEVEL_ONLY_RANKING_INTENTS
             and _DIMENSION_SCOPE_OVERRIDE_PATTERN.search(message)):
+        rule_intent = None
+
+    # --- Item #94: plural-ranking shape vs individual-employee intents ----
+    # Live-found (unseen-question batch): "top 5 employees by working hours
+    # percentage" matched `emp_working_pct`, an INDIVIDUAL-employee field
+    # lookup, and replied "I couldn't find that employee". And "which
+    # departments have the best engagement?" was answered at EMPLOYEE grain,
+    # because `classify()` guessed `engagement_high` — the existing
+    # `_DIMENSION_SCOPE_OVERRIDE_PATTERN` guard above only covered the
+    # SINGULAR "which department has the ..." shape and only ever looked at
+    # `rule_intent`, never at the classifier's guess.
+    #
+    # Both are the same class of error: a message whose own wording is
+    # plainly a MULTI-ROW ranking over a population being answered as a
+    # single-entity lookup, or at the wrong grain. The two guards below are
+    # deterministic shape checks applied to BOTH matchers, so neither layer
+    # can claim a shape it structurally cannot be right about; control then
+    # reaches the extraction cascade / plan layer, which can express grain,
+    # ranking and row count properly.
+    _PLURAL_RANKING_SHAPE = re.compile(
+        r"\b(?:top|bottom|best|worst|highest|lowest|most|least|rank(?:ed|ing)?)\b[^.?!]{0,30}"
+        r"\b(?:employees|emps|people|persons|departments|depts|managers|rms|teams)\b"
+        r"|\b(?:employees|emps|people|persons|departments|depts|managers|rms|teams)\b"
+        r"[^.?!]{0,30}\b(?:top|bottom|best|worst|highest|lowest|most|least)\b",
+        re.IGNORECASE)
+    _PLURAL_DEPT_RANKING = re.compile(
+        r"\b(?:which|what)\s+(?:depts?|departments?|teams?|managers?|rms?)\b[^.?!]{0,40}"
+        r"\b(?:has|have|had|is|are|with)\b[^.?!]{0,25}"
+        r"\b(?:most|least|highest|lowest|best|worst|top|bottom|biggest)\b",
+        re.IGNORECASE)
+
+    if rule_intent in _EMP_FIELD_INTENTS and _PLURAL_RANKING_SHAPE.search(message):
+        rule_intent = None
+    if llm_result is not None:
+        _llm_guess = llm_result.get("intent")
+        if (_llm_guess in _EMP_FIELD_INTENTS and _PLURAL_RANKING_SHAPE.search(message)) or (
+                _llm_guess in _EMPLOYEE_LEVEL_ONLY_RANKING_INTENTS
+                and (_DIMENSION_SCOPE_OVERRIDE_PATTERN.search(message)
+                     or _PLURAL_DEPT_RANKING.search(message))):
+            llm_result = None
+    if (rule_intent in _EMPLOYEE_LEVEL_ONLY_RANKING_INTENTS
+            and _PLURAL_DEPT_RANKING.search(message)):
         rule_intent = None
 
     # Item #79 follow-up 2 (this round): the 9798ddd redirect below nulled

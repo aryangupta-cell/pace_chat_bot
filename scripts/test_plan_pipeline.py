@@ -530,6 +530,48 @@ r = main._plan_fallback_reply("hello there", "hello there", session_store.get_se
 check_true("N vague input still falls through", r is None, repr(r))
 
 # ==========================================================================
+# O. Grain guards (round 4): a plural-ranking shape can never be answered as
+#    an individual-employee field lookup, nor at the wrong grain, no matter
+#    which matcher proposed it.
+# ==========================================================================
+
+resp, calls = ask("O1", "top 5 employees by working hours percentage")
+check_true("O1 plural ranking is not an individual lookup",
+           "couldn't find that employee" not in resp.reply, repr(resp.reply[:160]))
+c = last_bq()
+check_true("O1 answered at employee grain with a limit",
+           c is not None and c["dimension"] == "employee" and c["limit"] == 5,
+           repr(c and (c["dimension"], c["limit"])))
+
+resp, calls = ask("O2", "which departments have the best engagement?")
+c = last_bq()
+check_true("O2 plural department question answered at department grain",
+           c is not None and c["dimension"] == "department", repr(c and c["dimension"]))
+
+# a genuine individual lookup must still route to the individual intent
+r = main._handle_query_plan_message("what is the PACE score of Tanu Mehra?",
+                                    "what is the PACE score of Tanu Mehra?",
+                                    session_store.get_session("O3"))
+check_true("O3 single-employee lookup untouched by the plan layer", r is None, repr(r))
+
+# a group-by follow-up reaches the plan layer, not the vague-list handler
+session = seed_ranking_plan("O4", metric="engagement_pct", limit=10, ascending=False)
+session_store.set_last_list(session, kind="ranking", answer_kind="list",
+                            rerun_same=lambda **kw: ("OLD HANDLER", []),
+                            rerun_list=lambda **kw: ("OLD HANDLER", []))
+resp, calls = ask("O4", "employee wise instead")
+check_true("O4 group-by follow-up bypasses the vague-list handler",
+           "OLD HANDLER" not in resp.reply, repr(resp.reply[:160]))
+
+# adjective metric forms
+seed_ranking_plan("O5")
+ask("O5", "give me the five least effective people, but not anyone in Walle8")
+c = last_bq()
+check_true("O5 adjective metric form 'least effective'",
+           c is not None and c["metrics"] == ["effectiveness_pct"] and c["limit"] == 5,
+           repr(c and (c["metrics"], c["limit"])))
+
+# ==========================================================================
 
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:
