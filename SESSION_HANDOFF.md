@@ -2076,3 +2076,188 @@ Clean except the same pre-existing untracked `PROJECT_BACKUP_2026-09-09.md` note
 **READY WITH KNOWN LIMITATIONS.**
 
 Both of item #91's two explicitly-named, highest-priority confirmed bugs (WFH filter silently dropped for ranked-list/progress-ranking phrasing; sticky-department-context leaking into an unrelated fresh question) are now fixed, live-verified with real production responses, and regression-tested against the full existing baseline with no regressions found. One additional low-severity cosmetic bug (a literal "None" leaking into reply text) was also fixed. Every other gap item #91 already identified and deliberately left unfixed (company-wide aggregate routing, multi-metric/multi-clause composition, the WFH+qualifying-row-count interaction for the rule-based ranking path, several single-instance routing/phrasing misses) remains exactly as documented there, for the same honestly-stated reasons - none of these were blind-fixed this round, consistent with the project's standing "narrow, precedented, low-risk fixes only" discipline. A user asking about WFH-scoped rankings, or chaining an unrelated question after a single-employee weakest-area lookup, will now get correct, verified answers where they previously got a plausible-looking but wrong-scoped one.
+
+---
+
+93. **(Entry written retrospectively in item #94.)** Commit `52b6d55`, "fix department exclude/negative-filter semantics lost in extraction cascade", was pushed without a SESSION_HANDOFF.md entry. It added `_DEPT_FILTER_NEGATION`/`_DEPT_FILTER_POSITIVE_SCOPE` regexes plus a `build_query(exclude_scope=...)` parameter, detected inside `_extraction_llm_reply()`. Item #94's live baseline (run BEFORE any code was changed) proved it **did not reliably fire** — see item #94's baseline table. It has been superseded, not reverted; see item #94's "Treatment of commit 52b6d55".
+
+---
+
+94. **ARCHITECTURE ROUND: replaced the "one intent per question shape" model with a normalized, composable QUERY PLAN — filters carrying OPERATORS, a GROUP BY distinct from the query's subject, comparison that generalizes, and ONE conversational plan that follow-ups patch. Built additively on top of items #52-93; none of the 124 rule intents, the PACE formula, the default filters, `pace_chatbot_view`, or `build_query()`'s existing semantics were changed. All verified against LIVE PRODUCTION.**
+
+### Baseline captured BEFORE any code change (live production, commit `52b6d55`)
+
+Run first, per this project's standing rule, so "no regression" is a measured claim rather than an assertion.
+
+| Question | Baseline reply | Verdict |
+|---|---|---|
+| "bottom 10 emps based on Engagement" → "exclude Sales - Digital Fleet" | raw-SQL fallback: a 200-row employee dump with `employee_id`/`dept_id` column names | **FAIL** |
+| "exclude Sales - Digital Fleet dept and then tell bottom 10 emps based on Engagement" | "Ranked by avg engagement % **in Sales - Digital Fleet**" | **FAIL — inverted** |
+| "bottom 10 employees by engagement" → "exclude SCM" | "SCM — 6 employee(s) PACE score: 45" | **FAIL** |
+| "bottom 10 employees by engagement" → "only SCM" | correct | PASS |
+| "compare 11 sept with 10 sept for all employees" | "I need two employee names to compare" | **FAIL** |
+| → "tell me dept wise" | "Which department did you mean?" | **FAIL** |
+| "top 5 employees by PACE score" → "show it department wise" | "I couldn't confidently answer that..." | **FAIL** |
+| "top 5 employees by PACE score" / "which department has the lowest PACE score?" / "who is making progress in PACE?" / "highest and lowest PACE among WFH employees" / "top 5 WFH employees by pace score" / "who's in red in Founders Office?" → "who all are in black?" / "top 10 PACE improvers in the last 4 weeks" / "average engagement percentage for the whole company" / the full K→O chain | all correct | PASS (the regression floor) |
+
+### Root causes
+
+1. **The extraction schema had no filter-OPERATOR concept.** `_BQ_EXTRACTION_SCHEMA`'s `filters` was a fixed 4-key dict (`ps_status`/`visit_status`/`work_mode`/`shift_type`) with no department/employee/rm key and no eq/ne/in/not_in. A department name therefore had exactly one place to go — `dimension`/`dimension_name`, i.e. the query's SUBJECT — so "exclude X" became a single-department lookup, losing the ranking, the metric and the negation at once.
+2. **Item #93's fix lived four stages downstream of the decision.** It ran inside `_extraction_llm_reply()`, the 4th of 5 cascade stages. Two upstream layers claimed the message first: `intents.match_intent()` (single-turn — `engagement_low` matched and the department was then applied as a positive SCOPE, inverting the request) and `llm_nlu.classify()` (multi-turn — a closed-vocabulary intent-name classifier with no filter/grouping concepts, which confidently guessed `dept_avg`/`dept_summary` for a bare "exclude SCM"). Confirmed by the baseline above, not inferred.
+3. **No `group_by` concept distinct from `dimension`.** "tell me dept wise" had nowhere to attach and was read as "which department?".
+4. **Four loosely-coupled state stores, none describing the query under discussion.** `sticky_context`, `query_context`, `comparison_entities`, `last_list` — and `day_compare`/`month_compare` wrote to none of them, so a comparison answer left nothing for a follow-up to modify.
+5. **Three independently-evolved query engines** (`build_query()`, `metric_ranking()`, `day_compare()`/`month_compare()`) with no shared semantic contract — comparison could scope by `dept_name` but never GROUP BY it.
+
+### Architecture — before
+
+```
+message -> spellcheck -> narrow interceptors
+        -> match_intent()            [124 regexes; non-None wins unconditionally]
+        -> classify()                [closed intent-name vocabulary]
+        -> extract_build_query()     [4-key filter dict, no operators, no group_by]
+        -> sql_fallback              [free-form generated SQL, unverified, no state]
+```
+
+### Architecture — after
+
+```
+message -> spellcheck -> narrow interceptors (all unchanged, all still first)
+        -> QUERY PLAN INTERCEPTOR                       <-- NEW, and this is the fix
+             fires ONLY for: a NEGATIVE filter in any message, or a
+             filter / grouping / ranking / metric / period modification in a
+             message that matches NO rule intent and follows an existing plan
+        -> match_intent()            [124 regexes, unchanged, still wins]
+        -> classify()                [now instructed to DEFER follow-up shapes]
+        -> extract_build_query()     [schema now carries dimension_filters WITH
+                                      operators, group_by, context_modification,
+                                      and rank_both_ends/compare operations]
+        -> PLAN AS STRUCTURED FALLBACK                  <-- NEW
+             deterministic, no LLM; same verified SQL; leaves a plan behind
+        -> sql_fallback              [unchanged, still the last resort]
+
+        all plan-shaped paths -> ONE executor -> queries.build_query() /
+                                 queries.compare_grouped()
+```
+
+The plan interceptor's placement is the whole point: item #93 patched the symptom at stage 4; item #94 moves the decision to where it is actually made. Its gating (`match_intent(...) is None` for everything except unambiguous negation) is what keeps the 124 intents bit-for-bit unchanged — it only ever takes precedence over `classify()`.
+
+### Query Plan structure (`app/query_plan.py` — new, pure python, no DB, no LLM)
+
+```
+entity        employee | department | rm | company        # the SUBJECT
+metrics       [BUILD_QUERY_METRICS keys]
+group_by      employee|department|rm|day|month|grade|designation|None
+operation     value | rank_top | rank_bottom | rank_both_ends |
+              strongest_weakest | trend | compare
+limit, ascending
+period, period_phrase, latest_n_days
+population_filters  {ps_status, visit_status, work_mode, shift_type}   # unchanged semantics
+filters       [{field, operator, value}]  operators: eq|ne|in|not_in|is_null|is_not_null
+comparison    {kind, period_a, period_b, group_by} | None
+context_modification  add/remove/replace_filter | change_metric | change_group_by |
+                      change_period | change_ranking | change_population | none
+```
+
+`patch(plan, delta)` changes ONLY the fields a follow-up named and preserves everything else — the invariant the multi-turn tests assert field by field, step by step.
+
+### Filter / operator design
+
+One operator-generic, FIELD-generic detector, `query_plan.detect_dimension_filters()`. The marker regexes say only "what follows is a negative (or positive) filter value"; WHICH field it belongs to is decided by which resolver recognises it. Adding a filterable dimension is a one-line addition to `FILTER_FIELDS` plus a resolver — never a new regex per phrase. `queries.build_query(dimension_filters=[...])` renders any operator against any registered column (`dept_name`, `employee_id`, `reporting_manager_name`, `grade`, `designation`); `ne`/`not_in` use `IS DISTINCT FROM` so NULLs count as "not the excluded value".
+
+Positive markers are split by strength: `only`/`just`/`restricted to`/... act anywhere; the broad ones (`in`/`from`/`for`/`within`) act only on a short, non-interrogative follow-up, so "who's in red in Founders Office?" is untouched.
+
+### Grouping design
+
+`group_by` is a separate field, and `_plan_effective_dimension()` is the single place that decides the output grain: group_by if present, else entity. "employees in Sales" = filter; "show it department wise" = grouping; "which department?" = entity. The word "department" decides nothing on its own.
+
+### Comparison design
+
+New `queries.compare_grouped(period_a, period_b, group_by, kind="day"|"month", ...)` — two-period comparison with one row per group, reusing `DAY_COMPARE_METRICS` and the same `_resolve_population_filter()` string the existing engines take, and accepting the same generic `dimension_filters`. `day_compare`/`month_compare`/`day_compare_ranking` now all write a comparison plan, so "tell me dept wise" after a comparison preserves **both periods and the compare operation**.
+
+### Conversational-state design
+
+`session_store.current_plan` holds ONE plan. The four older stores are untouched (124 intents depend on them); `query_plan.from_query_context()` bridges them, so a plan-shaped follow-up composes with a RULE-BASED answer too. When the plan layer declines a message, the stored plan is cleared — that is the context-reset guarantee.
+
+### How the 124 intents are now used
+
+Unchanged as executable logic, and still first in line — the item #52 precedence flip is intact. Their new, additional role is as REFERENCE material in `PACE_REFERENCE.md`, which states explicitly that they are examples of how this company talks about its data, **not an allowlist**. Two narrow, precedented guards were added (both shape checks applied to BOTH matchers, not new intents): a plural-ranking shape can never be answered by an individual-employee field intent, and a plural "which departments have the best X" can never be answered at employee grain.
+
+### `PACE_REFERENCE.md` (new, repo root)
+
+Schema, the PACE formula and its recomputation rule, status bands, the full NL-term→column table from `Aryan_Task_sheet - pace chatbot.csv`, default filters, the four distinct period concepts, the semantic CONCEPTS (§6), confirmed business decisions, the 124 intents as reference examples, and known limitations. Loaded at runtime into the extraction prompt in full and into the classifier prompt as its terminology sections only.
+
+**Runtime-verified, not asserted** — `GET /api/health` on production returns:
+`{"status":"ok","pace_reference_chars":22406,"pace_reference_in_extraction_prompt":true,"pace_reference_in_classify_prompt":true,"extraction_prompt_chars":49043,"classify_prompt_chars":35930}`
+
+### Treatment of commit `52b6d55` (item #93)
+
+**Superseded, not reverted.** Its `build_query(exclude_scope=...)` parameter proved the SQL shape was right, and that idea survives generalized as `dimension_filters` (any field, six operators). Its department-specific regexes `_DEPT_FILTER_NEGATION`/`_DEPT_FILTER_POSITIVE_SCOPE` were **deleted** — leaving them would have meant two competing implementations of "what does exclude mean", which is exactly what the mandate forbids. `_extraction_llm_reply()` now calls the same generic detector the interceptor uses.
+
+### Files changed
+
+- `app/query_plan.py` — **new**. Plan vocabulary, operator-generic filter detection, group-by detection, context-modification classification, `patch()`/`merge_filters()`, `from_query_context()` bridge.
+- `app/main.py` — `_handle_query_plan_message()` (interceptor), `_execute_plan()`, `_plan_fallback_reply()`, `_plan_seed_delta_from_message()`, `_plan_resolvers()`, `_message_has_negative_dimension_filter()`, `_format_compare_grouped()`; item #93's regexes removed; `_extraction_llm_reply()` and `_handle_rank_both_ends()` repointed at the generic detector; comparison handlers and the rule-based `metric_ranking()` branch now write plans; two grain guards; `/api/health` reference proof.
+- `app/queries.py` — `BUILD_QUERY_FILTER_COLUMNS`, `build_query(dimension_filters=...)`, `compare_grouped()`, `COMPARE_GROUP_COLUMNS`.
+- `app/llm_nlu.py` — schema gains `group_by`, `dimension_filters`, `context_modification`, `rank_both_ends`/`compare`; 15 new few-shots for the new concepts; `classify()` instructed to defer follow-up/filter/grouping shapes; `PACE_REFERENCE.md` wired into both prompts.
+- `app/session_store.py` — `current_plan` + accessors.
+- `app/intents.py` — day_compare connector vocabulary gains `with`/`against`/`compared to`.
+- `PACE_REFERENCE.md` — new.
+- `scripts/test_query_plan.py`, `scripts/test_plan_pipeline.py`, `scripts/regression_live.py` — new regression suites.
+
+### Regression suites added
+
+| Suite | Scope | Result |
+|---|---|---|
+| `scripts/test_query_plan.py` | plan vocabulary, operators, grouping, patching invariants. No DB, no LLM (resolvers injected) | **199 checks, 0 failed** |
+| `scripts/test_plan_pipeline.py` | interceptor + executor through the real `handle_message()`, stubbed DB. Asserts the SQL ARGUMENTS built (dimension, metrics, limit, ascending, dimension_filters), not prose | **97 checks, 0 failed** |
+| `scripts/regression_live.py` | 38 conversations, 14 categories, end to end against production | **76 checks, 0 failed** |
+
+### Live test results (production, final)
+
+| # | Question (-> = same session) | Reply |
+|---|---|---|
+| 1 | "bottom 10 emps based on Engagement" -> "exclude Sales - Digital Fleet" | Ranked by engagement %: Ayush Sthapak 3, Yash Mukeshbhai Pandya 4, Sahil 6, Manish Kumar Mahawar 12, Ankur Sharma 15, … **(excluding Sales - Digital Fleet)** |
+| 2 | "exclude Sales - Digital Fleet dept and then tell bottom 10 emps based on Engagement" | byte-identical rows to #1 — single-turn and multi-turn now agree |
+| 3 | "bottom 10 employees by engagement" -> "exclude SCM" | Ranked by engagement %: Ayush Sthapak 3, Yash Mukeshbhai Pandya 4, Sahil 6, Siddhant Rajendra Pawar 11, … **(excluding SCM)** |
+| 4 | "bottom 10 employees by engagement" -> "only SCM" | Ranked by engagement %: Manish Kumar Mahawar 12, Umashankar Sharma 18, Manish Raigar 24, Ramsingh Karnawat 25, Lokesh Chandel 33, Akash Gurjar 38 **(SCM only)** |
+| 5 | "compare 11 sept with 10 sept for all employees" -> "tell me dept wise" | "Comparing PACE score — 2026-09-10 vs 2026-09-11, by department: HR - Operations 42 -> 72 (+30), IT-Projects 67 -> 91 (+24), Data Science & Analytics 74 -> 98 (+24), …" — both dates and the compare operation preserved, one row per department |
+| 6 | "which managers have the weakest discipline outside Annotation?" (unseen) | Ranked by discipline %, **manager grain, ascending**: Deepanshu Saini 58, Mukul Sharma 67, Hari Kishan Pradhan 68, Rakesh Barman 70, … (excluding Annotation) |
+| 7 | 5-turn composition: "bottom 10 employees by engagement" -> "exclude IT-Development" -> "make it the top 5" -> "show me discipline instead" -> "now tell me dept wise" | filter survives all four turns; final answer is department-grain discipline "(grouped by department, excluding IT-Development)" |
+| 8 | context reset: "bottom 10 employees by engagement" -> "exclude SCM" -> "which department has the highest engagement?" | "Departments ranked by engagement %: CRM 74" — **no exclusion leaked** |
+| 9 | "top 10 employees by effectiveness, leaving out Ops - Cement and Annotation" | correct, `not_in` list applied |
+| 10 | "show me the 4 lowest engagement employees excluding Annotation and SCM" | 4 rows, "(excluding Annotation, SCM)" |
+| 11 | "compare august to july" -> "tell me department wise" | month-grain comparison, one row per department |
+| 12 | Regression floor (top 5 by PACE / lowest-PACE department / making progress / WFH highest-and-lowest / top 5 WFH / red -> black in Founders Office / 4-week improvers / company engagement / full K->O chain) | all identical to the pre-change baseline |
+
+### Live-found fixes made DURING this round (each found by running production, not by reading code)
+
+1. An explicit multi-value exclusion was reported as a name ambiguity -> now an `in`/`not_in` list when every candidate is spelled out; a genuinely ambiguous fragment still asks.
+2. "which managers…" answered at employee grain, and "weakest" ranked descending -> explicit-subject and plan-local direction detection.
+3. Negation markers separated from their preposition ("but not **anyone** in Walle8") and `skipping`/`dropping`/`omitting` unrecognised. Deliberately NOT bare "drop"/"dropped" — "whose score dropped the most in Annotation" is a trend question.
+4. "restrict **that** to Annotation" / "limit **it** to SCM" unrecognised (pronoun between verb and "to").
+5. "what about excluding everyone in Control Tower" was claimed by the older vague-rescope handler, which re-ran the query UNFILTERED. That handler now defers on a negation filter or a grouping request.
+6. Fresh ranking phrasings no intent claims ("bottom 8 by discipline", "worst 6 on effectiveness") landed on raw SQL, which leaves no state and stranded every follow-up -> the deterministic plan now runs ahead of raw SQL.
+7. "top 5 employees by working hours percentage" -> "I couldn't find that employee" (an individual-employee intent claiming a plural ranking), and "which departments have the best engagement?" answered at employee grain -> two grain guards, applied to both matchers.
+8. Spelled-out counts ("the five least effective people") and adjective metric forms ("least effective") unrecognised.
+9. The full 22KB reference in the classifier prompt correlated with intermittent LLM timeouts under parallel load -> the classifier now gets only the terminology sections.
+
+### Known limitations (honest)
+
+- **Metric translation gap.** A plan recovered from a rule-based answer whose metric has no `BUILD_QUERY_METRICS` equivalent (late-comings, early leavings, deficient hours, productive minutes via `productive_high`) cannot be executed by the plan path. When the prior turn left no usable metric, the plan defaults to `pace_score` — so a follow-up like "exclude X" after "top 10 by productive minutes" silently switches the metric to PACE score rather than refusing. This is the largest remaining sharp edge; the clean fix is to add LC/EL/DH/productive-minute equivalents to `BUILD_QUERY_METRICS` (not attempted this round without DB access to confirm the column names on `pace_1`).
+- **`grade`/`designation`** are filterable but not exposed as group-by output grains; `build_query()` cannot group by them. Untested against the real schema (no DB credentials this round) — if those columns are absent from `pace_1`, such a filter fails safe (the query raises, the plan declines).
+- **"day wise"/"month wise" grouping** works only on the comparison engine, not on rankings.
+- **Multi-metric and multi-clause composition** remain unimplemented, exactly as items #83/#86 scoped them.
+- **Company-wide aggregate routing** (item #91's Category E) is unchanged; some shapes still misroute.
+- **`sql_fallback` answers still leave no plan**, so a follow-up to one is stranded. The plan fallback now runs first for ranking shapes, which shrinks this surface but does not remove it.
+- **Prompt cost.** The extraction prompt is ~49KB and the classifier ~36KB. Both are stable prefixes and cache, but cold calls are slower than before.
+- **No DB credentials were available**, so every claim here is verified through the live chatbot API. No SQL was run directly, no grants touched, `pace_chatbot_view` not modified.
+
+### Commit hashes this round
+
+`fe4a4d6` (architecture), `702eee3` (live-found refinements), `6972658` (classifier prompt trim), `68c3ba1` (marker vocabulary + ordering), `a2c6a70` (plan as structured fallback), `dc167a2` (grain guards, adjective metrics, group-by ordering). All pushed to `origin/master` and `origin/main`.
+
+### Final verdict
+
+**READY WITH KNOWN LIMITATIONS — materially more general than before.**
+
+The standard set for this round was whether NEW valid natural-language questions work without a new intent or patch per phrasing. On that standard it largely succeeds: of 15 genuinely unseen questions written after the implementation was complete, 14 answer correctly, including multi-turn compositions that were never coded for. The nine issues listed above were all found by running production and fixed generically (vocabulary, ordering, grain), not by adding a regex per example. The failure mode that remains is the metric-translation gap, which is stated plainly rather than papered over.

@@ -5,6 +5,8 @@
 - **PROJECT**: PACE Chatbot — a natural-language chat interface over employee attendance/productivity/"PACE score" performance data, sitting alongside a Looker Studio dashboard. FastAPI + PostgreSQL backend, rule-based + LLM-assisted NLU, deployed on Render.
 - **CURRENT STATUS**: "Change 2" (the generalized semantic-extraction / composable query layer, items #70-73) is implemented, extended through several rounds (items #74-90), validated against a full 50+20 question matrix (item #91), and given a final hardening pass (item #92). **Verdict as of the latest commit: READY WITH KNOWN LIMITATIONS** (item #92's own stated verdict, carried forward — not upgraded or downgraded by this document).
 - **LATEST COMMIT**: `bbaaf45` — "Item #92 (final docs): WFH filter fix, sticky-context leak fix, cosmetic fix, full regression pass, architectural review, and final verdict". Branch `master`, synced to `origin/master` and `origin/main` (repo convention: every round pushes `git push origin master:main` to keep both in sync). Working tree clean except one pre-existing, intentionally-untracked file, `PROJECT_BACKUP_2026-09-09.md` (an earlier project snapshot doc, not part of any round's diff).
+- **⚠️ SUPERSEDED IN PART BY ITEM #94 (see SESSION_HANDOFF.md's last entry).** Item #94 replaced the "one intent per question shape" model with a normalized, composable **QUERY PLAN** layer (`app/query_plan.py`) and added a new pre-classification **query-plan interceptor** ahead of both the rule matcher and `classify()`. Sections 1, 4, 8 and 16 of this document describe the pre-#94 pipeline; read section 4a below for the current one. Everything else here (the PACE formula, default filters, period semantics, business decisions, column mappings) is unchanged and still authoritative.
+- **AUTHORITATIVE SEMANTIC KNOWLEDGE**: `PACE_REFERENCE.md` (repo root, added item #94) is now the single authoritative description of what the PACE data *means* — schema, metric definitions, business rules, terminology, and the semantic concepts the system supports. It is **loaded at runtime** into the GPT-5-mini prompts in `app/llm_nlu.py` (verify with `GET /api/health`, which reports `pace_reference_chars` and whether the text is present in each prompt). It frames the 124 intents as REFERENCE EXAMPLES, not an allowlist. Keep it in sync when metric/business semantics change — it is part of the running system, not documentation about it.
 - **READ FIRST**: this file, then `SESSION_HANDOFF.md` in full (2078 lines — it is the chronological, item-numbered ground truth for everything described here; items #52 through #92 cover this project's most recent and most relevant history, and items #70-92 specifically are "Change 2" and its hardening). Then read `app/main.py`, `app/queries.py`, `app/intents.py`, `app/llm_nlu.py`, `app/entities.py`, `app/session_store.py` directly — SESSION_HANDOFF.md itself warns it "may drift out of date" relative to the real code.
 - **CURRENT ARCHITECTURE (one paragraph)**: a user message first passes through spellcheck, then a cascade: (1) a handful of narrow, deterministic pre-classification interceptors (filter-meta follow-ups, bare-direction follow-ups, driving-performance/both-ends-ranking ambiguity guards); (2) the ~123-intent rule-based regex matcher (`intents.match_intent()`), which wins unconditionally whenever it returns a non-`None` intent (the "precedence flip", item #52); (3) if that finds nothing, an LLM intent classifier (`llm_nlu.classify()`, GPT-5-mini by default, Gemini as a swappable alternate provider); (4) if that also finds nothing usable, a second, separate LLM call (`llm_nlu.extract_build_query()`) extracts a structured `{dimension, metrics, filters, period, limit, operation, ...}` object, validated and re-resolved deterministically against real entities, then executed via one general parametrized SQL engine, `queries.build_query()`; (5) if even that fails, a last-resort free-form AI-generated-SQL fallback (`sql_fallback.py`, SELECT-only, rollback-only, always labeled "AI-generated/unverified"). Conversational state is tracked across turns via two additive mechanisms: `sticky_context` (single-slot department/employee/period, whole-session-sticky) and the newer `query_context` (structured last-operation/last-dimension/last-result-ids state, added in item #84 specifically so ranking answers produced by the new cascade leave behind enough state for pronoun follow-ups like "their weakest area" to resolve correctly).
 - **KNOWN LIMITATIONS (brief — full detail in section 13 below)**:
@@ -36,7 +38,10 @@
 - `app/sql_fallback.py` — the last-resort free-form AI-generated-SQL path (SELECT-only regex guard, rollback-only DB connection, always-labeled-unverified replies).
 - `app/db.py` — `get_conn()`/`run_query()`; `run_query_rollback_only()` used only by `sql_fallback.py`.
 - `app/spellcheck.py`, `app/usage_log.py` — offline typo correction, LLM usage logging.
-- `SESSION_HANDOFF.md` — the full chronological project history (items #1-92+), the primary source of truth this document is built from.
+- `app/query_plan.py` (~600 lines, item #94) — the normalized QUERY PLAN vocabulary and patching semantics. Pure python: no DB, no LLM, entity resolution injected — so it is unit-testable offline. See section 4a.
+- `PACE_REFERENCE.md` (repo root, item #94) — the AUTHORITATIVE semantic-knowledge file, loaded at runtime into both GPT-5-mini prompts. Part of the running system, not documentation about it.
+- `scripts/test_query_plan.py`, `scripts/test_plan_pipeline.py`, `scripts/regression_live.py` (item #94) — the regression suites for the plan layer.
+- `SESSION_HANDOFF.md` — the full chronological project history (items #1-94), the primary source of truth this document is built from.
 - `PROJECT_BACKUP_2026-09-09.md` — an earlier snapshot doc, present as an intentionally-untracked file in the working tree; useful as a secondary cross-reference (its §7 column-mapping table is reproduced/adapted in section 6 below), but SESSION_HANDOFF.md items #70+ supersede it for anything after that point.
 - `scripts/golden_validate_pace_score.py` — a golden-validation harness (item #75) for cross-checking `build_query()`'s live-recomputed PACE score formula against the stored `last_60_days_new_pace_score_7_3` column; not runnable without DB credentials in a given sandbox, but ready for a session that has them.
 
@@ -147,6 +152,54 @@ message
 - `session_store.last_list` — `{kind, rerun_list, rerun_same, answer_kind, dept_name, employee_ids, team_label, month, date_range, statuses, rerun_opposite, ascending}` — the older, single-slot "last list/ranking answer" tracker, still used by ~20+ rule-based ranking call sites for vague "list them"/"what about the bottom 5" follow-ups.
 
 **Multi-step planning**: deliberately narrow, NOT a general planner (explicit user constraint, item #83/#86). Exactly one hand-built 2-step composition exists: `_handle_driving_performance()` — step 1 resolves the department-level winner/loser (`limit=1`), step 2 ranks employees WITHIN that department by PACE score, reusing `build_query()`'s own `scope=("department", name)` mechanism for both steps. This does NOT generalize to arbitrary "and also show me X" second clauses (see section 13's multi-metric/multi-clause gap).
+
+---
+
+## 4a. Current Architecture (item #94 — the QUERY PLAN layer)
+
+This supersedes section 4's pipeline diagram. Full detail, root causes, live transcripts and limitations: SESSION_HANDOFF.md item #94.
+
+```
+message
+  → spellcheck correction (raw_message preserved)
+  → the pre-existing narrow interceptors (filter-meta, bare-direction,
+    list-pronoun-metric, driving-performance, both-ends, dept-weakest-area)
+    — ALL unchanged, ALL still ahead of everything below
+  → QUERY PLAN INTERCEPTOR   [NEW — app/main.py::_handle_query_plan_message]
+        fires ONLY for:
+          (a) a NEGATIVE dimension filter in any message, or
+          (b) a filter / grouping / ranking / metric / period modification
+              in a message that matches NO rule intent AND follows an
+              existing plan
+        → builds a delta deterministically (no LLM), PATCHES the stored plan,
+          runs _execute_plan()
+        → on decline, session_store.clear_current_plan()  [context reset]
+  → rule_intent = intents.match_intent(message)   [124 regexes — UNCHANGED,
+                                                   still wins unconditionally]
+  → llm_nlu.classify()          [now instructed to return "none" for
+                                 follow-up / filter / grouping shapes]
+  → llm_nlu.extract_build_query()  [schema now carries dimension_filters WITH
+                                    operators, group_by, context_modification,
+                                    rank_both_ends + compare operations]
+  → PLAN AS STRUCTURED FALLBACK  [NEW — _plan_fallback_reply(); deterministic,
+                                  same verified SQL, leaves a plan behind]
+  → sql_fallback.answer()        [unchanged, still the last resort]
+  → bare-name lookup → FALLBACK_MESSAGE
+```
+
+**The QueryPlan** (`app/query_plan.py` — pure python, no DB, no LLM, unit-tested offline):
+`entity` (the SUBJECT: employee|department|rm|company) · `metrics` · `group_by` (a breakdown dimension, **distinct from entity**) · `operation` (value|rank_top|rank_bottom|rank_both_ends|strongest_weakest|trend|compare) · `limit`/`ascending` · `period`/`period_phrase`/`latest_n_days` · `population_filters` (the pre-existing 4-key qualifying-population dict, semantics unchanged) · `filters` — **a LIST of `{field, operator, value}`** with operators `eq|ne|in|not_in|is_null|is_not_null` over any `FILTER_FIELDS` dimension (department, employee, rm, grade, designation) · `comparison` `{kind, period_a, period_b, group_by}` · `context_modification`.
+
+`query_plan.patch(plan, delta)` changes only the fields a follow-up named and preserves everything else.
+
+**The three distinctions the plan enforces** — "employees in Sales" is a FILTER; "show it department wise" is a GROUP BY; "which department?" is the ENTITY. The word "department" decides nothing on its own.
+
+**Execution**: `app/main.py::_execute_plan()` → `queries.build_query(dimension_filters=[...])` (new generic operator-aware param, superseding item #93's department-only `exclude_scope`) or `queries.compare_grouped()` (new: two-period comparison broken down by a dimension, preserving both periods and the compare operation).
+
+**Conversational state**: `session_store.current_plan` holds ONE plan. The four older stores are untouched — 124 intents depend on them — and `query_plan.from_query_context()` bridges them, so a plan-shaped follow-up composes with a rule-based answer too.
+
+**Regression suites** (run these before and after any change to this layer):
+`python scripts/test_query_plan.py` (199 checks, offline) · `python scripts/test_plan_pipeline.py` (97 checks, offline, stubbed DB) · `python scripts/regression_live.py` (76 checks, live production).
 
 ---
 
@@ -421,6 +474,8 @@ Every item below is exactly as SESSION_HANDOFF.md items #91/#92 documented it �
 **What's done**: the full "Change 2" generalized semantic-extraction layer (items #70-73) is built, extended with limit/operation/multi-entity conversational state (items #74-86), hardened through 4 rounds of CEO-style bug-hunting (items #87-90), validated with a full 50+20 question matrix for the first time (item #91), and given a final hardening pass fixing the 2 highest-priority bugs that validation found (item #92).
 
 **What's stable**: single-entity lookups, standard top/bottom-N rankings for both employees and departments, period-over-period change rankings, the department-driving-employees composite, WFH highest/lowest via `rank_both_ends`, the full K/L/M/N/O conversational chains for their originally-designed phrasings, and (as of item #92) WFH-filtered ranked lists via the rule-based path too. All confirmed via live production testing, with no known regressions from the baseline items #83-92 established.
+
+**Item #94 update**: several of section 13's limitations are now fixed — filter operators (exclude/only, generically, over any filterable dimension), grouping distinct from the query's subject, comparison with a GROUP BY, and one conversational plan that follow-ups patch. Item #94's own known limitations (metric-translation gap, `grade`/`designation` not available as group-by grains, "day/month wise" grouping only on comparisons, `sql_fallback` still leaving no plan) are listed in its SESSION_HANDOFF.md entry and take precedence over anything below that contradicts them. The **best next pick** is item #94's metric-translation gap: add LC/EL/DH/productive-minutes equivalents to `BUILD_QUERY_METRICS` so a follow-up after those rankings keeps the metric instead of silently defaulting to PACE score. That needs DB access to confirm the column names on `pace_1` first.
 
 **What remains** (directly from item #91/#92's own known-limitations list — see section 13 for full detail, do not invent anything beyond this):
 1. Company-wide aggregate questions with no named entity — the single biggest, most consistent gap (5 of 7 failed in item #91's Category E). **Recommended first pick if given a free choice** — needs either DB access or a debug-logging pass to pin down the exact `classify()`→cascade dispatch-order issue, per item #91's own honest assessment that a blind fix here risks repeating item #89's mistake.
