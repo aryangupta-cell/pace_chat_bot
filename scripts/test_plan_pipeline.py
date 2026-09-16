@@ -930,6 +930,23 @@ for msg in ("who are the black status employees excluding SCM",
     check_true("R9 status question declines in the plan: %r" % msg, r is None,
                repr(r and r.reply[:120]))
 
+# R10 — an EXCLUDED department must never also become the positive scope.
+# Found by live-testing R4/R9 above: once the plan correctly declined those
+# messages, the rule intents that took them over scoped INTO the excluded
+# department ("Who is improving in SCM ... (excluding SCM)", 0 rows;
+# "Employees currently Black in SCM"). One guard, in answer_intent(), where
+# every rule intent's department scope is resolved.
+for msg, dept in [("who is improving the most excluding SCM", "SCM"),
+                  ("who are the black status employees excluding Annotation", "Annotation"),
+                  ("who is declining the most except IT-Development", "IT-Development"),
+                  ("most late comings other than Walle8", "Walle8")]:
+    check_true("R10 %r excludes, never scopes into, %s" % (msg, dept),
+               dept in main._excluded_department_names(msg, msg), repr(msg))
+# ...and a department named POSITIVELY is still a scope.
+for msg in ("who all are in black in SCM", "top 5 in Annotation by engagement"):
+    check("R10 positive scope unaffected: %r" % msg,
+          main._excluded_department_names(msg, msg), set())
+
 # ==========================================================================
 
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))

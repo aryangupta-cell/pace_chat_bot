@@ -1432,6 +1432,19 @@ def _message_has_negative_dimension_filter(text):
     return any(f["operator"] in query_plan.NEGATIVE_OPERATORS for f in filters)
 
 
+def _excluded_department_names(raw_message, message=None):
+    """Department names this message names as an EXCLUSION (set, possibly
+    empty). Item #97: used to stop an excluded department from also being
+    read as the positive scope — see the call site in answer_intent()."""
+    out = set()
+    for f in _detect_plan_dimension_filters(raw_message, message):
+        if f["field"] != "department" or f["operator"] not in query_plan.NEGATIVE_OPERATORS:
+            continue
+        val = f["value"]
+        out.update(val if isinstance(val, list) else [val])
+    return out
+
+
 def _detect_plan_dimension_filters(raw_message, message=None):
     """Item #97: the operator-aware dimension filters this message carries, as
     a plain list, for the OLDER query engines that can now accept them.
@@ -7395,6 +7408,17 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # into an unrelated short word (e.g. "offi" -> "off"), which would
     # otherwise silently kill a match the raw text could still resolve.
     dept_name, dept_candidates = entities.extract_department(message, fallback_text=raw_message)
+    # Item #97: a department named ONLY as an EXCLUSION is never also the
+    # positive scope. `entities.extract_department()` is operator-blind by
+    # design — it answers "is a department named here?", not "how" — so
+    # "who is improving the most excluding SCM" resolved SCM and every rule
+    # intent then scoped INTO it (live-confirmed: "Who is improving in SCM …
+    # (excluding SCM)", 0 rows; "Employees currently Black in SCM"). This is
+    # item #93's department-exclude inversion, generalized: one guard here,
+    # at the single place every rule intent's department scope comes from,
+    # using the same operator-aware detector the plan layer uses.
+    if dept_name and dept_name in _excluded_department_names(raw_message, message):
+        dept_name = None
     if dept_candidates and intent not in ("dept_compare", "employee_compare", "team_compare"):
         return ChatResponse(
             reply=f"I found multiple matching departments: {', '.join(dept_candidates)}. Which one did you mean?",
