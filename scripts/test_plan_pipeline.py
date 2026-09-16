@@ -948,6 +948,424 @@ for msg in ("who all are in black in SCM", "top 5 in Annotation by engagement"):
           main._excluded_department_names(msg, msg), set())
 
 # ==========================================================================
+# S. ITEM #98 — THE CONVERSATIONAL MODIFICATION MATRIX
+#
+# One rule, asserted per dimension and per prior-plan SHAPE:
+#
+#     FINAL PLAN = previous plan + ONLY the fields the follow-up changed
+#
+# Every case below asserts BOTH halves: the intended field really changed,
+# and every other field survived byte for byte (`survived()` diffs the whole
+# stored plan, so a field nobody thought to name in an assertion still fails
+# the test if a follow-up silently erased it).
+# ==========================================================================
+
+IGNORED_PLAN_FIELDS = ("source",)
+
+
+def plan_of(sid):
+    return session_store.get_current_plan(session_store.get_session(sid))
+
+
+def changed_fields(before, after):
+    """Every plan field whose value differs — the whole schema, not a list
+    someone maintained by hand."""
+    out = set()
+    for k in set(before or {}) | set(after or {}):
+        if k in IGNORED_PLAN_FIELDS:
+            continue
+        if (before or {}).get(k) != (after or {}).get(k):
+            out.add(k)
+    return out
+
+
+def survived(name, before, after, expect_changed):
+    """The core invariant: NOTHING outside `expect_changed` moved.
+
+    A subset rather than an equality because a step can legitimately be a
+    no-op for one of the fields it is allowed to touch ("make it the top 7"
+    after another exact limit moves `limit` but not `limit_mode`). What must
+    never happen is a field the follow-up never mentioned changing, which is
+    exactly what the subset test catches; the assertions at each call site
+    pin down what DID change.
+    """
+    got = changed_fields(before, after)
+    check_true("S %s -> nothing outside %s changed" % (name, sorted(expect_changed)),
+               got <= set(expect_changed) and (bool(got) or not expect_changed),
+               "actually changed: %r" % sorted(got))
+
+
+def seed_compare_plan(sid, group_by=None, metrics=("pace_score",),
+                      period_a="2026-09-10", period_b="2026-09-11", kind="day", **kw):
+    session = session_store.get_session(sid)
+    session_store.set_current_plan(session, query_plan.new_plan(
+        entity="company", metrics=list(metrics), operation="compare",
+        group_by=group_by,
+        comparison={"kind": kind, "period_a": period_a, "period_b": period_b,
+                    "group_by": group_by},
+        **kw))
+    return session
+
+
+def step(sid, msg):
+    """One conversational turn; returns (plan_before, plan_after)."""
+    before = copy_plan(plan_of(sid))
+    ask(sid, msg)
+    return before, copy_plan(plan_of(sid))
+
+
+def copy_plan(p):
+    import copy as _c
+    return _c.deepcopy(p) if p else p
+
+
+# --------------------------------------------------------------------------
+# S1. THE REPORTED REPRO + its single-turn twin, at the plan level
+# --------------------------------------------------------------------------
+
+seed_compare_plan("S1")
+before, after = step("S1", "for all employees")
+check_true("S1 comparison survives a population-grain follow-up",
+           after is not None and after["operation"] == "compare"
+           and after["comparison"]["period_a"] == "2026-09-10"
+           and after["comparison"]["period_b"] == "2026-09-11",
+           repr(after))
+check_true("S1 grain became employee (top level AND the nested mirror)",
+           after and after["group_by"] == "employee"
+           and after["comparison"]["group_by"] == "employee", repr(after))
+check_true("S1 explicit 'all' reached the comparison engine as a cardinality",
+           any(c["fn"] == "compare_grouped" and (c.get("limit") or 0) >= CEIL
+               for c in CALLS), repr(CALLS))
+survived("S1", before, after, {"group_by", "comparison", "limit_mode"})
+
+# --------------------------------------------------------------------------
+# S2. EVERY DIMENSION, as a BARE follow-up to a RANKING-shaped plan
+# --------------------------------------------------------------------------
+
+S2_RANKING = [
+    # (message, fields that may change)
+    ("show me effectiveness instead",        {"metrics"}),
+    ("engagement and discipline please",     {"metrics"}),
+    ("make it the top 5",                    {"limit", "limit_mode", "operation", "ascending"}),
+    ("show me all of them",                  {"limit", "limit_mode"}),
+    ("department wise",                      {"group_by"}),
+    ("per manager",                          {"group_by"}),
+    ("only SCM",                             {"filters"}),
+    ("excluding Annotation",                 {"filters"}),
+    ("for August",                           {"period", "period_phrase"}),
+]
+for msg, allowed in S2_RANKING:
+    sid = "S2-" + msg[:16]
+    seed_ranking_plan(sid, metric="engagement_pct", limit=10, ascending=True)
+    before, after = step(sid, msg)
+    check_true("S2 %r modified the plan at all" % msg,
+               after is not None and changed_fields(before, after), repr(after))
+    got = changed_fields(before, after)
+    check_true("S2 %r touched nothing outside %s" % (msg, sorted(allowed)),
+               got <= allowed, "changed: %r" % sorted(got))
+    check_true("S2 %r kept the metric unless it named one" % msg,
+               "metrics" in allowed or (after and after["metrics"] == ["engagement_pct"]),
+               repr(after and after["metrics"]))
+
+# --------------------------------------------------------------------------
+# S3. EVERY APPLICABLE DIMENSION, as a BARE follow-up to a COMPARISON plan
+# --------------------------------------------------------------------------
+
+S3_COMPARE = [
+    ("for all employees",        {"group_by", "comparison", "limit_mode", "limit"}),
+    ("department wise",          {"group_by", "comparison"}),
+    ("manager wise",             {"group_by", "comparison"}),
+    ("across departments",       {"group_by", "comparison"}),
+    ("show me engagement instead", {"metrics"}),
+    ("just the top 5",           {"limit", "limit_mode", "operation", "ascending", "comparison", "group_by"}),
+]
+for msg, allowed in S3_COMPARE:
+    sid = "S3-" + msg[:16]
+    seed_compare_plan(sid, group_by="department")
+    before, after = step(sid, msg)
+    check_true("S3 %r keeps BOTH periods and the compare operation" % msg,
+               after is not None and after["operation"] == "compare"
+               and after["comparison"]["period_a"] == "2026-09-10"
+               and after["comparison"]["period_b"] == "2026-09-11", repr(after))
+    got = changed_fields(before, after)
+    check_true("S3 %r touched nothing outside %s" % (msg, sorted(allowed)),
+               got <= allowed, "changed: %r" % sorted(got))
+
+# a comparison + a FILTER (positive and negative), each preserving the rest
+for msg, want in [("only SCM", ("department", "eq", "SCM")),
+                  ("excluding Annotation", ("department", "ne", "Annotation"))]:
+    sid = "S3f-" + msg[:12]
+    seed_compare_plan(sid, group_by="department")
+    before, after = step(sid, msg)
+    check_true("S3 comparison + %r keeps the comparison and gains the filter" % msg,
+               after and after["operation"] == "compare"
+               and after["comparison"]["period_b"] == "2026-09-11"
+               and [(f["field"], f["operator"], f["value"]) for f in after["filters"]] == [want],
+               repr(after))
+    survived("S3 filter %r" % msg, before, after, {"filters"})
+
+# a comparison whose PERIODS change and nothing else
+sid = "S3p"
+seed_compare_plan(sid, group_by="department")
+before, after = step(sid, "now compare 2026-08-01 and 2026-08-02")
+check_true("S3 period-pair change keeps the grouping",
+           after and after["group_by"] == "department"
+           and str(after["comparison"]["period_a"]) == "2026-08-01"
+           and str(after["comparison"]["period_b"]) == "2026-08-02", repr(after))
+survived("S3 period-pair change", before, after, {"comparison"})
+
+# a MONTH comparison keeps its kind through an unrelated follow-up
+sid = "S3m"
+seed_compare_plan(sid, group_by="department", kind="month",
+                  period_a="2026-07", period_b="2026-08")
+before, after = step(sid, "show me engagement instead")
+check_true("S3 month comparison keeps kind='month' and both months",
+           after and after["comparison"] == {"kind": "month", "period_a": "2026-07",
+                                             "period_b": "2026-08", "group_by": "department"},
+           repr(after and after["comparison"]))
+survived("S3 month metric change", before, after, {"metrics"})
+
+# --------------------------------------------------------------------------
+# S4. CHAINS — A->B, A->C, A->B->C, and a 4-step chain
+# --------------------------------------------------------------------------
+
+# A->B and A->C from the same A: the two branches must not interfere
+seed_ranking_plan("S4-ab", metric="engagement_pct", limit=10, ascending=True)
+step("S4-ab", "exclude SCM")
+b_before, b_after = step("S4-ab", "make it the top 5")
+survived("S4 A->B (limit after filter)", b_before, b_after,
+         {"limit", "limit_mode", "operation", "ascending"})
+check_true("S4 A->B kept the filter",
+           [(f["field"], f["operator"], f["value"]) for f in b_after["filters"]]
+           == [("department", "ne", "SCM")], repr(b_after["filters"]))
+
+seed_ranking_plan("S4-ac", metric="engagement_pct", limit=10, ascending=True)
+step("S4-ac", "exclude SCM")
+c_before, c_after = step("S4-ac", "show me discipline instead")
+survived("S4 A->C (metric after filter)", c_before, c_after, {"metrics"})
+
+# A->B->C
+seed_ranking_plan("S4-abc", metric="engagement_pct", limit=10, ascending=True)
+step("S4-abc", "exclude SCM")
+step("S4-abc", "make it the top 5")
+p_before, p_after = step("S4-abc", "department wise")
+survived("S4 A->B->C (grouping last)", p_before, p_after, {"group_by"})
+check_true("S4 A->B->C final plan holds all three modifications",
+           p_after["group_by"] == "department" and p_after["limit"] == 5
+           and [(f["field"], f["operator"], f["value"]) for f in p_after["filters"]]
+           == [("department", "ne", "SCM")], repr(p_after))
+
+# 4 independent sequential modifications, asserted after EVERY step
+seed_ranking_plan("S4-4", metric="engagement_pct", limit=10, ascending=True)
+for msg, expect in [("exclude Annotation", {"filters"}),
+                    ("show me discipline instead", {"metrics"}),
+                    ("make it the top 7", {"limit", "limit_mode", "operation", "ascending"}),
+                    ("manager wise", {"group_by"})]:
+    b, a = step("S4-4", msg)
+    survived("S4 4-chain step %r" % msg, b, a, expect)
+final = plan_of("S4-4")
+check_true("S4 4-chain final plan is the union of all four steps",
+           final["group_by"] == "rm" and final["limit"] == 7
+           and final["metrics"] == ["discipline_pct"]
+           and [(f["field"], f["operator"], f["value"]) for f in final["filters"]]
+           == [("department", "ne", "Annotation")], repr(final))
+
+# a chain on a COMPARISON plan
+seed_compare_plan("S4-cmp")
+step("S4-cmp", "for all employees")
+b, a = step("S4-cmp", "department wise")
+survived("S4 comparison chain: grain -> grouping", b, a, {"group_by", "comparison"})
+b, a = step("S4-cmp", "exclude SCM")
+survived("S4 comparison chain: + filter", b, a, {"filters"})
+check_true("S4 comparison chain still compares the original two days",
+           a["comparison"]["period_a"] == "2026-09-10"
+           and a["comparison"]["period_b"] == "2026-09-11", repr(a["comparison"]))
+
+# --------------------------------------------------------------------------
+# S5. EXPLICIT REMOVAL vs. OMISSION
+# --------------------------------------------------------------------------
+
+seed_ranking_plan("S5-g", metric="engagement_pct", limit=10, ascending=True)
+step("S5-g", "department wise")
+b, a = step("S5-g", "remove the department grouping")
+check_true("S5 explicit removal clears the grouping", a["group_by"] is None, repr(a["group_by"]))
+survived("S5 grouping removal", b, a, {"group_by"})
+
+# ...on a COMPARISON plan the nested mirror is cleared too (this is the exact
+# resurrection bug the one-slot rule exists to prevent).
+seed_compare_plan("S5-cg", group_by="department")
+b = copy_plan(plan_of("S5-cg"))
+a = query_plan.patch(b, {"group_by": query_plan.CLEAR})
+check_true("S5 removal clears the nested comparison mirror too",
+           a["group_by"] is None and a["comparison"]["group_by"] is None, repr(a["comparison"]))
+
+seed_ranking_plan("S5-f", metric="engagement_pct", limit=10, ascending=True)
+step("S5-f", "exclude SCM")
+b, a = step("S5-f", "remove that filter")
+check_true("S5 explicit filter removal clears filters", a["filters"] == [], repr(a["filters"]))
+
+# an UNRELATED follow-up clears nothing by omission
+seed_ranking_plan("S5-o", metric="engagement_pct", limit=10, ascending=True)
+step("S5-o", "exclude SCM")
+step("S5-o", "department wise")
+b, a = step("S5-o", "show me discipline instead")
+check_true("S5 omission never clears: filter+grouping survive a metric change",
+           a["group_by"] == "department" and a["filters"], repr(a))
+survived("S5 omission", b, a, {"metrics"})
+
+# --------------------------------------------------------------------------
+# S6. SINGLE-TURN vs MULTI-TURN EQUIVALENCE (structural plan equality)
+# --------------------------------------------------------------------------
+
+def plan_shape(p):
+    return {k: v for k, v in (p or {}).items() if k not in IGNORED_PLAN_FIELDS}
+
+
+EQUIV = [
+    # (single-turn message, [turn-1, follow-ups...])
+    ("top 5 employees by effectiveness excluding SCM",
+     ["top 5 employees by effectiveness", "exclude SCM"]),
+    ("engagement by department excluding Annotation",
+     ["engagement by department", "exclude Annotation"]),
+    ("top 5 employees by effectiveness, department wise",
+     ["top 5 employees by effectiveness", "department wise"]),
+]
+for i, (single, turns) in enumerate(EQUIV):
+    ask("S6-single-%d" % i, single)
+    ps = plan_of("S6-single-%d" % i)
+    for t in turns:
+        ask("S6-multi-%d" % i, t)
+    pm = plan_of("S6-multi-%d" % i)
+    check_true("S6 single-turn produced a plan: %r" % single, ps is not None, repr(ps))
+    check("S6 single==multi plan: %r" % single, plan_shape(ps), plan_shape(pm))
+
+# ...and the item #98 headline pair, at the level the plan layer controls:
+# the multi-turn form must reach the SAME operation/grain/periods as asking
+# for a per-employee comparison in one breath.
+seed_compare_plan("S6-cmp")
+ask("S6-cmp", "for all employees")
+p = plan_of("S6-cmp")
+check_true("S6 comparison + grain: per-employee comparison of the same two days",
+           p["operation"] == "compare" and p["group_by"] == "employee"
+           and (p["comparison"]["period_a"], p["comparison"]["period_b"])
+           == ("2026-09-10", "2026-09-11"), repr(p))
+
+# --------------------------------------------------------------------------
+# S7. CONTEXT RESET after a chain
+# --------------------------------------------------------------------------
+
+seed_ranking_plan("S7", metric="engagement_pct", limit=10, ascending=True)
+ask("S7", "exclude SCM")
+ask("S7", "department wise")
+main.handle_message("who is making progress in PACE?", "S7")
+check_true("S7 chain state does not survive an unrelated question",
+           session_store.get_session("S7").get("current_plan") is None,
+           repr(session_store.get_session("S7").get("current_plan")))
+
+seed_compare_plan("S7c")
+ask("S7c", "for all employees")
+main.handle_message("who is making progress in PACE?", "S7c")
+check_true("S7 comparison chain state does not survive either",
+           session_store.get_session("S7c").get("current_plan") is None,
+           repr(session_store.get_session("S7c").get("current_plan")))
+
+# --------------------------------------------------------------------------
+# S8. NOVEL PHRASINGS — none of these appears in intents.py, in the item #98
+#     bug report, or anywhere else in this suite.
+# --------------------------------------------------------------------------
+
+# (message, prior plan shape, assertion on the resulting plan)
+S8 = [
+    ("for every manager", "compare", lambda p: p["group_by"] == "rm"),
+    ("across each department please", "compare", lambda p: p["group_by"] == "department"),
+    ("for all the departments", "ranking", lambda p: p["group_by"] == "department"),
+    ("per individual", "ranking", lambda p: p["group_by"] == "employee"),
+    ("narrow it to Walle8", "ranking",
+     lambda p: [(f["field"], f["operator"], f["value"]) for f in p["filters"]]
+     == [("department", "eq", "Walle8")]),
+    ("make it the best 12", "ranking", lambda p: p["limit"] == 12),
+    ("expand it to everyone", "ranking", lambda p: p["limit_mode"] == "unlimited"),
+    ("swap the metric to effectiveness", "ranking", lambda p: p["metrics"] == ["effectiveness_pct"]),
+    ("get rid of the row limit", "ranking", lambda p: p["limit_mode"] == "unspecified"),
+    ("clear the exclusions", "ranking_filtered", lambda p: p["filters"] == []),
+    ("omit Channel Sales as well", "ranking_filtered",
+     lambda p: any(f["operator"] in ("ne", "not_in") for f in p["filters"])),
+]
+for i, (msg, shape, assertion) in enumerate(S8):
+    sid = "S8-%d" % i
+    if shape == "compare":
+        seed_compare_plan(sid, group_by="department")
+    else:
+        seed_ranking_plan(sid, metric="engagement_pct", limit=10, ascending=True)
+        if shape == "ranking_filtered":
+            ask(sid, "exclude SCM")
+    before = copy_plan(plan_of(sid))
+    ask(sid, msg)
+    after = plan_of(sid)
+    check_true("S8 novel phrasing %r" % msg, after is not None and assertion(after),
+               repr(after and {k: after[k] for k in ("group_by", "limit", "limit_mode",
+                                                     "metrics", "filters", "operation")}))
+    if after is not None and shape == "compare":
+        check_true("S8 %r preserved the comparison" % msg,
+                   after["operation"] == "compare"
+                   and after["comparison"]["period_a"] == "2026-09-10", repr(after))
+
+# --------------------------------------------------------------------------
+# S9. The MECHANISM itself, unit level (no pipeline, no stubs)
+# --------------------------------------------------------------------------
+
+# a nested dict field is patched KEY BY KEY, not replaced wholesale
+p = query_plan.new_plan(entity="employee", metrics=["pace_score"],
+                        population_filters={"shift_type": "Standard", "work_mode": "WFH"})
+p2 = query_plan.patch(p, {"population_filters": {"work_mode": "WFO"}})
+check("S9 nested dict merges key-wise", p2["population_filters"],
+      {"shift_type": "Standard", "work_mode": "WFO"})
+p3 = query_plan.patch(p, {"population_filters": {"work_mode": query_plan.CLEAR}})
+check("S9 per-key CLEAR removes exactly one key", p3["population_filters"],
+      {"shift_type": "Standard"})
+p4 = query_plan.patch(p, {"population_filters": query_plan.CLEAR})
+check("S9 whole-field CLEAR empties it", p4["population_filters"], {})
+
+# a partial comparison delta keeps the keys it did not name
+pc = query_plan.new_plan(operation="compare", metrics=["pace_score"], group_by="department",
+                         comparison={"kind": "day", "period_a": "2026-09-10",
+                                     "period_b": "2026-09-11", "group_by": "department"})
+pc2 = query_plan.patch(pc, {"comparison": {"period_b": "2026-09-12"}})
+check("S9 partial comparison delta keeps period_a/kind/group_by", pc2["comparison"],
+      {"kind": "day", "period_a": "2026-09-10", "period_b": "2026-09-12",
+       "group_by": "department"})
+
+# the grouping slot is single-valued: nested and top-level can never diverge
+pc3 = query_plan.patch(pc, {"group_by": "rm"})
+check("S9 grouping patch reaches the nested mirror",
+      (pc3["group_by"], pc3["comparison"]["group_by"]), ("rm", "rm"))
+pc4 = query_plan.normalize({"operation": "compare", "metrics": ["pace_score"],
+                            "comparison": {"kind": "day", "period_a": "a", "period_b": "b",
+                                           "group_by": "rm"}})
+check("S9 a nested-only grouping is lifted to the top level", pc4["group_by"], "rm")
+
+# the grain detector is dimension-generic, not phrase-specific
+for phrase, want in [("for all employees", "employee"), ("per manager", "rm"),
+                     ("across departments", "department"), ("for each grade", "grade"),
+                     ("by designation", "designation"), ("for every person", "employee"),
+                     ("among all the teams", "department")]:
+    check("S9 grain %r" % phrase, query_plan.detect_population_grain(phrase), want)
+check("S9 grain detector says nothing about a metric phrase",
+      query_plan.detect_population_grain("by engagement"), None)
+
+# explicit-removal detection is slot-generic
+for phrase, want in [("remove the department grouping", {"group_by"}),
+                     ("drop the breakdown", {"group_by"}),
+                     ("clear the exclusions", {"filters"}),
+                     ("get rid of the row limit", {"limit"}),
+                     ("forget the date range", {"period"})]:
+    check_true("S9 removal %r -> %s" % (phrase, want),
+               query_plan.detect_explicit_removals(phrase) >= want,
+               repr(query_plan.detect_explicit_removals(phrase)))
+check("S9 an ordinary follow-up removes nothing",
+      query_plan.detect_explicit_removals("show me effectiveness instead"), set())
+
+# ==========================================================================
 
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:

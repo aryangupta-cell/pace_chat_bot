@@ -1694,6 +1694,8 @@ def _execute_plan(plan, session, raw_message=""):
     # ---- comparison (with optional GROUP BY) ----------------------------
     cmp_ = plan.get("comparison")
     if plan["operation"] == "compare" and cmp_:
+        # Item #98: normalize() keeps the nested mirror in step with the
+        # top-level field, so there is one grouping slot to read, not two.
         gb = plan.get("group_by") or cmp_.get("group_by")
         if gb not in queries.COMPARE_GROUP_COLUMNS:
             return None  # a plain (ungrouped) comparison is the old engines' job
@@ -1707,6 +1709,13 @@ def _execute_plan(plan, session, raw_message=""):
                 cmp_["period_a"], cmp_["period_b"], gb, kind=cmp_.get("kind") or "day",
                 metric_key=cmp_metric, filter_sql=filter_sql,
                 dimension_filters=plan.get("filters"),
+                # Item #98: cardinality is a plan-level concept both operation
+                # shapes read from. The comparison branch used to ignore it
+                # entirely and take compare_grouped()'s own internal cap, so an
+                # explicit "all of them"/"top 5" on a comparison was dropped.
+                # `None` here means "the engine's default", which is exactly
+                # what effective_limit() returns in the "unspecified" state.
+                limit=query_plan.effective_limit(plan, None),
             )
         except Exception:
             logging.getLogger("pace_chatbot.main").exception("compare_grouped() raised")
@@ -1966,6 +1975,17 @@ def _plan_message_names_employee(text, message=None):
     return False
 
 
+#: Item #98: every plan slot a single message's delta can carry — i.e. every
+#: dimension a follow-up may modify. Derived from the plan schema itself
+#: (`query_plan.PATCHABLE_FIELDS` plus "filters") minus the two bookkeeping
+#: fields that describe an answer rather than a question, so it can never
+#: drift out of step with what `_plan_seed_delta_from_message()` produces.
+_PLAN_MODIFIABLE_FIELDS = tuple(
+    f for f in (query_plan.PATCHABLE_FIELDS + ("filters",))
+    if f not in ("name_filter", "name_label")
+)
+
+
 def _plan_seed_delta_from_message(raw_message, message):
     """Everything this ONE message says about a query, as a plan delta.
 
@@ -2050,8 +2070,25 @@ def _plan_seed_delta_from_message(raw_message, message):
         delta["latest_n_days"] = latest_n
 
     gb = query_plan.detect_group_by(text) or query_plan.detect_group_by(message)
+    if not gb:
+        # Item #98: a message can state the GRAIN the answer should be
+        # produced at without using breakdown words ("for all employees",
+        # "per manager", "across departments"). That is the same slot, so it
+        # goes in the same field — the shared dimension-generic detector, not
+        # a phrase test. Only consulted when no explicit grouping was found,
+        # so every message that already produced a grouping is unaffected.
+        gb = (query_plan.detect_population_grain(text)
+              or query_plan.detect_population_grain(message))
     if gb:
         delta["group_by"] = gb
+
+    # Item #98: explicit removals are the ONLY thing that erases a field.
+    # `CLEAR` is applied last so a message that both names and removes a slot
+    # ("drop the department grouping") resolves as a removal.
+    for _field in query_plan.detect_explicit_removals(text):
+        delta[_field] = query_plan.CLEAR
+        if _field == "limit":
+            delta["limit_mode"] = query_plan.CLEAR
 
     # Item #97: a two-period COMPARISON that also names a grouping. The plan
     # executor has been able to run this since item #94
@@ -2063,11 +2100,27 @@ def _plan_seed_delta_from_message(raw_message, message):
     # Deliberately gated on a grouping being present: without one, the
     # existing day_compare/month_compare engines own the shape and are
     # correct, and must keep it.
-    if gb and _PERIOD_COMPARE_CUE.search(text):
+    # Item #98 widens this from "only when a grouping is named" to "whenever
+    # the message really names two periods and a comparison cue". The old
+    # gate meant a follow-up that changed only the two PERIODS of a
+    # comparison already under discussion ("now do the 12th vs the 13th")
+    # carried no `comparison` in its delta at all, so the periods — the only
+    # state that comparison actually has — were unpatchable. The delta
+    # merely DESCRIBES the message; whether the plan layer answers it is
+    # still decided entirely by the interceptor's fire conditions and by
+    # _execute_plan()'s "an ungrouped comparison is the old engines' job"
+    # rule, both unchanged, so every ungrouped comparison keeps its engine.
+    if _PERIOD_COMPARE_CUE.search(text):
         cmp_ = _detect_plan_comparison(text, gb)
         if cmp_ is not None:
             delta["comparison"] = cmp_
             delta["operation"] = "compare"
+            # The two dates a COMPARISON names are not also a single-window
+            # period filter — the same text parsed twice must not write two
+            # contradictory slots (item #98).
+            delta.pop("period", None)
+            delta.pop("period_phrase", None)
+            delta.pop("latest_n_days", None)
     return delta
 
 
@@ -2148,6 +2201,21 @@ def _handle_query_plan_message(raw_message, message, session):
                 _mi = None
             elif _mi in _INDIVIDUAL_EMP_INTENTS and not _plan_message_names_employee(text, message):
                 _mi = None
+        # Item #98: the same "the matched intent cannot represent a signal
+        # this turn carries" test, applied to a signal carried by the PRIOR
+        # PLAN rather than by the message's own words. When the conversation
+        # is already about a GROUPED comparison and the follow-up changes
+        # only its two PERIODS, the three grouping-blind comparison intents
+        # would take the turn and silently drop the grouping the user
+        # established — the identical collision class as items #96/#97, one
+        # conversational turn later. Gated on the prior plan really being a
+        # grouped comparison, so no fresh/ungrouped comparison is affected.
+        if (_mi in (_GROUP_BY_BLIND_COMPARE_INTENTS | _GROUP_BY_BLIND_AGGREGATE_INTENTS)
+                and delta.get("comparison")
+                and (prior or {}).get("operation") == "compare"
+                and (prior or {}).get("group_by") in queries.COMPARE_GROUP_COLUMNS
+                and _metric_ok):
+            _mi = None
         rule_free = _mi is None
     follow_up_mode = prior is not None and rule_free
 
@@ -2189,8 +2257,13 @@ def _handle_query_plan_message(raw_message, message, session):
     # represent them.
     _bare_modification = (
         not _interrogative
-        and any(k in delta for k in ("limit", "limit_mode", "operation", "ascending",
-                                     "metrics", "period", "latest_n_days"))
+        # Item #98: the field list is derived from the plan's OWN schema, not
+        # hand-listed. Any slot a delta can carry is a slot a bare follow-up
+        # can modify — that equivalence is the point of the whole patch
+        # model, and hand-maintaining a subset of it is what made a
+        # population/grain-only follow-up ("for all employees") invisible to
+        # this condition while a limit-only one was not.
+        and any(k in delta for k in _PLAN_MODIFIABLE_FIELDS)
     )
 
     # Item #97: whichever branch below fires, the plan must be able to express

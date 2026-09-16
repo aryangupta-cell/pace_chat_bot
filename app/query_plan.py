@@ -364,6 +364,48 @@ _GROUP_BY_ALL_ACROSS = re.compile(
     r"\b(?:all|across)\s+(" + _GROUP_BY_TOKEN_NO_EMP + r")\b", re.IGNORECASE)
 
 
+#: Item #98 — POPULATION GRAIN.
+#
+# `detect_group_by()` above answers "did this message ask for a BREAKDOWN?".
+# It deliberately refuses the employee vocabulary in its `all/across` branch
+# (see the comment on _GROUP_BY_TOKEN_NO_EMP) because "all employees" is also
+# the item #95 UNLIMITED-cardinality signal.
+#
+# But a message can state the GRAIN the answer should be produced at without
+# asking for a "breakdown" in those words — "for all employees", "per
+# employee", "for each manager", "across departments". On a RANKING plan whose
+# entity is already employee that grain is a no-op, which is why nothing
+# depended on it before. On a COMPARISON plan it is the whole difference
+# between one company-wide pair of numbers and one row per employee, and it
+# was unrepresentable: the grain had nowhere to go in the delta at all.
+#
+# This is the same dimension vocabulary as the grouping detector, over the
+# FULL dimension set including employee, and it is consulted only when
+# building a follow-up's delta (never to decide whether a FRESH question is
+# intercepted) — so no message that works today changes route because of it.
+_POPULATION_GRAIN = re.compile(
+    r"\b(?:for|across|among|amongst|over|by|per|of)\s+"
+    r"(?:all\s+(?:the\s+)?|every\s+|each\s+|the\s+(?:whole|entire|full)\s+set\s+of\s+)?"
+    r"(" + _GROUP_BY_TOKEN + r")\b",
+    re.IGNORECASE,
+)
+
+
+def detect_population_grain(text):
+    """The DIMENSION a message says the answer should be produced at, or None.
+
+    Field-generic over GROUP_BY_DIMENSIONS — "for all employees", "per
+    manager", "across departments" and "for each grade" are all the same
+    signal about the same slot, and none of them is special-cased.
+    """
+    text = text or ""
+    m = _POPULATION_GRAIN.search(text)
+    if not m:
+        return None
+    word = re.sub(r"\s+", " ", m.group(1).strip().lower())
+    return _GROUP_BY_WORDS.get(word)
+
+
 def detect_group_by(text):
     """Returns a GROUP_BY_DIMENSIONS value, or None.
 
@@ -405,6 +447,49 @@ _RANKING_CHANGE = re.compile(
 )
 
 _INSTEAD = re.compile(r"\binstead\b|\brather\b|\bswitch\s+to\b|\bchange\s+to\b", re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
+# Item #98 — EXPLICIT REMOVAL, as a first-class signal
+# ---------------------------------------------------------------------------
+#
+# The patch rule is "absent means unchanged", which leaves exactly one way to
+# say "erase this": say so. `_REMOVE_FILTER` above could only ever express
+# that for FILTERS. This detector is the same idea generalized over the plan's
+# own field vocabulary — a removal VERB plus the name of a plan slot — so
+# "remove the department grouping", "drop the date range", "forget the metric"
+# and "clear the row limit" each clear precisely the slot they name and
+# nothing else. The caller turns each hit into a `CLEAR` sentinel in the
+# delta, which is the only thing in the whole pipeline that erases a field.
+_REMOVAL_VERB = (r"(?:remove|drop|clear|forget|undo|cancel|get\s+rid\s+of|"
+                 r"stop|no\s+more|without|take\s+(?:off|away)|lose)")
+
+_REMOVAL_SLOTS = {
+    "group_by": r"(?:group(?:ing|ed)?(?:\s+by)?|breakdown|break\s+down|"
+                r"(?:department|dept|manager|rm|employee|grade|designation|day|month)"
+                r"[\s\-]*wise)",
+    "filters": r"(?:filters?|exclusions?|restrictions?|conditions?|scope)",
+    "limit": r"(?:limits?|caps?|row\s+limits?|cut\s*-?\s*off)",
+    "period": r"(?:date\s+ranges?|periods?|time\s+ranges?|months?\s+filter|dates?)",
+    "population_filters": r"(?:population\s+filters?|wfh\s+filter|shift\s+filter|"
+                          r"visit\s+filter|ps\s+filter)",
+    "metrics": r"(?:metrics?)",
+}
+
+_REMOVAL_RES = {
+    field: re.compile(_REMOVAL_VERB + r"\b[^.?!]{0,24}?\b" + pat + r"\b", re.IGNORECASE)
+    for field, pat in _REMOVAL_SLOTS.items()
+}
+
+
+def detect_explicit_removals(text):
+    """Plan fields this message explicitly asks to CLEAR. Returns a set."""
+    text = text or ""
+    out = set()
+    for field, rx in _REMOVAL_RES.items():
+        if rx.search(text):
+            out.add(field)
+    return out
 
 
 def detect_context_modification(text, has_filters=False, has_group_by=False,
@@ -539,12 +624,29 @@ def normalize(plan):
         if not isinstance(cmp_, dict) or not cmp_.get("period_a") or not cmp_.get("period_b"):
             plan["comparison"] = None
         else:
-            gb = cmp_.get("group_by")
+            # ---- item #98: ONE grouping slot, not two -------------------
+            # `comparison["group_by"]` used to be a SECOND, independent home
+            # for the grouping dimension, reachable only by replacing the
+            # whole `comparison` object. `patch()` merges top-level fields,
+            # so a follow-up that changed the grain wrote it to the
+            # top-level slot while the executor read `plan["group_by"] or
+            # comparison["group_by"]` — two sources of truth that nothing
+            # kept in step. The nested copy is now purely a MIRROR of the
+            # top-level field: whichever side carries a value, both end up
+            # holding it, and every patch of the grouping dimension is an
+            # ordinary top-level patch no matter which operation the plan
+            # is running. That is what makes "nested state didn't get
+            # patched" structurally impossible here rather than fixed once.
+            gb = plan.get("group_by")
+            if gb not in GROUP_BY_DIMENSIONS:
+                gb = cmp_.get("group_by")
+            gb = gb if gb in GROUP_BY_DIMENSIONS else None
+            plan["group_by"] = gb
             plan["comparison"] = {
                 "kind": cmp_.get("kind") or "day",
                 "period_a": cmp_["period_a"],
                 "period_b": cmp_["period_b"],
-                "group_by": gb if gb in GROUP_BY_DIMENSIONS else None,
+                "group_by": gb,
             }
             plan["operation"] = "compare"
     return plan
@@ -684,7 +786,32 @@ def patch(plan, delta, filter_mode="add"):
             elif k == "population_filters":
                 out[k] = {}
         elif v is not None:
-            out[k] = v
+            # Item #98: a STRUCTURED field is patched key-by-key, exactly as
+            # the plan as a whole is. A follow-up that names one key of a
+            # nested object ("just the WFH ones" -> population_filters
+            # {work_mode: ...}; "make the second date the 12th" ->
+            # comparison {period_b: ...}) must not erase the sibling keys it
+            # never mentioned — the same unmentioned-is-not-removed rule that
+            # governs the top level, applied one level down. A per-key CLEAR
+            # removes exactly that key.
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                merged = dict(out[k])
+                for kk, vv in v.items():
+                    if vv is CLEAR:
+                        merged.pop(kk, None)
+                    elif vv is not None:
+                        merged[kk] = vv
+                out[k] = merged
+            else:
+                out[k] = v
+
+    # The grouping dimension has exactly ONE home (see normalize()). When a
+    # follow-up patches it — including an EXPLICIT removal — the mirror inside
+    # a comparison sub-object follows it, so a cleared grouping can never be
+    # resurrected from the nested copy.
+    if "group_by" in (delta or {}) and isinstance(out.get("comparison"), dict):
+        out["comparison"] = dict(out["comparison"])
+        out["comparison"]["group_by"] = out.get("group_by")
 
     if "filters" in (delta or {}):
         v = delta["filters"]
