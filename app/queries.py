@@ -3026,6 +3026,30 @@ BUILD_QUERY_METRICS = {
     # unwired into BUILD_QUERY_METRICS - same sum(coalesce(...,0)) treatment.
     "todos_created": ("sum(coalesce(todos_created,0))", "todos created"),
     "todos_assigned": ("sum(coalesce(todos_assigned,0))", "todos assigned"),
+
+    # --- Item #97 gap-fill: the four "activity minutes/counts" metrics -----
+    # calls / WhatsApp / AI / tools-and-mails existed in EVERY other engine in
+    # this file (METRICS, PS_FILTERED_METRICS, call_ranking(),
+    # call_activity_for_employee()) but were NOT representable in
+    # build_query(), which is the ONLY engine that can express a GROUP BY or a
+    # dimension filter. That gap is not cosmetic: a redirected question like
+    # "calls made by department" reached the plan executor, found no matching
+    # metric key, and silently fell back to the plan's ["pace_score"] default
+    # — answering a completely different question. Expressions are copied
+    # byte-for-byte from the existing call/activity engines above (all four
+    # columns are real public.pace_1 columns; see call_activity_for_employee()
+    # and METRICS/PS_FILTERED_METRICS), so no new formula is introduced.
+    # defaulter_days: the same sum(coalesce(defaulter_count_per_day,0))
+    # expression METRICS["defaulter_days"] already uses (a day counts as a
+    # defaulter day when LC/EL/DH fired). Added for the same reason as the
+    # four below — "most defaulters by department" had no representable
+    # metric, so the grouping could not be honoured at all.
+    "defaulter_days": ("sum(coalesce(defaulter_count_per_day,0))", "defaulter days"),
+    "total_calls": ("sum(coalesce(total_calls,0))", "total calls"),
+    "call_minutes": ("sum(coalesce(call_duration_min,0))", "total call minutes"),
+    "whatsapp_min": ("sum(coalesce(whatsapp_min,0))", "WhatsApp minutes"),
+    "ai_min": ("sum(coalesce(ai_min,0))", "AI tool minutes"),
+    "tools_and_mails_min": ("sum(coalesce(tools_and_mails_min,0))", "tools & mail minutes"),
 }
 
 # pace_status banding thresholds - MUST mirror _bucket_status() above
@@ -3400,7 +3424,7 @@ def build_query(dimension, metrics, filters=None, period=None, name_filter=None,
     return run_query(sql, params)
 
 
-def pace_score_progress_ranking(dept_name=None, employee_ids=None, reporting_user_id=None, declining=False, limit=None, n=20, filters=None):
+def pace_score_progress_ranking(dept_name=None, employee_ids=None, reporting_user_id=None, declining=False, limit=None, n=20, filters=None, dimension_filters=None):
     """Item #88: "who is making progress / improving in PACE" with NO
     explicit comparison period named. Business rule (new this round, not a
     calendar-month comparison): rank employees by the delta between their
@@ -3431,13 +3455,23 @@ def pace_score_progress_ranking(dept_name=None, employee_ids=None, reporting_use
     carries `n` for the caller's scope-note text.
     """
     scope = ("department", dept_name) if dept_name else None
+    # Item #97: `dimension_filters` is the generic operator-aware filter list
+    # (query_plan.FILTER_FIELDS / BUILD_QUERY_FILTER_COLUMNS) that build_query()
+    # already understands. Threading it through both windows — and through
+    # BOTH, identically, so the two windows always describe the same
+    # population — is what makes "who is improving the most EXCLUDING SCM"
+    # answerable at all. Before this, an exclusion on a progress question was
+    # either dropped or (live-confirmed) turned the question into a plain
+    # PACE-score ranking by a different code path entirely.
     latest_rows = build_query(
         "employee", ["pace_score", "days_counted"], filters=filters, scope=scope, employee_ids=employee_ids,
         reporting_user_id=reporting_user_id, latest_n_days=n, latest_n_days_offset=0, limit=100000,
+        dimension_filters=dimension_filters,
     )
     prev_rows = build_query(
         "employee", ["pace_score", "days_counted"], filters=filters, scope=scope, employee_ids=employee_ids,
         reporting_user_id=reporting_user_id, latest_n_days=n, latest_n_days_offset=n, limit=100000,
+        dimension_filters=dimension_filters,
     )
     prev_by_id = {r["employee_id"]: r for r in prev_rows}
     combined = []

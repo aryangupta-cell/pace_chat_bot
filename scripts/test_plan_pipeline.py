@@ -747,6 +747,190 @@ check("Q fresh vs follow-up: dimension", c_fresh and c_fresh["dimension"], c_mul
 check("Q fresh vs follow-up: metrics", c_fresh and c_fresh["metrics"], c_multi and c_multi["metrics"])
 
 # ==========================================================================
+# R. ITEM #97 — THE GROUP-BY-BLIND INTENT SWEEP
+#
+# Item #96 redirected exactly two old intents (average_metric, dept_compare)
+# and only for group_by == "department". The item #97 sweep found the same
+# collision class across a whole FAMILY of intents and on the `rm` grouping
+# dimension too. Each assertion below is a LIVE-CONFIRMED before/after.
+# ==========================================================================
+
+# R1 — single-employee FIELD intents hijacking a grouped question. Before:
+# "I couldn't find that employee" (or, worse, an employee-grain ranking).
+R1 = [
+    ("department wise whatsapp usage", "department", "whatsapp_min"),
+    ("whatsapp usage by manager", "rm", "whatsapp_min"),
+    ("calls made by department", "department", "total_calls"),
+    ("total calls made by department", "department", "total_calls"),
+    ("show working hours percentage department wise", "department", "working_pct"),
+    ("working hours percentage by manager", "rm", "working_pct"),
+    ("ai usage by department", "department", "ai_min"),
+    ("show me all departments by pace score", "department", "pace_score"),
+    ("average pace score for each manager", "rm", "pace_score"),
+]
+for msg, dim, metric in R1:
+    ask("R1-" + msg[:18], msg)
+    c = last_bq()
+    check_true("R1 %r -> %s grain, %s" % (msg, dim, metric),
+               c is not None and c["dimension"] == dim and c["metrics"] == [metric],
+               repr(c and (c["dimension"], c["metrics"])))
+
+# R2 — aggregate/compare intents that drop the grouping. Before: one
+# company-wide row, or "I need two employee names to compare".
+R2 = [
+    ("average pace score by manager", "rm", "pace_score"),
+    ("average deficient hours across managers", "rm", "DH"),
+    ("compare engagement across managers", "rm", "engagement_pct"),
+    ("meeting minutes by department", "department", "meeting_minutes"),
+    ("average late comings per department", "department", "LC"),
+]
+for msg, dim, metric in R2:
+    ask("R2-" + msg[:18], msg)
+    c = last_bq()
+    check_true("R2 %r -> %s grain, %s" % (msg, dim, metric),
+               c is not None and c["dimension"] == dim and c["metrics"] == [metric],
+               repr(c and (c["dimension"], c["metrics"])))
+
+# R3 — a two-period COMPARISON that also names a grouping now reaches
+# compare_grouped() on a FRESH turn (item #94 could only get there via a
+# follow-up patch). Before: one company-wide pair of numbers.
+R3 = [
+    ("compare July and August across departments", "department", "month"),
+    ("compare August and September by manager", "rm", "month"),
+    ("how did July compare to August department wise", "department", "month"),
+    ("compare 2026-08-01 and 2026-08-02 by department", "department", "day"),
+]
+for msg, gb, kind in R3:
+    CALLS.clear()
+    main.handle_message(msg, "R3-" + msg[:18])
+    cg = next((c for c in CALLS if c["fn"] == "compare_grouped"), None)
+    check_true("R3 %r -> grouped comparison (%s, %s)" % (msg, gb, kind),
+               cg is not None and cg["group_by"] == gb and cg.get("kind") == kind,
+               repr(cg))
+
+# R3b — an UNGROUPED comparison still belongs to the old engines, untouched.
+for msg in ("compare July and August", "compare Accounts vs Billing",
+            "was august better or july"):
+    r = main._handle_query_plan_message(msg, msg, session_store.get_session("R3b-" + msg[:14]))
+    check_true("R3b ungrouped comparison untouched: %r" % msg, r is None,
+               repr(r and r.reply[:120]))
+
+# R4 — metric REPRESENTABILITY. A metric the plan has no column for must
+# make it DECLINE, not answer a PACE-score question nobody asked.
+for msg in ("leaves by manager", "visits by department", "wfh days by manager",
+            "half days by department"):
+    r = main._handle_query_plan_message(msg, msg, session_store.get_session("R4-" + msg[:14]))
+    check_true("R4 unrepresentable metric declines: %r" % msg, r is None,
+               repr(r and r.reply[:120]))
+
+# ...and a period-over-period CHANGE question is likewise not the plan's to
+# answer; the exclusion is threaded into the progress engine instead.
+for msg in ("who is improving the most excluding SCM",
+            "who is declining the most excluding Annotation",
+            "who improved the most excluding IT-Development"):
+    r = main._handle_query_plan_message(msg, msg, session_store.get_session("R4b-" + msg[:16]))
+    check_true("R4 change-ranking declines in the plan: %r" % msg, r is None,
+               repr(r and r.reply[:120]))
+
+# R5 — every guard that keeps the old intents' real purpose intact.
+# (a) a named EMPLOYEE keeps the single-employee intent, grouping words or not
+entities.extract_employee = lambda t, fallback_text=None: (
+    (7, "Aryan Gupta") if "aryan" in (t or "").lower() else (None, None))
+for msg in ("whatsapp usage of Aryan Gupta by month",
+            "working hours percentage for Aryan Gupta department wise"):
+    r = main._handle_query_plan_message(msg, msg, session_store.get_session("R5-" + msg[:16]))
+    check_true("R5 named employee keeps its intent: %r" % msg, r is None,
+               repr(r and r.reply[:120]))
+entities.extract_employee = fake_extract_employee
+# (b) grouping BY EMPLOYEE is a no-op and must never strip an intent
+for msg in ("what is the engagement percentage for every employee in SCM",):
+    ask("R5b", msg)
+    c = last_bq()
+    check_true("R5 employee-grouping never redirects: %r" % msg, c is None, repr(c))
+# (c) a population filter with no grouping still reads as a PACE-score
+#     ranking (the item #92 WFH behaviour)
+d = main._plan_seed_delta_from_message("top 5 wfh employees", "top 5 wfh employees")
+check_true("R5 population filter without grouping stays representable",
+           main._plan_metric_is_representable("top 5 wfh employees", d), repr(d))
+
+# R6 — the four newly-expressible activity metrics, each on >1 dimension.
+for msg, dim, metric in [
+        ("calls made by department", "department", "total_calls"),
+        ("sum of calls made per manager", "rm", "total_calls"),
+        ("whatsapp minutes by department", "department", "whatsapp_min"),
+        ("whatsapp usage by manager", "rm", "whatsapp_min"),
+        ("ai usage by department", "department", "ai_min"),
+        ("most calls made excluding SCM", "employee", "total_calls")]:
+    ask("R6-" + msg[:18], msg)
+    c = last_bq()
+    check_true("R6 %r -> %s/%s" % (msg, dim, metric),
+               c is not None and c["dimension"] == dim and c["metrics"] == [metric],
+               repr(c and (c["dimension"], c["metrics"])))
+check_true("R6 all four metrics exist in BUILD_QUERY_METRICS",
+           all(k in queries.BUILD_QUERY_METRICS
+               for k in ("total_calls", "whatsapp_min", "ai_min", "tools_and_mails_min")))
+
+# R7 — the metric-translation gap (item #94's own known limitation): a
+# follow-up after a rule-based metric_ranking() answer used to find an
+# untranslatable metric key, decline, and let an unrelated engine answer a
+# different question. Each pair below is turn 1 (old rule intent) then a
+# plan-shaped follow-up that must KEEP the metric.
+for first, follow, metric in [
+        ("who has the most late comings", "now exclude Annotation", "LC"),
+        ("who has the most deficient hours", "exclude IT-Development", "DH"),
+        ("who has the highest discipline", "show it department wise", "discipline_pct")]:
+    sid = "R7-" + first[:16] + follow[:8]
+    ask(sid, first)
+    ask(sid, follow)
+    c = last_bq()
+    check_true("R7 %r -> %r keeps metric %s" % (first, follow, metric),
+               c is not None and c["metrics"] == [metric], repr(c and c["metrics"]))
+
+# A metric with NO build_query() equivalent must still make the plan decline.
+check("R7 untranslatable metric still declines",
+      main._plan_metrics_for_build_query(["d_score"]), ([], False))
+# ...and every rule-path metric key that DOES have an equivalent translates.
+check("R7 metric_ranking keys translate",
+      [main._plan_metrics_for_build_query([k])[0][0]
+       for k in ("late_comings", "early_leavings", "deficient_hours_days",
+                 "whatsapp_min", "ai_min", "tools_and_mails_min", "productive_min")],
+      ["LC", "EL", "DH", "whatsapp_min", "ai_min", "tools_and_mails_min",
+       "productive_minutes"])
+
+# R8 — EMPLOYEE-GRAIN ranking intents that drop a grouping. Before: an
+# employee ranking with the "by department"/"by manager" silently ignored.
+for msg, dim, metric in [
+        ("all departments by late comings", "department", "LC"),
+        ("most defaulters by department", "department", "defaulter_days"),
+        ("meeting count by department", "department", "meeting_count"),
+        ("meeting minutes by department", "department", "meeting_minutes"),
+        ("which manager has the most late comings", "rm", "LC"),
+        ("most whatsapp by department", "department", "whatsapp_min"),
+        ("highest engagement by department", "department", "engagement_pct")]:
+    ask("R8-" + msg[:18], msg)
+    c = last_bq()
+    check_true("R8 %r -> %s/%s" % (msg, dim, metric),
+               c is not None and c["dimension"] == dim and c["metrics"] == [metric],
+               repr(c and (c["dimension"], c["metrics"])))
+
+# ...and the very same intents keep their own (ungrouped) question, including
+# the item #92 WFH-filtered ranking, which must still reach metric_ranking().
+for msg in ("who has the highest discipline among WFH employees",
+            "top 5 wfh employees by pace score",
+            "who has the most late comings"):
+    CALLS.clear()
+    main.handle_message(msg, "R8b-" + msg[:16])
+    check_true("R8 ungrouped ranking still on its own engine: %r" % msg,
+               any(c["fn"] == "metric_ranking" for c in CALLS), repr([c["fn"] for c in CALLS]))
+
+# R9 — PACE STATUS questions are not the plan's to answer either.
+for msg in ("who are the black status employees excluding SCM",
+            "how many employees are in red status excluding Annotation"):
+    r = main._handle_query_plan_message(msg, msg, session_store.get_session("R9-" + msg[:16]))
+    check_true("R9 status question declines in the plan: %r" % msg, r is None,
+               repr(r and r.reply[:120]))
+
+# ==========================================================================
 
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:

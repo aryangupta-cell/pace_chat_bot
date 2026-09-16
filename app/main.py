@@ -988,6 +988,12 @@ _BUILD_QUERY_METRIC_LABELS = {
     "meeting_count": "total meetings",
     "tasks_created": "tasks created", "tasks_assigned": "tasks assigned",
     "todos_created": "todos created", "todos_assigned": "todos assigned",
+    # Item #97 gap-fill (see queries.BUILD_QUERY_METRICS for why these four
+    # had to become expressible in build_query() at all).
+    "defaulter_days": "defaulter days",
+    "total_calls": "total calls", "call_minutes": "total call minutes",
+    "whatsapp_min": "WhatsApp minutes", "ai_min": "AI tool minutes",
+    "tools_and_mails_min": "tools & mail minutes",
 }
 
 _BUILD_QUERY_METRIC_PATTERNS = [
@@ -1019,6 +1025,19 @@ _BUILD_QUERY_METRIC_PATTERNS = [
     ("tasks_assigned", r"\btasks?\s*assigned\b"),
     ("todos_created", r"\btodos?\s*created\b"),
     ("todos_assigned", r"\btodos?\s*assigned\b"),
+    # Item #97 gap-fill. These four have long been askable of the older
+    # single-purpose engines ("who made the most calls", "highest whatsapp
+    # usage") but were invisible to this detector, so any question about them
+    # that reached the query-plan layer (a grouping, an exclusion, an
+    # unlimited request) silently answered PACE score instead. The metric
+    # words are deliberately the same ones the older intents' own regexes
+    # use, so the two layers now agree on what the message names.
+    ("defaulter_days", r"\bdefaulters?\b|\bdefaulter\s*days?\b"),
+    ("call_minutes", r"\bcall\s*(?:duration|time)\b|\bcall\s*(?:minutes?|mins?)\b"),
+    ("total_calls", r"\bcalls?\s*(?:made|placed|count)\b|\bnumber of calls\b|\btotal calls\b|\bcalls?\b"),
+    ("whatsapp_min", r"\bwhat'?s\s*app\b|\bwhatsapp\b"),
+    ("ai_min", r"\bai\s*(?:usage|minutes?|mins?|tools?|time)\b"),
+    ("tools_and_mails_min", r"\btools?\s*(?:and|&|\+)\s*mails?\b|\bmail\s*(?:minutes?|mins?)\b"),
 ]
 
 # Item #73: generalized capped-vs-percentage business rule for effectiveness/
@@ -1413,6 +1432,30 @@ def _message_has_negative_dimension_filter(text):
     return any(f["operator"] in query_plan.NEGATIVE_OPERATORS for f in filters)
 
 
+def _detect_plan_dimension_filters(raw_message, message=None):
+    """Item #97: the operator-aware dimension filters this message carries, as
+    a plain list, for the OLDER query engines that can now accept them.
+
+    Exactly the call `_handle_query_plan_message()` makes — same detector,
+    same resolvers, so a rule-based handler and the plan layer can never
+    disagree about what "excluding X" means. Returns [] on anything ambiguous
+    or unparseable rather than guessing.
+    """
+    for candidate in (raw_message, message):
+        if not candidate:
+            continue
+        try:
+            filters, ambiguous = query_plan.detect_dimension_filters(
+                candidate, _plan_resolvers())
+        except Exception:
+            return []
+        if ambiguous:
+            return []
+        if filters:
+            return filters
+    return []
+
+
 def _plan_resolvers():
     """Entity resolvers for query_plan.detect_dimension_filters(), wrapping
     the EXISTING fuzzy-safe extractors in entities.py. Never invents its own
@@ -1463,6 +1506,19 @@ _PLAN_METRIC_ALIASES = {
     "pace_score": "pace_score",
     "pace": "pace_score",
     "productive_min": "productive_minutes",
+    # Item #97: the remaining METRICS keys that DO have a build_query()
+    # equivalent (byte-identical SQL expressions — compare
+    # queries.METRICS["late_comings"] with BUILD_QUERY_METRICS["LC"]). Without
+    # these, any follow-up after one of those rule-based rankings ("who has
+    # the most late comings" → "now exclude Annotation") found an
+    # untranslatable metric, declined, and let an unrelated engine answer a
+    # DIFFERENT question — the metric-translation gap item #94 documented.
+    # `defaulter_days` is deliberately still absent: build_query() has no
+    # defaulter_count_per_day expression, so it must keep declining rather
+    # than answer about a metric the user did not ask for.
+    "late_comings": "LC",
+    "early_leavings": "EL",
+    "deficient_hours_days": "DH",
 }
 
 
@@ -1500,6 +1556,85 @@ _PLAN_COMPARE_METRIC_ALIASES = {
 
 # Dimensions queries.build_query() can actually GROUP BY.
 _PLAN_BQ_DIMENSIONS = ("employee", "department", "rm")
+
+# ---------------------------------------------------------------------------
+# Item #97 — the GROUP-BY-BLIND intent class
+# ---------------------------------------------------------------------------
+#
+# Item #96 found two old rule intents (`average_metric`, `dept_compare`) that
+# claim a message carrying a GROUP BY they cannot represent, and redirected
+# them — but only for `group_by == "department"`, and only for those two
+# intents, and its own final report said so explicitly. The sweep in item #97
+# ran the same probe over the whole intent list and found the identical
+# collision on a whole FAMILY of intents and on the OTHER grouping dimension:
+#
+#   * every single-employee FIELD lookup (`_INDIVIDUAL_EMP_INTENTS`) — these
+#     answer "X of <one named person>", so a message with a grouping and NO
+#     resolvable person is answered with "I couldn't find that employee"
+#     (live-confirmed: "department wise whatsapp usage", "calls made by
+#     department", "working hours percentage by manager", "ai usage by
+#     department", "visits by department"), or — worse, because it looks like
+#     an answer — at the WRONG GRAIN (live-confirmed: "show me all departments
+#     by pace score" and "average pace score for each manager" both returned a
+#     348-row EMPLOYEE ranking).
+#   * `average_metric` on a NON-department grouping (live-confirmed: "average
+#     pace score by manager" → one company-wide row, 74; "average deficient
+#     hours across managers" → one company-wide row) — byte-identical to the
+#     bug item #96 fixed, just on `rm` instead of `department`.
+#   * `employee_compare` on a grouping (live-confirmed: "compare engagement
+#     across managers" → "I need two employee names to compare").
+#   * `meeting_min_ranking` on a grouping (live-confirmed: "meeting minutes by
+#     department" → an EMPLOYEE ranking).
+#
+# The redirect is the same "null the match, don't rewrite the intent" pattern
+# item #96 used, generalized in two ways and no further: the intent SET is
+# derived from the existing `_INDIVIDUAL_EMP_INTENTS` membership rather than
+# hand-listed, and the dimension test is "any grouping the plan executor can
+# actually produce" rather than the literal string "department".
+#
+# The guard conditions that keep every intent's real purpose intact:
+#   (a) `group_by` must be a dimension `_execute_plan()` can really answer at
+#       (never a redirect into a dead end), and never "employee" — grouping
+#       employees by employee is a no-op that would strip working intents for
+#       no gain ("the engagement percentage for every employee in SCM" is
+#       correctly answered today by `emp_engagement`).
+#   (b) for the single-employee family, the message must resolve NO employee
+#       name — "Aryan Gupta's pace score" keeps its intent no matter what
+#       other dimension words the sentence contains.
+_PLAN_GROUPABLE_DIMENSIONS = ("department", "rm")
+
+_GROUP_BY_BLIND_AGGREGATE_INTENTS = frozenset({
+    "average_metric",        # one aggregate row; no grouping concept (item #96)
+    "dept_compare",          # exactly two NAMED departments (item #96)
+    "employee_compare",      # exactly two NAMED employees
+    "team_compare",          # exactly two NAMED manager teams
+})
+
+# EMPLOYEE-GRAIN ranking intents. Each owns a correct, narrow question ("who
+# made the most calls") and each answers it at employee grain by its own
+# engine, with no grouping parameter anywhere in its signature — so a message
+# that asks for the SAME metric broken down per department/manager ("all
+# departments by late comings", "most defaulters by department", "meeting
+# minutes by department") got an employee ranking with the grouping dropped.
+# `_METRIC_INTENTS` (the queries.metric_ranking() dispatch table) is folded in
+# at use time rather than copied, so this set cannot drift away from it.
+_GROUP_BY_BLIND_RANKING_INTENTS = frozenset({
+    "meeting_min_ranking", "meeting_count_ranking",
+    "call_most", "call_fewest", "call_duration",
+    "todos_created_ranking", "todos_assigned_ranking",
+    "tasks_created_ranking", "tasks_assigned_ranking",
+    "productive_high", "productive_low",
+})
+
+# Two-period comparison intents. These DO own their question shape correctly
+# for the ungrouped case ("compare July and August" — live-verified unchanged
+# below), but they have no GROUP BY: live-confirmed, "compare July and August
+# across departments" and "compare August and September by manager" both
+# returned a single company-wide pair of numbers with the grouping dropped on
+# the floor. `queries.compare_grouped()` (item #94) already answers exactly
+# that question — it was simply unreachable without a prior turn to patch,
+# which is item #96's bug one layer up.
+_GROUP_BY_BLIND_COMPARE_INTENTS = frozenset({"month_compare", "day_compare", "dept_compare"})
 
 
 def _plan_effective_dimension(plan):
@@ -1680,6 +1815,144 @@ _PLAN_WORD_LIMIT = re.compile(
     r"(" + "|".join(_PLAN_WORD_NUMBERS) + r")\b", re.IGNORECASE)
 
 
+# ---------------------------------------------------------------------------
+# Item #97 — metric REPRESENTABILITY
+# ---------------------------------------------------------------------------
+#
+# `_detect_build_query_metrics()` returns ["pace_score"] as a DEFAULT when it
+# recognises nothing, which is right for "how is X doing" but actively wrong
+# for the plan layer: a message that names a metric this engine has no column
+# for ("leaves by manager", "visits by department", "wfh days by manager")
+# came back as ["pace_score"] and was then answered — live-confirmed — as a
+# PACE-score ranking grouped by manager, i.e. a confident answer to a question
+# nobody asked. These metric concepts are real product vocabulary (they have
+# their own DAY_FLAGS/intents) but have no BUILD_QUERY_METRICS expression, so
+# the honest behaviour is to DECLINE and let the engine that owns them answer.
+#
+# This is a representability statement, not a phrase list: every word below is
+# a metric concept the product exposes elsewhere and `build_query()` cannot
+# express. When one of them becomes a BUILD_QUERY_METRICS key, delete it here.
+_PLAN_UNREPRESENTABLE_METRIC = re.compile(
+    r"\b(?:leaves?|leave\s+days?|on\s+leave|half[-\s]?days?|"
+    r"visits?|client\s+visits?|"
+    r"wfh|work\s+from\s+home|remote\s+days?|"
+    r"overtime|ot\s+hours?|"
+    r"d[-\s]?score|"
+    r"offline\s+attendance|punch[-\s]?ins?|"
+    # "attendance" is a real ranking concept (attendance_best/attendance_worst)
+    # with no build_query() column of its own — live-confirmed answering a
+    # PACE-score ranking for "worst attendance other than IT-Development".
+    r"attendance|punctual\w*|absent\w*|"
+    r"ps\s+install|"
+    r"tenure|new\s+joiners?|grade|designation|"
+    # PACE STATUS (the Black/Red/Amber/Green banding) is a status_list/
+    # status_count/status_distribution concept. `_detect_build_query_metrics()`
+    # has no pattern for it, so a status question reaching the plan came back
+    # as a PACE-SCORE ranking with the colour band silently dropped —
+    # live-shape confirmed on "who are the black status employees excluding
+    # SCM". Declining leaves the question with the intents that own it.
+    r"status|black|red|amber|green|"
+    r"ontime\s+completion|responsiveness|extension\s+adherence)\b",
+    re.IGNORECASE)
+
+
+# Item #97: the plan executor produces ONE value per group for ONE window.
+# A period-over-period CHANGE ranking ("who is improving the most", "biggest
+# droppers") is a different operation entirely, owned by
+# `queries.pace_score_progress_ranking()`/`pace_score_trend_ranking()`/
+# `dept_delta_ranking()`. Live-confirmed: "who is improving the most excluding
+# SCM" was answered by the plan as a plain PACE-score ranking with the
+# exclusion applied — the filter was honoured but the QUESTION was not. The
+# plan now declines these, and the exclusion is instead threaded into the
+# progress-ranking engine itself (see `queries.pace_score_progress_ranking`'s
+# `dimension_filters` param), which is where it belongs.
+_PLAN_UNREPRESENTABLE_OPERATION = re.compile(
+    r"\b(?:improv\w*|improver\w*|progress\w*|declin\w*|gainer\w*|loser\w*|"
+    r"dropped|drops|deteriorat\w*|regress\w*)\b", re.IGNORECASE)
+
+
+def _plan_metric_is_representable(text, delta):
+    """True when the plan layer can honestly answer this message's METRIC.
+
+    Either the message named a metric `build_query()` really has (the delta
+    then carries it), or it named no metric at all (the PACE-score default is
+    then a legitimate reading) and no unsupported metric word is present.
+    """
+    if _PLAN_UNREPRESENTABLE_OPERATION.search(text or ""):
+        return False
+    if "metrics" in delta:
+        return True
+    # Several of these words double as POPULATION filters ("among WFH
+    # employees", "during OT", "on visit days"). When the shared filter
+    # detector already consumed the message that way, the word is not an
+    # unanswerable metric and the PACE-score default is the right reading —
+    # that is the item #92 WFH-ranking behaviour, which must not regress.
+    # ...but only when the message is NOT asking for that thing broken down
+    # per group. "top 5 WFH employees" filters a population (and the
+    # PACE-score default is right); "wfh days by manager" / "visits by
+    # department" asks for a COUNT of those days per group, which this engine
+    # has no column for and must not answer with PACE score.
+    if delta.get("population_filters") and not delta.get("group_by"):
+        return True
+    return _PLAN_UNREPRESENTABLE_METRIC.search(text or "") is None
+
+
+# Item #97: the two-period-comparison cue. Kept deliberately narrow (an
+# explicit comparison verb/preposition pair) because "July engagement by
+# department" names a period WITHOUT asking for a comparison.
+_PERIOD_COMPARE_CUE = re.compile(
+    r"\bcompare[ds]?\b|\bcomparison\b|\bvs\.?\b|\bversus\b|\bagainst\b|"
+    r"\b(?:better|worse)\b|\bhow\s+did\b.{0,40}\bcompare\b", re.IGNORECASE)
+
+
+def _detect_plan_comparison(text, group_by):
+    """Build a QueryPlan `comparison` dict from a message naming TWO periods.
+
+    Reuses the SAME entity parsers the existing day_compare/month_compare
+    handlers use (`entities.extract_two_dates`/`extract_two_months`), so the
+    grouped form can never disagree with the ungrouped form about which two
+    periods were named. Returns None when the message does not name two
+    periods — this function never guesses one.
+    """
+    # Both parsers return a 3-tuple (a, b, was_mentioned) — the same shape the
+    # day_compare/month_compare handlers unpack.
+    try:
+        d1, d2, _found = entities.extract_two_dates(text)
+    except Exception:
+        d1 = d2 = None
+    if d1 and d2:
+        return {"kind": "day", "period_a": d1, "period_b": d2, "group_by": group_by}
+    try:
+        m1, m2, _found = entities.extract_two_months(text)
+    except Exception:
+        m1 = m2 = None
+    if m1 and m2:
+        return {"kind": "month", "period_a": m1, "period_b": m2, "group_by": group_by}
+    return None
+
+
+def _plan_message_names_employee(text, message=None):
+    """True when a real employee resolves out of this message.
+
+    Guards the item #97 single-employee-intent redirect: a question that does
+    name a person ("Aryan Gupta's working hours percentage") keeps its intent
+    no matter what dimension words the sentence also contains. Uses the SAME
+    resolver the intents themselves use, so the two can never disagree.
+    """
+    for candidate in (text, message):
+        if not candidate:
+            continue
+        try:
+            emp_id, _ = entities.extract_employee(candidate)
+        except Exception:
+            # Ambiguous (several matching people) still means the message is
+            # ABOUT a person — leave the single-employee intent in place.
+            return True
+        if emp_id:
+            return True
+    return False
+
+
 def _plan_seed_delta_from_message(raw_message, message):
     """Everything this ONE message says about a query, as a plan delta.
 
@@ -1766,6 +2039,22 @@ def _plan_seed_delta_from_message(raw_message, message):
     gb = query_plan.detect_group_by(text) or query_plan.detect_group_by(message)
     if gb:
         delta["group_by"] = gb
+
+    # Item #97: a two-period COMPARISON that also names a grouping. The plan
+    # executor has been able to run this since item #94
+    # (`queries.compare_grouped()`), but only ever as a FOLLOW-UP patch onto a
+    # comparison plan a previous turn left behind — the seed delta never built
+    # a `comparison` of its own, so the single-turn form ("compare July and
+    # August across departments") fell to `month_compare`, which has no
+    # grouping and silently answered one company-wide pair of numbers.
+    # Deliberately gated on a grouping being present: without one, the
+    # existing day_compare/month_compare engines own the shape and are
+    # correct, and must keep it.
+    if gb and _PERIOD_COMPARE_CUE.search(text):
+        cmp_ = _detect_plan_comparison(text, gb)
+        if cmp_ is not None:
+            delta["comparison"] = cmp_
+            delta["operation"] = "compare"
     return delta
 
 
@@ -1794,6 +2083,13 @@ def _handle_query_plan_message(raw_message, message, session):
     has_negative = any(f["operator"] in query_plan.NEGATIVE_OPERATORS for f in filters)
 
     prior = session_store.get_current_plan(session)
+    # Item #97: the seed delta is built BEFORE the rule match is consulted,
+    # because the redirect decision below depends on what this message
+    # actually says (which metric, which two periods) — a redirect is only
+    # legitimate when the plan layer can really answer the redirected
+    # question, never as a blanket "the plan wins" rule.
+    delta = _plan_seed_delta_from_message(raw_message, message)
+    _metric_ok = _plan_metric_is_representable(text, delta)
     try:
         _mi = intents.match_intent(message)
     except Exception:
@@ -1819,8 +2115,26 @@ def _handle_query_plan_message(raw_message, message, session):
         # everywhere else in this function, not a phrase-specific check),
         # same established "redirect, don't rewrite" precedent as the
         # several other old-intent-collision fixes in this project.
-        if _mi in ("average_metric", "dept_compare") and group_by == "department":
-            _mi = None
+        #
+        # Item #97 generalizes this to the whole GROUP-BY-BLIND intent class
+        # and to every grouping dimension the executor can answer at — see the
+        # `_GROUP_BY_BLIND_*` definitions above for the live evidence and the
+        # guard conditions. The shape of the fix is unchanged from item #96:
+        # null the match when, and only when, the message carries a signal the
+        # matched intent cannot represent; never rewrite the intent.
+        if (_mi is not None and _metric_ok
+                and group_by in _PLAN_GROUPABLE_DIMENSIONS):
+            if (_mi in _GROUP_BY_BLIND_AGGREGATE_INTENTS
+                    or _mi in _GROUP_BY_BLIND_RANKING_INTENTS
+                    or _mi in _METRIC_INTENTS):
+                _mi = None
+            elif _mi in _GROUP_BY_BLIND_COMPARE_INTENTS and delta.get("comparison"):
+                # Only when THIS message really names two periods, so an
+                # ungrouped "compare July and August" (and every other shape
+                # these three intents own) is untouched.
+                _mi = None
+            elif _mi in _INDIVIDUAL_EMP_INTENTS and not _plan_message_names_employee(text, message):
+                _mi = None
         rule_free = _mi is None
     follow_up_mode = prior is not None and rule_free
 
@@ -1851,7 +2165,8 @@ def _handle_query_plan_message(raw_message, message, session):
             needs_clarification=True, clarification_options=list(ambiguous),
         )
 
-    delta = _plan_seed_delta_from_message(raw_message, message)
+    # (`delta` was built at the top of this function — see the item #97 note
+    # there for why the rule-match decision needs it.)
     # A "bare modification": the message changes the ranking, the metric or
     # the period of the question already under discussion and says nothing
     # else. These carry no filter and no grouping, so they need their own
@@ -1864,6 +2179,14 @@ def _handle_query_plan_message(raw_message, message, session):
         and any(k in delta for k in ("limit", "limit_mode", "operation", "ascending",
                                      "metrics", "period", "latest_n_days"))
     )
+
+    # Item #97: whichever branch below fires, the plan must be able to express
+    # the METRIC the message named — otherwise it answers a PACE-score
+    # question nobody asked (live-confirmed on "leaves by manager" and "wfh
+    # days by manager", which came back as manager-grouped PACE rankings).
+    # Declining hands the turn back to the engines that do own those metrics.
+    if not _metric_ok:
+        return None
 
     if has_negative:
         fire = True
@@ -5100,11 +5423,25 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             # company. Reuses the same shared detector, threaded through
             # queries.pace_score_progress_ranking()'s new `filters` param.
             _prog_filters = _detect_build_query_filters(raw_message)
+            # Item #97: a DIMENSION filter ("who is improving the most
+            # excluding SCM") was the one composable piece this branch still
+            # could not express — the query-plan interceptor used to swallow
+            # such a message and answer a plain PACE-score ranking instead
+            # (live-confirmed). The plan now declines period-over-period
+            # CHANGE questions, and the exclusion arrives here instead, via
+            # the same shared operator-aware detector every other path uses.
+            _prog_dim_filters = _detect_plan_dimension_filters(raw_message, message)
             _prog_rows, _prog_meta = queries.pace_score_progress_ranking(
                 dept_name, employee_ids=employee_ids,
                 reporting_user_id=manager_id if employee_ids is None else None,
                 declining=_declining, limit=limit, filters=_prog_filters,
+                dimension_filters=_prog_dim_filters,
             )
+            if _prog_dim_filters:
+                _prog_extra_note = query_plan.describe(
+                    query_plan.new_plan(filters=_prog_dim_filters))
+            else:
+                _prog_extra_note = ""
             _n = _prog_meta["n"]
             _prog_scope_note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) \
                 + f" (latest {_n} vs previous {_n} qualifying Standard-shift rows)"
@@ -5112,13 +5449,17 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
                 _prog_scope_note += " (WFH employees)"
             elif _prog_filters.get("work_mode") == "office":
                 _prog_scope_note += " (office employees)"
+            if _prog_extra_note:
+                _prog_scope_note += f" ({_prog_extra_note})"
             if session is not None:
                 def _rerun(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, limit=entities.UNLIMITED,
-                           _declining=_declining, _rid=manager_id, _label=_label, _filters=_prog_filters):
+                           _declining=_declining, _rid=manager_id, _label=_label, _filters=_prog_filters,
+                           _dim_filters=_prog_dim_filters):
                     _rows, _meta = queries.pace_score_progress_ranking(
                         dept_name, employee_ids=employee_ids,
                         reporting_user_id=_rid if employee_ids is None else None,
                         declining=_declining, limit=limit, filters=_filters,
+                        dimension_filters=_dim_filters,
                     )
                     _n2 = _meta["n"]
                     _note = (f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else "")) \
