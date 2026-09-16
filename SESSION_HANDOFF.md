@@ -2529,3 +2529,97 @@ Commits `9d9b061` (the sweep and its fixes) and `192524b` (round 2, the exclusio
 - **An exclusion follow-up after a progress ranking** ("who is improving in pace" -> "exclude SCM") still becomes a plain PACE ranking — the single-turn form is fixed, the two-turn form is not, for the same reason (the progress handler leaves no plan the interceptor can route back into).
 - **`most_early_leavings` is shadowed by `emp_early_leavings`** — "who has the most early leavings" answers "I couldn't find that employee". Noticed while building the R7 test; it is an intent-ORDER miss, not a collision of this round's class, and was left alone rather than reordering `_INTENTS` without a dedicated round.
 - **No DB credentials** are available in this repo (checked; none are documented), so every number above is what the live chatbot API returned, not a direct SQL count.
+
+
+---
+
+## Item #98 — follow-up patching made generic across EVERY plan slot (the "for all employees" bug)
+
+### The report
+
+Turn 1 "compare 11 sept vs 10 sept" worked; turn 2 "for all employees" did not apply as a modification of the first query. The mandate was explicitly NOT to add a regex for that phrase, but to fix the mechanism that merges ANY follow-up into ANY existing plan.
+
+### Live pre-change baseline (production, before any code change)
+
+| turn | reply |
+|---|---|
+| "compare 11 sept vs 10 sept" | "Comparing the full company on 2026-09-10 vs 2026-09-11: PACE score: 2026-09-10 = 75, 2026-09-11 = 71 - 2026-09-10 was better (+4 pts)" (1 row) |
+| "for all employees" | the generic help/greeting fallback ("Hi there, I can answer questions about PACE score and status...") - i.e. EVERY stage of the pipeline declined |
+| single-turn "Compare 11 Sept vs 10 Sept for all employees" | a real per-employee change table, 10 rows (the legacy `day_compare_ranking` engine) |
+
+### Root cause (traced in code, not assumed)
+
+Three layers, in order of depth:
+
+1. **The delta had no slot for the signal.** `main._plan_seed_delta_from_message("for all employees")` produced exactly `{"limit_mode": "unlimited", "limit": None}`. `query_plan.detect_group_by()` deliberately refuses the employee vocabulary in its `all/across` branch (the item #96 comment explains why: "all employees" is also the item #95 UNLIMITED signal), so the POPULATION GRAIN the message states had nowhere to go at all. Everything downstream was therefore working correctly on a delta that had already lost the only thing the message said.
+2. **The interceptor did fire, and the executor then declined.** `_bare_modification` was true (the delta carried `limit_mode`), `intents.match_intent("for all employees")` is `None`, so `_handle_query_plan_message()` patched and called `_execute_plan()` — with a plan that was still an UNGROUPED comparison. `_execute_plan()`'s comparison branch declines those by design ("a plain (ungrouped) comparison is the old engines' job"), the interceptor returned `None`, `handle_message()` cleared the stored plan, and no later stage could interpret a bare "for all employees" with no context left. Hence the help fallback.
+3. **The structural defect underneath both: the grouping dimension had TWO homes.** `plan["group_by"]` AND `plan["comparison"]["group_by"]`. `query_plan.patch()` merges TOP-LEVEL fields only, while `_execute_plan()` read `plan.get("group_by") or cmp_.get("group_by")` — two sources of truth that nothing kept in step. A delta targeting the nested object could not reach it (the whole `comparison` object was full-replace), and an explicit removal of the grouping could be silently RESURRECTED from the nested copy. The same defect applied to `population_filters`, the plan's other dict-valued field: a follow-up naming one key erased its siblings.
+
+### The architectural fix (why it is generic, not a patch list)
+
+`app/query_plan.py`:
+
+- **One slot per concept.** `normalize()` now treats `comparison["group_by"]` as a pure MIRROR of the top-level `group_by`: whichever side carries a value, both end up holding it. Grouping is therefore patched by an ordinary top-level patch regardless of which operation shape the plan is running, and `patch()` needs no knowledge of "comparison" as a special case. This is what makes "nested state didn't get patched" structurally impossible here rather than fixed once.
+- **`patch()` merges STRUCTURED fields key by key** (`comparison`, `population_filters`), with a per-key `CLEAR`. The unmentioned-is-not-removed rule that governs the top level now governs one level down too: "make the second date the 12th" changes `period_b` and keeps `period_a`/`kind`; "just the WFH ones" sets `work_mode` and keeps the shift filter.
+- **`detect_population_grain()`** — a dimension-generic detector ("for all employees", "per manager", "across departments", "for each grade") over the FULL `GROUP_BY_DIMENSIONS` vocabulary, i.e. the grain concept that `detect_group_by()` deliberately excludes employees from. It is consulted only when building a delta, never to decide whether a FRESH question is intercepted, so no message that works today changes route because of it.
+- **`detect_explicit_removals()`** — explicit removal promoted to a first-class, SLOT-generic signal (a removal verb plus the name of a plan slot: grouping, filters, limit, period, population filters, metric). The interceptor turns each hit into a `CLEAR` sentinel, which remains the only thing in the whole pipeline that erases a field. Absence of a field in a delta can now never mean removal for any slot, and removal is expressible for every slot — the three states (unmentioned / explicitly-changed / explicitly-removed) are finally all representable.
+
+`app/main.py`:
+
+- `_bare_modification`'s field list is **derived from the schema** (`_PLAN_MODIFIABLE_FIELDS` = `query_plan.PATCHABLE_FIELDS` plus `filters`, minus the two answer-bookkeeping fields) instead of being hand-listed. A hand-maintained subset is exactly what made a grain-only follow-up invisible to the fire condition while a limit-only one was not; that class of omission is no longer possible.
+- `_plan_seed_delta_from_message()` fills `group_by` from the grain detector when no explicit grouping was found, and applies explicit removals last.
+- `_detect_plan_comparison()` is no longer gated on a grouping being present, so a follow-up that changes only the two PERIODS of a comparison ("now compare 9 sept and 10 sept") carries them in its delta. The delta merely DESCRIBES the message; whether the plan layer answers is still decided by the unchanged fire conditions and by the unchanged "an ungrouped comparison is the old engines' job" rule, so every ungrouped comparison keeps its engine (asserted by the pre-existing R3b tests). The two dates of a comparison no longer also write a single-window `period`.
+- The same items #96/#97 "redirect when the matched intent cannot represent a signal this turn carries" rule now also applies when the signal is carried by the **prior plan**: a grouping-blind comparison/aggregate intent does not take a turn that changes only the periods of an already-GROUPED comparison. Tightly gated on the prior plan really being a grouped comparison.
+- `_execute_plan()`'s comparison branch passes `query_plan.effective_limit(plan, None)` to `queries.compare_grouped()`, so cardinality is a plan-level concept both operation shapes read from. It previously ignored the plan's cardinality entirely and took the engine's internal cap of 50.
+
+No phrase from the bug report appears anywhere in the diff.
+
+### Files changed
+
+`app/query_plan.py`, `app/main.py`, `scripts/test_plan_pipeline.py`.
+
+### Tests
+
+`scripts/test_plan_pipeline.py` gains **section S: 112 new checks** (203 -> **315**), in the file's existing stubbed-DB style. The core helper is `survived()`, which diffs the WHOLE stored plan after every turn — a field nobody thought to name in an assertion still fails the test if a follow-up silently erased it. Categories:
+
+| section | what it covers | checks |
+|---|---|---|
+| S1 | the reported repro at plan level: grain applied, both periods and the compare operation survive, "all" reaches the engine as a cardinality | 4 |
+| S2 | every dimension as a BARE follow-up to a RANKING plan (metric, multi-metric, limit, ALL, grouping x2, positive filter, negative filter, period) | 27 |
+| S3 | every applicable dimension as a BARE follow-up to a COMPARISON plan (grain, grouping x3, metric, limit, both filter polarities, period-pair change, month-kind preservation) | 24 |
+| S4 | chains: A->B, A->C, A->B->C, a 4-step chain asserted after EVERY step, and a 3-step comparison chain | 11 |
+| S5 | explicit removal (grouping, the nested mirror, filters) vs. an unrelated follow-up clearing nothing by omission | 7 |
+| S6 | single-turn vs multi-turn structural plan EQUALITY for 3 composite requests, plus the comparison+grain pair | 8 |
+| S7 | context reset after a chain, on both plan shapes | 2 |
+| S8 | 11 novel phrasings written for this round ("across each department please", "narrow it to Walle8", "expand it to everyone", "omit Channel Sales as well", "swap the metric to effectiveness", "get rid of the row limit", ...) | 17 |
+| S9 | the mechanism itself, unit level: key-wise dict merge, per-key CLEAR, whole-field CLEAR, partial comparison delta, mirror sync in both directions, grain detector on 7 dimensions, removal detector on 5 slots | 12 |
+
+### Regression results
+
+- Offline, after the change: `scripts/test_query_plan.py` **213/213**, `scripts/test_plan_pipeline.py` **315/315**. No pre-existing assertion was changed except `survived()`'s own strictness (documented in the helper's docstring) and two test-local phrasings I had picked that exercise parser gaps rather than this mechanism (see limitations).
+- Live, `scripts/regression_live.py` against production **BEFORE the change: 91 checks, 6 failed** (run twice, identical both times) and **AFTER the deploy: 91 checks, 6 failed — the same six**. Zero regressions, and none of those six is new. The six are: `who's in red in Founders Office?`, `top 10 PACE improvers in the last 4 weeks`, `what is their weakest area?` (x2), `is that also the weakest area for the department overall?`, and `I want every single employee sorted by effectiveness, no limit`. They were 91/91 at the end of item #97, they fail identically on the UNMODIFIED deployed code, and they are the LLM-dependent paths (each ends on the help fallback or an unrelated ranking), which points at the production Gemini key/quota rather than at this repo. **Recorded as an open, pre-existing production issue, not as a pass.**
+
+### Live verification (post-deploy, production)
+
+1. **The exact repro.** "compare 11 sept vs 10 sept" -> company-wide pair (1 row). "for all employees" -> "Comparing PACE score - 2026-09-10 vs 2026-09-11, by employee: Kaushal Singh Rao 17 / 81 / +64; Devyani Panwar 27 / 83 / +56; Abhi jain 47 / 100 / +53; ..." — **203 rows**. Was the help fallback before.
+2. **The single-turn twin.** "Compare 11 Sept vs 10 Sept for all employees" -> "Employees ranked by change in PACE score from 2026-09-10 to 2026-09-11", **10 rows**, the legacy engine, unchanged. Same operation, same two dates, same per-employee grain; it differs in ORDERING (worst change first) and CARDINALITY (its own cap of 10 vs the 203 the explicit "all" asks for). See limitations — honest partial equivalence, not equality.
+3. **Four more dimension chains.** (a) "bottom 10 employees by engagement" (10) -> "make it the top 5" (5, direction flipped) -> "show me discipline instead" (5, discipline) -> "department wise" (5 departments, "(grouped by department)"). (b) "top 10 employees by effectiveness" (10) -> "exclude SCM" (10, "(excluding SCM)") -> "remove that filter" (10, footer gone). (c) "compare 11 sept vs 10 sept" -> "department wise" (30 departments) -> "now compare 9 sept and 10 sept" (30 departments, **grouping preserved**, new dates) — the period-change case that previously lost the grouping to `employee_compare`. (d) "compare 11 sept vs 10 sept" -> "per manager" (50 managers) -> "excluding SCM" (50 managers, values recomputed). (e) item #94/#96's own verified case re-run as a regression check: "compare 11 sept vs 10 sept" -> "tell me dept wise" (30 departments) — unchanged.
+4. **Context reset.** "bottom 10 by engagement" -> "exclude SCM" (filter applied) -> "who is making progress in PACE?" (progress ranking, no filter leaked) -> "top 3 employees by pace score" (3 rows, no stale filter, no stale metric).
+5. **Regression floor.** `dept_best` ("HR - Talent Acquisition, avg 90"), `dept_compare`'s real two-department use ("compare Accounts vs Billing" — both blocks), item #95 cardinality ("rank the whole company by discipline" — **333 rows**), item #96 grouping ("engagement by department" — 10 department rows), item #97 fixes ("whatsapp usage by manager" — manager-grouped WhatsApp minutes; "compare July and August across departments" — 34 departments; "who is improving the most excluding SCM" — a real change ranking with the exclusion), and item #93's headline ("bottom 10 by engagement" -> "exclude Sales - Digital Fleet").
+
+### Deployment
+
+Commit `2b98bdd` (fix + tests), pushed to `origin/main` and `origin/master`; Render redeployed and the repro was polled until the new behaviour appeared before any verification was recorded.
+
+### Honest completeness / limitations
+
+**What genuinely generalizes.** The three states (unmentioned / changed / removed) are now representable for every plan slot, nested ones included; the fire condition is derived from the schema, so a new plan field automatically becomes a modifiable dimension; grouping has one home; cardinality is read by both operation shapes. Any dimension whose DETECTOR fires now patches correctly, on either plan shape, in any chain — that is what section S asserts, per dimension and per shape, rather than inferring it from the one reported example.
+
+**What does not, and is not claimed to.**
+
+- **The fix is only as good as the detectors feeding the delta.** Phrasings the shared parsers do not recognise still produce an empty delta and therefore no modification. Confirmed gaps found while writing section S: "bump it up to 12 rows", "just 12 of them" and "make it 12" are not recognised as cardinality (`entities.extract_limit()` needs a top/bottom-style cue), and "give me the whole population"/"show the full population" are not recognised as unlimited (while "expand it to everyone" and "give me the entire list" are). These are parser-vocabulary gaps, not patch-mechanism gaps, and widening that shared parser was out of scope for this round.
+- **Single-turn vs multi-turn for the headline pair is equivalent in operation/grain/periods but not in ordering or cardinality** (check 2 above). The single-turn form is owned by the legacy `day_compare_ranking` engine, which has its own ordering and its own cap of 10 and does not read the plan's cardinality. Making the two byte-identical means moving that engine onto the plan executor, which would change a live-verified behaviour the product owner has not asked to change.
+- **A positive department filter stated with a WEAK marker on a FRESH question** ("bottom 3 employees by discipline in SCM") is still handled by the older scope machinery and does not land in the plan's `filters` list, so a single-turn/multi-turn PLAN comparison of that pair is not equal (both answers are correct). Pre-existing item #94 design (weak markers act only in follow-up mode); noted, not changed.
+- **The six live regression failures above are pre-existing and unexplained by this round.** They reproduce identically on the deployed code before the change. They look like an LLM-availability issue in production, but no diagnosis was performed and none should be inferred from this entry.
+- Every limitation listed under item #97 (day/month grouping outside a comparison, grade/designation grouping, unrepresentable metrics, exclusions on engines with no filter parameter, engines that leave no plan behind, `most_early_leavings`) is **unchanged and still open** — this round changed the patch mechanism, not what the executor can express.
+- **No DB credentials** exist in this repo (checked again this round); every number above is what the live chatbot API returned, not a direct SQL count.
