@@ -1593,6 +1593,72 @@ if c:
     check("T10a still unlimited", c["limit"], query_plan.UNLIMITED_CEILING)
 
 
+
+# --- T11: the AREA operation, answered deterministically -------------------
+# No classifier and no extraction LLM in the path (both are stubbed to None
+# for this whole file), so every check here proves the deterministic route.
+EMPLOYEES = {"aarna jain": (100, "Aarna Jain"), "rahul kanwaria": (101, "Rahul Kanwaria")}
+
+
+def fake_extract_employee_named(text, fallback_text=None):
+    t = (text or "").lower()
+    for k, v in EMPLOYEES.items():
+        if k in t:
+            return v
+    if fallback_text and fallback_text != text:
+        return fake_extract_employee_named(fallback_text)
+    return None, None
+
+
+entities.extract_employee = fake_extract_employee_named
+main.entities.extract_employee = fake_extract_employee_named
+
+for sid, msg, want_dim, want_name in [
+    ("T11a", "worst-performing category for Rahul Kanwaria", "employee", 101),
+    ("T11b", "which aspect is lagging for Aarna Jain", "employee", 100),
+    ("T11c", "what is Aarna Jain's standout area", "employee", 100),
+    ("T11d", "which area is Rahul Kanwaria weakest in", "employee", 101),
+    ("T11e", "which dimension is Annotation weakest in", "department", "Annotation"),
+    ("T11f", "what is the strongest aspect of SCM", "department", "SCM"),
+]:
+    resp, calls = ask(sid, msg)
+    c = last_bq()
+    check_true("%s reached the area engine (%r)" % (sid, msg),
+               c is not None and c["metrics"] == main._AREA_METRICS, repr(resp.reply[:140]))
+    if c:
+        check("%s dimension" % sid, c["dimension"], want_dim)
+        check("%s scope" % sid, c["name_filter"], want_name)
+    check_true("%s reply names an area" % sid,
+               ("weakest area is" in resp.reply or "strongest area is" in resp.reply),
+               repr(resp.reply[:140]))
+
+# a PRONOUN resolves against the conversational state, not the wording
+sess = session_store.get_session("T11g")
+session_store.set_query_context(sess, last_operation="value", last_dimension="employee",
+                                last_result_ids=[100], metric=["pace_score"])
+session_store.push_context(sess, employee_id=100, employee_name="Aarna Jain")
+resp, calls = ask("T11g", "what is their weakest area?")
+c = last_bq()
+check_true("T11g pronoun resolved to the employee under discussion",
+           c is not None and c["dimension"] == "employee" and c["name_filter"] == 100,
+           repr(resp.reply[:140]))
+check_true("T11g answered with an area", "weakest area is" in resp.reply, repr(resp.reply[:140]))
+
+# ... and the answer leaves the state the dept follow-up reads
+qc = session_store.get_query_context(session_store.get_session("T11g")) or {}
+check("T11g records the operation", qc.get("last_operation"), "strongest_weakest")
+check_true("T11g records which area", (qc.get("metric") or [None])[0] in main._AREA_METRICS,
+           repr(qc.get("metric")))
+
+# with NO resolvable scope at all it declines instead of guessing
+check("T11h declines with nothing to scope to",
+      main._handle_area_shape("what is the weakest area?", "what is the weakest area?",
+                              session_store.get_session("T11h")), None)
+
+entities.extract_employee = fake_extract_employee
+main.entities.extract_employee = fake_extract_employee
+
+
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:
     print("  FAIL " + f)

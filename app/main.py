@@ -2770,6 +2770,171 @@ def _handle_dept_weakest_area_followup(raw_message, session):
     return reply, dept_rows
 
 
+def _area_rows_for(dimension, name_filter, period, latest_n_days, filters):
+    """The 4 comparable area values for ONE scope, with the item #89/#90
+    qualifying-population relaxation retry. Factored out of
+    `_extraction_llm_reply()`'s area branch so the deterministic handler
+    below computes the SAME numbers the same way — one implementation, not
+    two that can drift."""
+    try:
+        rows = queries.build_query(dimension, _AREA_METRICS, filters=filters, period=period,
+                                    name_filter=name_filter, limit=1, latest_n_days=latest_n_days)
+    except Exception:
+        logging.getLogger("pace_chatbot.main").exception("build_query() raised in _area_rows_for")
+        return [], []
+    row = rows[0] if rows else None
+    present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None] if row else []
+    if not present and dimension == "employee" and name_filter:
+        # Same relaxation as the older branch: an employee excluded by the
+        # DEFAULT qualifying-population filters (not by the date window) has
+        # real data that must not be reported as "no data".
+        relaxed = dict(filters or {})
+        for fk in ("ps_status", "visit_status", "shift_type"):
+            relaxed.setdefault(fk, "any")
+        fb_latest = latest_n_days
+        if period is None and latest_n_days is None:
+            fb_latest = queries.BUILD_QUERY_DEFAULT_PERIOD_DAYS
+        try:
+            rows2 = queries.build_query(dimension, _AREA_METRICS, filters=relaxed, period=period,
+                                         name_filter=name_filter, limit=1, latest_n_days=fb_latest)
+        except Exception:
+            logging.getLogger("pace_chatbot.main").exception("build_query() raised in _area_rows_for retry")
+            rows2 = None
+        if rows2:
+            rows = rows2
+            present = [(k, rows[0].get(k)) for k in _AREA_METRICS if rows[0].get(k) is not None]
+    return rows, present
+
+
+def _handle_area_shape(raw_message, message, session):
+    """Item #99: the STRONGEST/WEAKEST-AREA operation, answered
+    DETERMINISTICALLY — no intent name, no classifier, no extraction LLM.
+
+    "Which of the four PACE component areas is best/worst for <scope>" is a
+    real, first-class operation of the generalized layer (`query_plan`'s
+    `strongest_weakest`), but until this round the only code that could
+    answer it lived inside `_extraction_llm_reply()`, i.e. behind BOTH a
+    correct `classify()` guess AND a live extraction-LLM call. Live-confirmed
+    in production: the classifier guessed wrong for several ordinary
+    phrasings, and when it did route correctly the extraction call was itself
+    unavailable, so the question fell through to a bare PACE-score overview.
+
+    This handler removes both dependencies. The SHAPE comes from the shared
+    vocabulary-level detector (`query_plan.detect_area_shape`), the SCOPE
+    from the same entity resolvers every other handler uses, the NUMBERS from
+    the same `build_query(_AREA_METRICS)` call the older branch makes, and
+    the conversational state it leaves behind is the same `query_context`
+    shape `_handle_dept_weakest_area_followup()` already reads — so the
+    "...also the weakest area for the department overall?" follow-up chains
+    off it unchanged.
+
+    Returns (reply, rows), or None to let the normal pipeline continue.
+    """
+    if session is None:
+        return None
+    text = raw_message or message or ""
+    direction = (query_plan.detect_area_shape(text)
+                 or query_plan.detect_area_shape(message))
+    if not direction:
+        return None
+    want_weakest = direction == "weakest"
+
+    qc = session_store.get_query_context(session) or {}
+    period, latest_n_days, filters = _resolve_period_and_filters(text, {})
+
+    # ---- resolve the SCOPE, most explicit signal first -------------------
+    dimension = name_filter = name_label = None
+    try:
+        emp_id, emp_name = entities.extract_employee(message, fallback_text=raw_message)
+    except entities.Ambiguous as e:
+        return ("Multiple employees match that name: %s. Which one did you mean?"
+                % ", ".join(e.candidates), [])
+    if emp_id:
+        dimension, name_filter, name_label = "employee", emp_id, emp_name
+    else:
+        dept_name, dept_candidates = entities.extract_department(message, fallback_text=raw_message)
+        if dept_candidates:
+            return ("I found multiple matching departments: %s. Which one did you mean?"
+                    % ", ".join(dept_candidates), [])
+        if dept_name and dept_name not in _excluded_department_names(raw_message, message):
+            dimension, name_filter, name_label = "department", dept_name, dept_name
+
+    _plural_ref = re.search(r"\b(their|them|those|they)\b", text, re.IGNORECASE) is not None
+    _any_ref = _plural_ref or re.search(
+        r"\b(he|she|him|her|his|hers|that\s+person|this\s+person|the\s+employee)\b",
+        text, re.IGNORECASE) is not None
+
+    # A PRONOUN with a ranking behind it means "each of those people", which
+    # is the per-employee form of the same operation (item #84 failure G).
+    if dimension is None and _plural_ref and qc.get("last_dimension") == "employee" \
+            and len(qc.get("last_result_ids") or []) > 1:
+        ids = (qc.get("last_result_ids") or [])[:queries.LIMIT]
+        out_rows, lines = [], []
+        for _id in ids:
+            rows, present = _area_rows_for("employee", _id, period, latest_n_days, filters)
+            if not present:
+                continue
+            key, val = (min if want_weakest else max)(present, key=lambda kv: float(kv[1]))
+            out_rows.append(rows[0])
+            lines.append("%s — %s (%s%%)" % (rows[0].get("emp_name") or _id,
+                                             _AREA_LABELS[key], _fmt(val)))
+        if not lines:
+            return None
+        reply = ("Each employee's %s area:\n" % direction) + "\n".join(lines)
+        session_store.set_query_context(
+            session, last_operation="strongest_weakest", last_dimension="employee",
+            last_result_ids=ids, ascending=want_weakest, metric=None)
+        return reply, out_rows
+
+    # A single referent: the one employee the last answer was about, then the
+    # sticky employee, then (only when the message itself talks about a
+    # department/team) the sticky department.
+    if dimension is None and _any_ref:
+        if qc.get("last_dimension") == "employee" and len(qc.get("last_result_ids") or []) == 1:
+            dimension, name_filter = "employee", qc["last_result_ids"][0]
+            name_label = session_store.get_recent_context(session, "employee_name") or "that employee"
+        else:
+            _sticky_emp = session_store.get_recent_context(session, "employee_id")
+            if _sticky_emp:
+                dimension, name_filter = "employee", _sticky_emp
+                name_label = session_store.get_recent_context(session, "employee_name") or "that employee"
+    if dimension is None and re.search(r"\b(department|dept|team)\b", text, re.IGNORECASE):
+        _sticky_dept = (session_store.get_recent_context(session, "dept_name")
+                        or session_store.get_recent_context(session, "employee_dept_name"))
+        if _sticky_dept:
+            dimension, name_filter, name_label = "department", _sticky_dept, _sticky_dept
+    if dimension is None:
+        # Nothing concrete to scope to. "Strongest/weakest area" has no
+        # meaningful unscoped population answer, so decline rather than guess.
+        return None
+
+    rows, present = _area_rows_for(dimension, name_filter, period, latest_n_days, filters)
+    if not present:
+        return ("No data found for %s in this period." % (name_label or "that scope"), [])
+    best_key, best_val = max(present, key=lambda kv: float(kv[1]))
+    worst_key, worst_val = min(present, key=lambda kv: float(kv[1]))
+    chosen_key, chosen_val = (worst_key, worst_val) if want_weakest else (best_key, best_val)
+    reply = (
+        f"{name_label}'s {direction} area is {_AREA_LABELS[chosen_key]} "
+        f"({_fmt(chosen_val)}%).\n"
+        "All 4 areas: " + ", ".join(f"{_AREA_LABELS[k]} {_fmt(v)}%" for k, v in present)
+    )
+    if dimension == "department":
+        session_store.push_context(session, dept_name=name_filter)
+    else:
+        session_store.push_context(session, employee_id=name_filter, employee_name=name_label)
+        # The employee's OWN department goes in the dedicated incidental slot
+        # (item #92's sticky-leak fix), so the "...for the department
+        # overall?" follow-up can resolve it without re-naming it.
+        if rows and rows[0].get("dept_name"):
+            session_store.push_context(session, employee_dept_name=rows[0]["dept_name"])
+    session_store.set_query_context(
+        session, last_operation="strongest_weakest", last_dimension=dimension,
+        last_result_ids=[name_filter] if name_filter else [],
+        ascending=want_weakest, metric=[chosen_key])
+    return reply, rows
+
+
 def _extraction_llm_reply(raw_message, message, session):
     """Item #70: the new extraction-LLM cascade step. Called only when both
     the rule-based matcher and llm_nlu.classify() found nothing usable
@@ -6863,54 +7028,6 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     rule_intent = intents.match_intent(message)
     llm_result = llm_nlu.classify(raw_message)
 
-    # --- Item #99: the GENERALIZED-SHAPE bypass ---------------------------
-    # Root cause A of item #99: every message the ~124 rule regexes do not
-    # claim is handed to `llm_nlu.classify()`, which must return one of a
-    # CLOSED list of intent names. It has no way to say "this question needs
-    # no fixed intent — the generalized layer can represent it", so for a
-    # well-formed question outside the regexes' phrasing coverage it GUESSES,
-    # and a wrong guess is dispatched immediately and answers confidently
-    # (live-confirmed: "who's in red in Founders Office?" returned a single
-    # Founders Office PACE aggregate; "what is their weakest area?" returned
-    # an unrelated 10-row PACE ranking).
-    #
-    # The discriminator is structural, not phrasal: `rule_intent is None`
-    # means NO deterministic mechanism claimed this message, so classify()'s
-    # guess is the ONLY thing routing it. In exactly that population, a
-    # deterministic SHAPE detector (app/query_plan.py) gets to speak first:
-    #
-    #   * a PACE-status membership question routes straight to the existing,
-    #     verified status_list/status_count/status_emp handlers — the same
-    #     engines the rule intents call, with the same department/team/
-    #     exclusion resolution — so the answer never depends on the guess.
-    #   * an area (which-of-the-four-sub-scores) question discards the guess
-    #     so the generalized cascade (_extraction_llm_reply, which OWNS this
-    #     operation) gets the turn, exactly as _NEW_VOCAB_OVERRIDE_PATTERN
-    #     below already does for the new-metric vocabulary.
-    #
-    # A rule intent that DID fire is never touched here, so every phrasing
-    # the 124 intents already answer correctly is bit-for-bit unchanged.
-    if rule_intent is None:
-        _status_shape = (query_plan.detect_status_shape(raw_message)
-                         or query_plan.detect_status_shape(message))
-        if _status_shape is not None:
-            if _status_shape["kind"] == "count":
-                rule_intent = "status_count"
-            else:
-                # A status question about ONE named person is the
-                # single-employee lookup (status_emp), not a population list
-                # — resolved with the SAME resolver those intents use, never
-                # by wording.
-                try:
-                    _ss_emp_id, _ = entities.extract_employee(message, fallback_text=raw_message)
-                except entities.Ambiguous:
-                    _ss_emp_id = None
-                rule_intent = "status_emp" if _ss_emp_id else "status_list"
-            llm_result = None
-        elif (query_plan.detect_area_shape(raw_message)
-                or query_plan.detect_area_shape(message)):
-            llm_result = None
-
     # Item #76 (Phase 3, Part B): pace_score_best/pace_score_worst's own
     # regex patterns (app/intents.py) are broad "top N employees"/"most/
     # least score"-shaped matches that fire even when the message names a
@@ -7243,6 +7360,67 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # alone couldn't reliably guarantee.
     if rule_intent is None and llm_result is not None and _NEW_VOCAB_OVERRIDE_PATTERN.search(message):
         llm_result = None
+
+    # --- Item #99: the GENERALIZED-SHAPE bypass ---------------------------
+    # Root cause A of item #99: every message the ~124 rule regexes do not
+    # claim is handed to `llm_nlu.classify()`, which must return one of a
+    # CLOSED list of intent names. It has no way to say "this question needs
+    # no fixed intent — the generalized layer can represent it", so for a
+    # well-formed question outside the regexes' phrasing coverage it GUESSES,
+    # and a wrong guess is dispatched immediately and answers confidently
+    # (live-confirmed: "who's in red in Founders Office?" returned a single
+    # Founders Office PACE aggregate; "what is their weakest area?" returned
+    # an unrelated 10-row PACE ranking).
+    #
+    # The discriminator is structural, not phrasal: `rule_intent is None`
+    # means NO deterministic mechanism claimed this message, so classify()'s
+    # guess is the ONLY thing routing it. In exactly that population, a
+    # deterministic SHAPE detector (app/query_plan.py) gets to speak first:
+    #
+    #   * a PACE-status membership question routes straight to the existing,
+    #     verified status_list/status_count/status_emp handlers — the same
+    #     engines the rule intents call, with the same department/team/
+    #     exclusion resolution — so the answer never depends on the guess.
+    #   * an area (which-of-the-four-sub-scores) question discards the guess
+    #     so the generalized cascade (_extraction_llm_reply, which OWNS this
+    #     operation) gets the turn, exactly as _NEW_VOCAB_OVERRIDE_PATTERN
+    #     below already does for the new-metric vocabulary.
+    #
+    # A rule intent that DID fire is never touched here, so every phrasing
+    # the 124 intents already answer correctly is bit-for-bit unchanged.
+    if rule_intent is None:
+        _status_shape = (query_plan.detect_status_shape(raw_message)
+                         or query_plan.detect_status_shape(message))
+        if _status_shape is not None:
+            if _status_shape["kind"] == "count":
+                rule_intent = "status_count"
+            else:
+                # A status question about ONE named person is the
+                # single-employee lookup (status_emp), not a population list
+                # — resolved with the SAME resolver those intents use, never
+                # by wording.
+                try:
+                    _ss_emp_id, _ = entities.extract_employee(message, fallback_text=raw_message)
+                except entities.Ambiguous:
+                    _ss_emp_id = None
+                rule_intent = "status_emp" if _ss_emp_id else "status_list"
+            llm_result = None
+        elif (query_plan.detect_area_shape(raw_message)
+                or query_plan.detect_area_shape(message)):
+            llm_result = None
+            # The area operation is answered deterministically — the same
+            # build_query(_AREA_METRICS) numbers, with no classifier and no
+            # extraction-LLM call in the path. It declines (returns None)
+            # whenever it cannot resolve a concrete scope, and the cascade
+            # then continues exactly as before.
+            try:
+                _area_result = _handle_area_shape(raw_message, message, session)
+            except Exception:
+                logging.getLogger("pace_chatbot.main").exception("_handle_area_shape() raised")
+                _area_result = None
+            if _area_result is not None:
+                return ChatResponse(reply=_area_result[0], rows=_area_result[1])
+
 
     # Pronoun override (see _PRONOUN_PATTERN above): a message referring to a
     # person via "he"/"she"/etc. that the rule-based matcher already resolved
