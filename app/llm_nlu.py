@@ -220,6 +220,27 @@ than guessing when:
     None of the ~123 intents can represent any of these, so ANY intent name
     you return for them is wrong by construction. Return "none".
 
+  - ITEM #99 — GENERALIZED, PLAN-EXPRESSIBLE QUESTIONS. The intent list above
+    is a CLOSED vocabulary, and it is NOT the definition of what a user may
+    ask. A downstream generalized layer builds a normalized query plan
+    (subject, metric(s), grouping, filters with operators, row count,
+    period, operation) and answers directly from it, with no intent name
+    involved at all. "none" is therefore a FIRST-CLASS, CORRECT answer — it
+    means "this needs no fixed intent", not "this is unanswerable" — and you
+    are explicitly expected to return it whenever the message is a
+    well-formed analytics question that does not fit one of the listed
+    intents CLEANLY and SPECIFICALLY. Never stretch a listed intent to cover
+    a question it was not written for merely because it is the closest name
+    available; the closest name is frequently the wrong answer, and a wrong
+    intent name is dispatched immediately and answers with confident wrong
+    numbers. In particular return "none" for:
+      * a question whose SUBJECT, GRAIN or ROW COUNT is stated in a way no
+        listed intent carries ("every single employee sorted by
+        effectiveness, no limit", "the 12 lowest on discipline in Annotation");
+      * a question combining a metric with a filter/exclusion/grouping;
+      * any question you would only be able to answer by ignoring part of
+        what it says.
+
 When genuinely unsure whether a message matches an existing intent well
 versus needing this more precise handling, prefer "none" with low confidence
 over a confident wrong guess.

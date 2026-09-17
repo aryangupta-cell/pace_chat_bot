@@ -1367,6 +1367,232 @@ check("S9 an ordinary follow-up removes nothing",
 
 # ==========================================================================
 
+
+# ==========================================================================
+# T. ITEM #99 — GENERALIZED SHAPES THAT NO LONGER DEPEND ON classify()
+#
+# Root cause A: a message no rule regex claims was routed ONLY by
+# llm_nlu.classify()'s closed 124-name vocabulary, which cannot decline.
+# Root cause B: _plan_fallback_reply() gated "is this a ranking?" on a
+# hardcoded verb list.
+#
+# `llm_nlu.classify` is stubbed to None for this whole file, which is exactly
+# the condition these tests need: NOTHING may depend on a classifier guess.
+# ==========================================================================
+
+def fake_status_list(statuses, dept_name=None, employee_ids=None, limit=None,
+                     dimension_filters=None):
+    CALLS.append(dict(fn="status_list", statuses=statuses, dept_name=dept_name,
+                      employee_ids=employee_ids, limit=limit,
+                      dimension_filters=dimension_filters))
+    return [{"employee_id": 100, "emp_name": "Row0", "dept_name": "Annotation",
+             "overall_std_pace_status": (statuses or ["Red"])[0]}]
+
+
+def fake_status_count(statuses, dept_name=None, employee_ids=None, dimension_filters=None):
+    CALLS.append(dict(fn="status_count", statuses=statuses, dept_name=dept_name,
+                      employee_ids=employee_ids, dimension_filters=dimension_filters))
+    return 7
+
+
+queries.status_list = fake_status_list
+queries.status_count = fake_status_count
+main.queries.status_list = fake_status_list
+main.queries.status_count = fake_status_count
+
+
+def last_call(fn):
+    for c in reversed(CALLS):
+        if c["fn"] == fn:
+            return c
+    return None
+
+
+# --- T1: the STATUS shape detector, 12 novel phrasings + 8 non-status ------
+for phrase, want_statuses, want_kind in [
+    ("who's in red in Founders Office?", ["Red"], "list"),
+    ("which people are sitting in the amber band right now", ["Amber"], "list"),
+    ("anyone flagged black in Annotation?", ["Black"], "list"),
+    ("give me the names of everybody currently green", ["Green"], "list"),
+    ("list the folks in the red zone", ["Red"], "list"),
+    ("show me the amber and red guys in SCM", ["Amber", "Red"], "list"),
+    ("how many staff are black company wide", ["Black"], "count"),
+    ("count of people in green", ["Green"], "count"),
+    ("who all sit in amber in Control Tower", ["Amber"], "list"),
+    ("name the employees rated red", ["Red"], "list"),
+    ("which team members are black", ["Black"], "list"),
+    ("tell me who is green in Walle8", ["Green"], "list"),
+]:
+    got = query_plan.detect_status_shape(phrase)
+    check("T1 status shape %r" % phrase, got,
+          {"statuses": want_statuses, "kind": want_kind})
+
+for phrase in [
+    "which department has the best PACE score?",
+    "compare Accounts vs Billing",
+    "top 10 employees by engagement",
+    "who is improving the most",
+    "what is the red engagement percentage",
+    "which department has the most red employees",
+    "who moved from red to amber last month",
+    "bottom 5 on discipline",
+]:
+    check("T1 NOT a status shape %r" % phrase, query_plan.detect_status_shape(phrase), None)
+
+# --- T2: the AREA shape detector, 12 novel phrasings + 8 non-area ---------
+for phrase, want in [
+    ("what is their weakest area?", "weakest"),
+    ("what are their weakest areas?", "weakest"),
+    ("worst-performing category for that person", "weakest"),
+    ("which of the four sub-scores is dragging them down", "weakest"),
+    ("where is she strongest across the four components", "strongest"),
+    ("what's his best area", "strongest"),
+    ("which dimension is the department weakest in", "weakest"),
+    ("which aspect is lagging for them", "weakest"),
+    ("their standout area", "strongest"),
+    ("which sub-metric is poorest for that team", "weakest"),
+    ("what is the strongest aspect of their performance", "strongest"),
+    ("which category are they struggling in most", "weakest"),
+]:
+    check("T2 area shape %r" % phrase, query_plan.detect_area_shape(phrase), want)
+
+for phrase in [
+    "bottom 10 employees by engagement",
+    "who are the weakest employees",
+    "top 5 employees by effectiveness",
+    "which department has the worst discipline",
+    "who is in red in SCM",
+    "compare July and August across departments",
+    "rank the whole company by discipline",
+    "who improved the most",
+]:
+    check("T2 NOT an area shape %r" % phrase, query_plan.detect_area_shape(phrase), None)
+
+# --- T3: status questions route to the verified status engines -------------
+resp, calls = ask("T3a", "who's in red in Founders Office?")
+c = last_call("status_list")
+check_true("T3a reached status_list", c is not None, repr(calls))
+if c:
+    check("T3a statuses", c["statuses"], ["Red"])
+    check("T3a department scope", c["dept_name"], "Founders Office")
+
+resp, calls = ask("T3b", "which people are sitting in the amber band right now")
+c = last_call("status_list")
+check_true("T3b reached status_list", c is not None, repr(calls))
+if c:
+    check("T3b statuses", c["statuses"], ["Amber"])
+    check("T3b no spurious department scope", c["dept_name"], None)
+
+resp, calls = ask("T3c", "how many staff are black company wide")
+check_true("T3c reached status_count", last_call("status_count") is not None, repr(calls))
+
+resp, calls = ask("T3d", "anyone flagged black in Annotation?")
+c = last_call("status_list")
+check_true("T3d reached status_list", c is not None, repr(calls))
+if c:
+    check("T3d department scope", c["dept_name"], "Annotation")
+
+resp, calls = ask("T3e", "show me the amber and red guys in SCM")
+c = last_call("status_list")
+check_true("T3e reached status_list", c is not None, repr(calls))
+if c:
+    check("T3e both statuses kept", c["statuses"], ["Amber", "Red"])
+
+resp, calls = ask("T3f", "who is in red, excluding SCM")
+c = last_call("status_list")
+check_true("T3f reached status_list", c is not None, repr(calls))
+if c:
+    check("T3f exclusion applied", dim_filters(c), [("department", "ne", "SCM")])
+    check("T3f the excluded dept is not also the scope", c["dept_name"], None)
+
+# --- T4: the legacy status phrasing still goes through the rule intent -----
+resp, calls = ask("T4a", "who is red status in Founders Office")
+c = last_call("status_list")
+check_true("T4a legacy phrasing still answered by status_list", c is not None, repr(calls))
+if c:
+    check("T4a legacy statuses", c["statuses"], ["Red"])
+    check("T4a legacy dept scope", c["dept_name"], "Founders Office")
+
+# --- T5: rankings introduced by verbs OUTSIDE the old hardcoded list -------
+for sid, msg, want_metric in [
+    ("T5a", "I want every single employee sorted by effectiveness, no limit", "effectiveness_pct"),
+    ("T5b", "every employee ordered by discipline, no limit", "discipline_pct"),
+    ("T5c", "arrange all employees by engagement, no limit", "engagement_pct"),
+    ("T5d", "organize the entire company by effectiveness, no limit", "effectiveness_pct"),
+    ("T5e", "put every employee in order of discipline, no limit", "discipline_pct"),
+    ("T5f", "I need all employees sequenced by engagement with no limit", "engagement_pct"),
+]:
+    resp, calls = ask(sid, msg)
+    c = last_bq()
+    check_true("%s fired the plan path (%r)" % (sid, msg), c is not None, repr(resp.reply[:120]))
+    if c:
+        check("%s metric" % sid, c["metrics"], [want_metric])
+        check("%s cardinality is unlimited" % sid, c["limit"], query_plan.UNLIMITED_CEILING)
+
+resp, calls = ask("T5g", "the 12 employees with the lowest discipline")
+# whichever engine owns it, the explicit row count must reach the DB layer
+# and the answer must be a real ranking, not the help fallback.
+check("T5g explicit row count reached the DB layer", last_limit(), 12)
+check_true("T5g answered with a ranking", "discipline" in resp.reply.lower(),
+           repr(resp.reply[:160]))
+
+# --- T6: an AGGREGATE over the whole population is NOT a list -------------
+for sid, msg in [
+    ("T6a", "what's the average effectiveness across all employees"),
+    ("T6b", "what is the overall engagement for the whole company"),
+    ("T6c", "mean discipline across every employee"),
+]:
+    resp, calls = ask(sid, msg)
+    c = last_bq()
+    check_true("%s did not become an unlimited list (%r)" % (sid, msg),
+               c is None or c.get("limit") != query_plan.UNLIMITED_CEILING,
+               repr(c))
+
+# --- T7: an AREA question is never turned into a ranking ------------------
+for sid, msg in [
+    ("T7a", "what is their weakest area?"),
+    ("T7b", "which of the four sub-scores is dragging them down"),
+    ("T7c", "worst-performing category for that person"),
+    ("T7d", "their standout area"),
+    ("T7e", "which aspect is lagging for them"),
+]:
+    resp, calls = ask(sid, msg)
+    c = last_bq()
+    check_true("%s the plan layer did not answer with a ranking (%r)" % (sid, msg),
+               c is None or c.get("limit") == 1, repr(c))
+    d = main._plan_seed_delta_from_message(msg, msg)
+    check("%s delta operation is strongest_weakest" % sid, d.get("operation"), "strongest_weakest")
+
+d = main._plan_seed_delta_from_message(
+    "which managers have the weakest discipline outside Annotation?", None)
+check("T7f 'weakest discipline' is still a ranking direction", d.get("operation"), "rank_bottom")
+
+# --- T8: _execute_plan declines the area operation rather than guessing ---
+check("T8 executor declines strongest_weakest",
+      main._execute_plan(query_plan.new_plan(entity="employee", operation="strongest_weakest",
+                                             metrics=["engagement_pct"]), None), None)
+
+# --- T9: the populations sweep — every dimension still routes -------------
+for sid, msg, want_dim in [
+    ("T9a", "rank every department by engagement, no limit", "department"),
+    ("T9b", "list all managers by discipline with no limit", "rm"),
+    ("T9c", "sort every employee by engagement, no limit", "employee"),
+]:
+    resp, calls = ask(sid, msg)
+    c = last_bq()
+    check_true("%s fired (%r)" % (sid, msg), c is not None, repr(resp.reply[:120]))
+    if c:
+        check("%s dimension" % sid, c["dimension"], want_dim)
+
+# --- T10: newly-generalized shapes compose with exclusion ------------------
+resp, calls = ask("T10a", "sort every employee by engagement excluding Annotation, no limit")
+c = last_bq()
+check_true("T10a fired", c is not None, repr(resp.reply[:120]))
+if c:
+    check("T10a exclusion applied", dim_filters(c), [("department", "ne", "Annotation")])
+    check("T10a still unlimited", c["limit"], query_plan.UNLIMITED_CEILING)
+
+
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:
     print("  FAIL " + f)

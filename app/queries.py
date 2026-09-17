@@ -2394,20 +2394,62 @@ def day_flag_list(flag_key, dept_name=None, employee_ids=None, month=None, date_
 # baked into that upstream column, not recomputed here).
 # ---------------------------------------------------------------------------
 
-def _latest_status_cte():
+#: Item #99: the dimensions a STATUS question can be filtered on. Deliberately
+#: the two columns `_latest_status_cte()` itself reads out of the view
+#: (dept_name, employee_id) — a filter naming any other dimension is skipped
+#: rather than injected into SQL against a column this view may not expose.
+_STATUS_FILTER_FIELDS = ("department", "employee")
+
+
+def _dimension_filter_clauses(dimension_filters, prefix, allowed_fields=None):
+    """Item #99: the query-plan filter list -> (clauses, params).
+
+    One shared implementation of the operator semantics `build_query()` and
+    `compare_grouped()` each already carry inline, so a filter means exactly
+    the same thing on every engine that supports one. `ne`/`not_in` treat a
+    NULL as "not the excluded value", matching item #93/#94's decision.
+    """
+    clauses, params = [], {}
+    for i, df in enumerate(dimension_filters or []):
+        field = (df or {}).get("field")
+        if allowed_fields is not None and field not in allowed_fields:
+            continue
+        col = BUILD_QUERY_FILTER_COLUMNS.get(field)
+        if not col:
+            continue
+        op = (df or {}).get("operator")
+        p = "%s_%d" % (prefix, i)
+        if op == "eq":
+            clauses.append(f"{col} = %({p})s"); params[p] = df.get("value")
+        elif op == "ne":
+            clauses.append(f"{col} is distinct from %({p})s"); params[p] = df.get("value")
+        elif op == "in":
+            clauses.append(f"{col} = any(%({p})s)"); params[p] = list(df.get("value") or [])
+        elif op == "not_in":
+            clauses.append(f"({col} is null or {col} <> all(%({p})s))")
+            params[p] = list(df.get("value") or [])
+        elif op == "is_null":
+            clauses.append(f"{col} is null")
+        elif op == "is_not_null":
+            clauses.append(f"{col} is not null")
+    return clauses, params
+
+
+def _latest_status_cte(extra_clauses=()):
     """CTE: each employee's MOST RECENT worked_day row status in scope."""
+    extra = "".join("\n              and %s" % c for c in (extra_clauses or ()))
     return """
         latest as (
             select distinct on (employee_id) employee_id, emp_name, dept_name, overall_std_pace_status, worked_day
             from {VIEW}
             where (%(dept_name)s is null or dept_name = %(dept_name)s)
-              and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s))
+              and (%(employee_ids)s is null or employee_id = any(%(employee_ids)s)){EXTRA}
             order by employee_id, worked_day desc
         )
-    """.replace("{VIEW}", VIEW)
+    """.replace("{VIEW}", VIEW).replace("{EXTRA}", extra)
 
 
-def status_list(statuses, dept_name=None, employee_ids=None, limit=None):
+def status_list(statuses, dept_name=None, employee_ids=None, limit=None, dimension_filters=None):
     """Employees whose CURRENT (latest worked_day) overall_std_pace_status is
     in `statuses` (e.g. ['Red']). `statuses=None` (or empty) means NO status
     filter at all - i.e. every current status - NOT the old hardcoded
@@ -2415,28 +2457,34 @@ def status_list(statuses, dept_name=None, employee_ids=None, limit=None):
     bare "list of all employees"-style request to only Red/Black employees,
     truncating the real headcount)."""
     lim = limit or 200
+    _cl, _pr = _dimension_filter_clauses(dimension_filters, "st_filter", _STATUS_FILTER_FIELDS)
     sql = f"""
-        with {_latest_status_cte()}
+        with {_latest_status_cte(_cl)}
         select employee_id, emp_name, dept_name, overall_std_pace_status
         from latest
         where (%(statuses)s is null or overall_std_pace_status = any(%(statuses)s))
         order by emp_name
         limit {lim}
     """
-    return run_query(sql, {"dept_name": dept_name, "employee_ids": employee_ids, "statuses": statuses or None})
+    params = {"dept_name": dept_name, "employee_ids": employee_ids, "statuses": statuses or None}
+    params.update(_pr)
+    return run_query(sql, params)
 
 
-def status_count(statuses, dept_name=None, employee_ids=None):
+def status_count(statuses, dept_name=None, employee_ids=None, dimension_filters=None):
     """`statuses=None` (or empty) means NO status filter - counts everyone in
     scope, not just the old hardcoded ["Red","Black"] default - see
     status_list() docstring (item #59)."""
+    _cl, _pr = _dimension_filter_clauses(dimension_filters, "st_filter", _STATUS_FILTER_FIELDS)
     sql = f"""
-        with {_latest_status_cte()}
+        with {_latest_status_cte(_cl)}
         select count(*) as n
         from latest
         where (%(statuses)s is null or overall_std_pace_status = any(%(statuses)s))
     """
-    rows = run_query(sql, {"dept_name": dept_name, "employee_ids": employee_ids, "statuses": statuses or None})
+    _params = {"dept_name": dept_name, "employee_ids": employee_ids, "statuses": statuses or None}
+    _params.update(_pr)
+    rows = run_query(sql, _params)
     return rows[0]["n"] if rows else 0
 
 

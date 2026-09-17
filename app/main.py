@@ -1733,6 +1733,15 @@ def _execute_plan(plan, session, raw_message=""):
     if plan["operation"] == "compare":
         return None
 
+    # Item #99: "which of the four component areas is best/worst" is a real
+    # operation with its own dedicated engine (`_handle_area_shape()`, which
+    # reuses the same `build_query(_AREA_METRICS)` call the older area
+    # branches use). This executor produces ONE value per group for ONE
+    # metric and cannot express it, so it declines rather than answering an
+    # ascending PACE-score ranking — which is exactly what it used to do.
+    if plan["operation"] == "strongest_weakest":
+        return None
+
     # ---- value / ranking -------------------------------------------------
     gb = plan.get("group_by")
     if gb is not None and gb not in _PLAN_BQ_DIMENSIONS:
@@ -2039,8 +2048,22 @@ def _plan_seed_delta_from_message(raw_message, message):
     # deliberately mean something else to the cascade ("weakest" is its
     # strongest/weakest-AREA trigger). Found by live testing: "which managers
     # have the weakest discipline outside Annotation?" ranked DESCENDING.
-    _rank_word = _RANKING_WORDS.search(text) or _PLAN_RANKING_EXTRA.search(text)
-    _asc_word = _ASCENDING_WORDS.search(text) or _PLAN_ASCENDING_EXTRA.search(text)
+    # Item #99: "weakest"/"strongest" is a ranking DIRECTION when it qualifies
+    # a population ("the weakest managers on discipline") and a different
+    # OPERATION entirely when it qualifies one of the four component AREAS
+    # ("their weakest area"). `_PLAN_RANKING_EXTRA`/`_PLAN_ASCENDING_EXTRA`
+    # could not tell those apart, so an area question became an ascending
+    # PACE-score ranking of the whole company — live-confirmed on "what is
+    # their weakest area?", which returned a 10-row ranking table. The shape
+    # detector makes the distinction once, generically, for every phrasing.
+    _area_shape = query_plan.detect_area_shape(text) or query_plan.detect_area_shape(message)
+    if _area_shape:
+        delta["operation"] = "strongest_weakest"
+        delta["ascending"] = _area_shape == "weakest"
+        _rank_word = _asc_word = None
+    else:
+        _rank_word = _RANKING_WORDS.search(text) or _PLAN_RANKING_EXTRA.search(text)
+        _asc_word = _ASCENDING_WORDS.search(text) or _PLAN_ASCENDING_EXTRA.search(text)
     if _rank_word:
         delta["operation"] = "rank_bottom" if _asc_word else "rank_top"
     elif _asc_word:
@@ -2374,10 +2397,60 @@ def _plan_fallback_reply(raw_message, message, session):
     # Requires an actual list/ranking verb so an aggregate question that
     # merely mentions "all employees" ("what's the average across all
     # employees") is never turned into a list.
-    if (delta.get("limit_mode") == "unlimited"
-            and delta.get("operation") not in ("rank_top", "rank_bottom")
-            and re.search(r"\b(show|list|give|display|rank|ranked|ranking|"
-                          r"breakdown|report|pull\s+up|who)\b", text, re.IGNORECASE)):
+    #
+    # Item #99, root cause B: that rule used to ALSO require one of a
+    # hardcoded list of verbs (show|list|give|display|rank|...|who). A verb
+    # list is a closed vocabulary by another name — "I want every single
+    # employee sorted by effectiveness, no limit" names a metric AND an
+    # explicit unlimited cardinality AND no single subject, which is a
+    # complete ranking request by any reading, yet it introduced itself with
+    # "sorted", so this function declined and the message died on the generic
+    # help fallback (live-confirmed).
+    #
+    # The fire condition is now written on the SEMANTIC signals the detectors
+    # already extract, which is what actually defines the shape:
+    #     a CARDINALITY the user stated explicitly (N rows, or "everything")
+    #   + a POPULATION with no single named subject (checked below)
+    #   + NOT an aggregate question
+    # The verb is redundant information: which word introduces the request
+    # cannot change whether "every employee, by effectiveness" is a list.
+    #
+    # The one distinction that IS load-bearing — and is preserved, as its own
+    # explicit guard rather than as a side effect of the verb list — is
+    # "list/rank every X" vs. "aggregate over all X": "what's the average
+    # effectiveness across all employees" also names a metric and a whole
+    # population, but wants ONE number. An explicit aggregate word is the
+    # deterministic signal for that, and it declines here so the
+    # average_metric/company-aggregate engines keep it.
+    _aggregate_cue = re.search(
+        r"\b(?:avg|average|mean|median|overall|total|sum|combined|aggregate|"
+        r"typical|company[\s-]?wide\s+(?:score|average)|as\s+a\s+whole)\b"
+        # "what is the effectiveness of all employees" reads as ONE number
+        # about a population, not a request to enumerate it. A message that
+        # really wants the list says so somewhere else in its wording (a row
+        # count, an ordering, a list noun), and every such message carries a
+        # signal this narrow opener does not cancel.
+        r"|^\s*what(?:'s|\s+is|\s+are)\s+the\b",
+        text, re.IGNORECASE)
+    if (delta.get("operation") not in ("rank_top", "rank_bottom")
+            and not _aggregate_cue
+            and (
+                # An explicit "everything" cardinality, however phrased.
+                (delta.get("limit_mode") == "unlimited"
+                 # The old verb gate is kept ONLY as an additional way IN for
+                 # the metric-less form ("show me all employees"), never as a
+                 # requirement — see the metric-carrying branch below.
+                 and (delta.get("metrics")
+                      or re.search(r"\b(show|list|give|display|rank|ranked|ranking|"
+                                   r"breakdown|report|pull\s+up|who|sort\w*|order\w*|"
+                                   r"arrang\w*|organis\w*|organiz\w*|line\s+up)\b",
+                                   text, re.IGNORECASE)))
+                # An explicit row count plus a named metric is equally a
+                # ranking request regardless of the verb ("12 employees by
+                # discipline"). `limit_mode == "exact"` only ever comes from
+                # the user stating a number.
+                or (delta.get("limit_mode") == "exact" and delta.get("metrics"))
+            )):
         delta["operation"] = "rank_bottom" if delta.get("ascending") else "rank_top"
     if delta.get("operation") not in ("rank_top", "rank_bottom"):
         return None
@@ -2749,11 +2822,22 @@ def _extraction_llm_reply(raw_message, message, session):
     # round as part of testing failure G ("what are their weakest areas?"
     # right after a ranking) - a pre-existing gap, not introduced this
     # round, but directly blocking that fix from ever being reached.
-    _area_dir_match = (
-        re.search(r"\b(strongest|weakest)\b[^.?!]{0,40}\b(?:areas?|metrics?|dimensions?|aspects?)\b", raw_message, re.I)
-        or re.search(r"\b(?:areas?|metrics?|dimensions?|aspects?)\b[^.?!]{0,40}\b(strongest|weakest)\b", raw_message, re.I)
-    )
-    _area_match = _area_dir_match
+    #
+    # Item #99: the two literal "(strongest|weakest) ... area"-shaped regexes
+    # that used to live here were the ONLY way an area question could be
+    # recognised, so every other phrasing of the SAME question
+    # ("worst-performing category", "which of the four sub-scores is dragging
+    # them down", "where is she strongest") either fell through or was
+    # claimed by an unrelated ranking. Replaced by the shared,
+    # vocabulary-level shape detector in query_plan.py — the same signal
+    # handle_message()'s generalized-shape bypass routes on, so the routing
+    # decision and the answering branch can never disagree about what an
+    # area question is. `_area_direction` is "weakest"/"strongest";
+    # `_area_match` stays a truthy flag for the gates below that only ask
+    # "is this one?".
+    _area_direction = (query_plan.detect_area_shape(raw_message)
+                       or query_plan.detect_area_shape(message))
+    _area_match = _area_direction
     if not metrics:
         # Item #72: don't silently default straight to plain pace_score when
         # the LLM extraction returned an empty metrics list - a raw_message
@@ -3031,7 +3115,7 @@ def _extraction_llm_reply(raw_message, message, session):
         # strongest/weakest area (not a single aggregated scope - "strongest/
         # weakest area" is inherently per-employee, and there is no existing
         # multi-employee aggregate version of this operation to reuse).
-        _want_weakest_grp = _area_match.group(1).lower() == "weakest"
+        _want_weakest_grp = _area_direction == "weakest"
         _direction_grp = "weakest" if _want_weakest_grp else "strongest"
         _emp_ids = _qc["last_result_ids"][:queries.LIMIT]
         _group_rows = []
@@ -3354,7 +3438,7 @@ def _extraction_llm_reply(raw_message, message, session):
                 present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
         if not present:
             return (f"No data found for {name_label or 'that scope'} in this period.", [])
-        want_weakest = _area_match.group(1).lower() == "weakest"
+        want_weakest = _area_direction == "weakest"
         best_key, best_val = max(present, key=lambda kv: float(kv[1]))
         worst_key, worst_val = min(present, key=lambda kv: float(kv[1]))
         chosen_key, chosen_val = (worst_key, worst_val) if want_weakest else (best_key, best_val)
@@ -6262,13 +6346,21 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
         # requires them, this default never substitutes for that.
         statuses = [s.capitalize() for s in re.findall(r"\b(black|red|amber|green)\b", message, re.I)]
         statuses = list(dict.fromkeys(statuses)) or None
+        # Item #99: a status question composes with an EXCLUSION the same way
+        # every other question does ("who's in red, excluding SCM"). The
+        # operator-aware plan detector is the single source of that signal
+        # project-wide, and queries.status_list()/status_count() now take the
+        # same `dimension_filters` list build_query() does. Without this the
+        # exclusion was silently dropped (the department-exclusion guard
+        # further up only stops it being misread as a positive SCOPE).
+        _st_dim_filters = _detect_plan_dimension_filters(raw_message, message) or None
         st_scope_note = f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else " company-wide")
 
         def _status_note(team_label, dept_name):
             return f" for {team_label}" if team_label else (f" in {dept_name}" if dept_name else " company-wide")
 
         if intent == "status_list":
-            rows = queries.status_list(statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
+            rows = queries.status_list(statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit, dimension_filters=_st_dim_filters)
             if session is not None:
                 def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=entities.UNLIMITED, _statuses=statuses):
                     _rows = queries.status_list(_statuses, dept_name=dept_name, employee_ids=employee_ids, limit=limit)
@@ -6279,7 +6371,7 @@ def answer_intent(intent, dept_name, month, manager_id, manager_name, employee_i
             return ChatResponse(reply=format_status_list(rows, statuses, st_scope_note), rows=rows)
 
         if intent == "status_count":
-            n = queries.status_count(statuses, dept_name=dept_name, employee_ids=employee_ids)
+            n = queries.status_count(statuses, dept_name=dept_name, employee_ids=employee_ids, dimension_filters=_st_dim_filters)
             label = "/".join(statuses) if statuses else "all-status"
             if session is not None:
                 def _rerun_list(dept_name=dept_name, employee_ids=employee_ids, team_label=team_label, month=None, date_range=None, limit=entities.UNLIMITED, _statuses=statuses):
@@ -6770,6 +6862,54 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # picked the intent.
     rule_intent = intents.match_intent(message)
     llm_result = llm_nlu.classify(raw_message)
+
+    # --- Item #99: the GENERALIZED-SHAPE bypass ---------------------------
+    # Root cause A of item #99: every message the ~124 rule regexes do not
+    # claim is handed to `llm_nlu.classify()`, which must return one of a
+    # CLOSED list of intent names. It has no way to say "this question needs
+    # no fixed intent — the generalized layer can represent it", so for a
+    # well-formed question outside the regexes' phrasing coverage it GUESSES,
+    # and a wrong guess is dispatched immediately and answers confidently
+    # (live-confirmed: "who's in red in Founders Office?" returned a single
+    # Founders Office PACE aggregate; "what is their weakest area?" returned
+    # an unrelated 10-row PACE ranking).
+    #
+    # The discriminator is structural, not phrasal: `rule_intent is None`
+    # means NO deterministic mechanism claimed this message, so classify()'s
+    # guess is the ONLY thing routing it. In exactly that population, a
+    # deterministic SHAPE detector (app/query_plan.py) gets to speak first:
+    #
+    #   * a PACE-status membership question routes straight to the existing,
+    #     verified status_list/status_count/status_emp handlers — the same
+    #     engines the rule intents call, with the same department/team/
+    #     exclusion resolution — so the answer never depends on the guess.
+    #   * an area (which-of-the-four-sub-scores) question discards the guess
+    #     so the generalized cascade (_extraction_llm_reply, which OWNS this
+    #     operation) gets the turn, exactly as _NEW_VOCAB_OVERRIDE_PATTERN
+    #     below already does for the new-metric vocabulary.
+    #
+    # A rule intent that DID fire is never touched here, so every phrasing
+    # the 124 intents already answer correctly is bit-for-bit unchanged.
+    if rule_intent is None:
+        _status_shape = (query_plan.detect_status_shape(raw_message)
+                         or query_plan.detect_status_shape(message))
+        if _status_shape is not None:
+            if _status_shape["kind"] == "count":
+                rule_intent = "status_count"
+            else:
+                # A status question about ONE named person is the
+                # single-employee lookup (status_emp), not a population list
+                # — resolved with the SAME resolver those intents use, never
+                # by wording.
+                try:
+                    _ss_emp_id, _ = entities.extract_employee(message, fallback_text=raw_message)
+                except entities.Ambiguous:
+                    _ss_emp_id = None
+                rule_intent = "status_emp" if _ss_emp_id else "status_list"
+            llm_result = None
+        elif (query_plan.detect_area_shape(raw_message)
+                or query_plan.detect_area_shape(message)):
+            llm_result = None
 
     # Item #76 (Phase 3, Part B): pace_score_best/pace_score_worst's own
     # regex patterns (app/intents.py) are broad "top N employees"/"most/

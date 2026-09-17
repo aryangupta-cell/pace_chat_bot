@@ -492,6 +492,151 @@ def detect_explicit_removals(text):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Item #99 — SEMANTIC SHAPE detection (the closed-vocabulary bypass)
+# ---------------------------------------------------------------------------
+#
+# Everything above this point describes how a message MODIFIES a query. The
+# two detectors below describe two whole QUESTION SHAPES that the product
+# genuinely supports but that, until this round, only reached their correct
+# engine when `intents.match_intent()`'s hand-written regexes happened to
+# claim the exact phrasing:
+#
+#   * a PACE-STATUS (Black/Red/Amber/Green) membership question — "who is in
+#     red in Founders Office", "which people are sitting in the amber band",
+#     "anyone flagged black in Annotation";
+#   * a STRONGEST/WEAKEST-AREA question — which of the four PACE component
+#     sub-scores is an employee's / a department's best or worst.
+#
+# When the regexes did not claim the phrasing, the message fell through to
+# `llm_nlu.classify()`, which MUST pick one of ~124 fixed intent names and
+# has no way to say "this is a generalized question, let the plan layer have
+# it". It therefore guessed, and a wrong guess produced a confident wrong
+# answer (a department PACE aggregate instead of a status list; an unrelated
+# PACE ranking instead of an area lookup — both live-confirmed).
+#
+# These detectors are deterministic and VOCABULARY-based, in exactly the same
+# style as `_GROUP_BY_WORDS`/`_NEGATION_MARKER` above: they describe the
+# CONCEPT (a status band; one of the four component areas) rather than any
+# phrasing, so a novel wording of the same question is recognised by
+# construction rather than by adding another pattern. The caller uses them
+# only when `match_intent()` found NOTHING — i.e. precisely the population of
+# messages whose routing was previously a `classify()` guess.
+
+#: The four PACE status bands. Same vocabulary as queries.status_list()'s
+#: `statuses` argument (capitalised there).
+PACE_STATUS_WORDS = ("black", "red", "amber", "green")
+
+_STATUS_WORD = re.compile(r"\b(" + "|".join(PACE_STATUS_WORDS) + r")\b", re.IGNORECASE)
+
+#: A reference to PEOPLE — the thing a status question asks for. Without one,
+#: a colour word is not a membership question (it could be a department name
+#: fragment, a metric, or small talk).
+_STATUS_POPULATION_REF = re.compile(
+    r"\b(?:who|whom|whose|which|list|name|names|show|give|display|tell\s+me|"
+    r"employees?|emps?|people|persons?|folks?|staff|members?|headcount|"
+    r"anyone|anybody|everyone|everybody|guys|team)\b",
+    re.IGNORECASE)
+
+#: Words that make the question a COUNT rather than a list. Reuses the same
+#: split the existing status_count/status_list intents already draw.
+_STATUS_COUNT_CUE = re.compile(
+    r"\bhow\s+many\b|\bcount\b|\bnumber\s+of\b|\bhow\s+much\b", re.IGNORECASE)
+
+#: A status question is about the BAND itself; a question that also names one
+#: of the four component metrics is a metric question that merely happens to
+#: contain a colour word, and belongs to the engines that own those metrics.
+_STATUS_DISQUALIFIER = re.compile(
+    r"\bengagement\b|\beffectiveness\b|\bdiscipline\b|\bworking\s*hours?\b|"
+    r"\blate[\s-]?coming\b|\bearly[\s-]?leav\w*\b|\bwhatsapp\b|\bmeeting\b|"
+    r"\btasks?\b|\btodos?\b|\bproductiv\w*\b|\battendance\b|\bwfh\b|"
+    r"\bwork\s+from\s+home\b|\bleaves?\b|\bvisits?\b|\bimprov\w*\b|\bdeclin\w*\b|"
+    r"\bmoved\s+from\b|\bdistribution\b|\bpercentage\b|\bratio\b|\btrend\b|"
+    r"\bpace\s+score\b",
+    re.IGNORECASE)
+
+#: "which department has the MOST red employees" is a status DISTRIBUTION
+#: question (a ranking of groups), not a membership list. A superlative of
+#: quantity is the generic signal for that, and the status_distribution
+#: intent family owns it.
+_STATUS_RANKING_CUE = re.compile(
+    r"\b(?:most|least|fewest|largest|biggest|smallest)\b", re.IGNORECASE)
+
+
+def detect_status_shape(text):
+    """`{"statuses": [...], "kind": "list"|"count"}` when this message asks
+    WHICH PEOPLE are in one or more PACE status bands, else None.
+
+    Shape-level, not phrase-level: a status-band word plus a reference to
+    people. Every phrasing of that pair is the same question, and the answer
+    is always `queries.status_list()`/`status_count()` — the engines the
+    existing status_list/status_count intents already call, unchanged.
+    """
+    text = text or ""
+    if _STATUS_DISQUALIFIER.search(text) or _STATUS_RANKING_CUE.search(text):
+        return None
+    words =[m.group(1).lower() for m in _STATUS_WORD.finditer(text)]
+    if not words:
+        return None
+    if not _STATUS_POPULATION_REF.search(text):
+        return None
+    statuses = list(dict.fromkeys(w.capitalize() for w in words))
+    kind = "count" if _STATUS_COUNT_CUE.search(text) else "list"
+    return {"statuses": statuses, "kind": kind}
+
+
+#: The four PACE components are collectively "areas" in this product's
+#: language. This is the full noun vocabulary for that concept.
+_AREA_NOUN = (r"(?:areas?|sub[-\s]?scores?|subscores?|sub[-\s]?metrics?|"
+              r"components?|categor(?:y|ies)|dimensions?|aspects?|pillars?|"
+              r"parameters?|factors?|metrics?)")
+
+#: "which area is worst" direction vocabulary — the two poles, each a family
+#: of words rather than a literal superlative.
+_AREA_WEAK = (r"(?:weak\w*|worst|lowest|poor\w*|bottom|lagging|lags|trailing|"
+              r"dragging|drags|drag|struggl\w*|deficien\w*|underperform\w*|"
+              r"problem\w*|hurting|holding\s+\w+\s+back|behind)")
+_AREA_STRONG = (r"(?:strong\w*|best|highest|top|greatest|strength\w*|leading|"
+                r"excel\w*|standout|shin\w*)")
+
+_AREA_WINDOW = r"[^.?!]{0,45}?"
+_AREA_RES = (
+    ("weakest", re.compile(_AREA_WEAK + _AREA_WINDOW + r"\b" + _AREA_NOUN + r"\b", re.IGNORECASE)),
+    ("weakest", re.compile(r"\b" + _AREA_NOUN + r"\b" + _AREA_WINDOW + _AREA_WEAK, re.IGNORECASE)),
+    ("strongest", re.compile(_AREA_STRONG + _AREA_WINDOW + r"\b" + _AREA_NOUN + r"\b", re.IGNORECASE)),
+    ("strongest", re.compile(r"\b" + _AREA_NOUN + r"\b" + _AREA_WINDOW + _AREA_STRONG, re.IGNORECASE)),
+)
+
+#: An area question asks WHICH of the four components is best/worst. A message
+#: that already NAMES one of them is asking about that component, not asking
+#: which one — so it is a ranking/value question and must keep its engine.
+_AREA_DISQUALIFIER = re.compile(
+    r"\bengagement\b|\beffectiveness\b|\bdiscipline\b|\bworking\s*hours?\b|"
+    r"\bworking\s*(?:%|percent\w*)|\bpace\s+score\b|\battendance\b|"
+    r"\blate[\s-]?coming\w*\b|\bearly[\s-]?leav\w*\b|\bwhatsapp\b|"
+    r"\bimprov\w*\b|\bdeclin\w*\b|\bprogress\w*\b",
+    re.IGNORECASE)
+
+
+def detect_area_shape(text):
+    """`"weakest"` / `"strongest"` when this message asks WHICH of the four
+    PACE component areas is the best/worst one, else None.
+
+    The pair (an area NOUN, a direction WORD) is the whole signal — "their
+    weakest area", "worst-performing category", "which of the four sub-scores
+    is dragging them down" and "where is she strongest across the four
+    components" are all the same question and all resolve here without a
+    pattern of their own.
+    """
+    text = text or ""
+    if _AREA_DISQUALIFIER.search(text):
+        return None
+    for direction, rx in _AREA_RES:
+        if rx.search(text):
+            return direction
+    return None
+
+
 def detect_context_modification(text, has_filters=False, has_group_by=False,
                                 has_metric=False, has_period=False, has_limit=False):
     """Classify how a follow-up message relates to the previous plan.
