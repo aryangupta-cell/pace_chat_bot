@@ -1699,6 +1699,40 @@ entities.extract_employee = fake_extract_employee
 main.entities.extract_employee = fake_extract_employee
 
 
+
+# --- T13: the plan must not claim an operation it cannot express -----------
+# Both doors into _execute_plan now carry the same representability guard.
+for sid, msg in [
+    ("T13a", "top 10 PACE improvers in the last 4 weeks"),
+    ("T13b", "biggest pace gainers, no limit"),
+    ("T13c", "every employee ranked by how much they declined"),
+]:
+    check("%s plan fallback declines an unrepresentable operation (%r)" % (sid, msg),
+          main._plan_fallback_reply(msg, msg, session_store.get_session(sid)), None)
+
+# the spellchecker must not be able to destroy a rule match: the raw text is
+# retried whenever the corrected text matched nothing (strictly additive)
+def fake_trend_ranking(*a, **kw):
+    CALLS.append(dict(fn="pace_score_trend_ranking", **kw))
+    return ([{"employee_id": 100, "emp_name": "Row0", "dept_name": "Annotation",
+              "pace_score_delta": 5, "pace_score_prev_month": 75,
+              "days_current_month": 20, "days_prev_month": 20}],
+            {"partial_month": False, "prev_month": "2026-08", "min_days": 5})
+
+
+queries.pace_score_trend_ranking = fake_trend_ranking
+main.queries.pace_score_trend_ranking = fake_trend_ranking
+
+_real_correct = main.spellcheck.correct_typos
+main.spellcheck.correct_typos = lambda m: m.replace("improvers", "improves")
+resp, calls = ask("T13d", "top 10 PACE improvers in the last 4 weeks")
+check_true("T13d a corrupted domain word does not become a plain PACE ranking",
+           "Ranked by PACE score" not in resp.reply, repr(resp.reply[:160]))
+check_true("T13d reached the real improvement-ranking engine",
+           last_call("pace_score_trend_ranking") is not None, repr(resp.reply[:160]))
+main.spellcheck.correct_typos = _real_correct
+
+
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:
     print("  FAIL " + f)

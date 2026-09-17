@@ -2388,6 +2388,14 @@ def _plan_fallback_reply(raw_message, message, session):
     """
     text = raw_message or message or ""
     delta = _plan_seed_delta_from_message(raw_message, message)
+    # Item #99: the interceptor has refused to answer a question whose METRIC
+    # or OPERATION this engine cannot express since item #97, but this second
+    # entry point into the SAME executor never got that guard — so a
+    # period-over-period CHANGE ranking ("top 10 PACE improvers") that reached
+    # here was answered as a plain single-window PACE ranking. One guard, both
+    # doors.
+    if not _plan_metric_is_representable(text, delta):
+        return None
     # Item #95: "show me all employees by engagement" / "list every
     # employee's pace score" name NO ranking direction, so the direction
     # test below would decline them and they would land on generated SQL
@@ -7026,6 +7034,17 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # queries.py) runs completely unchanged regardless of which matcher
     # picked the intent.
     rule_intent = intents.match_intent(message)
+    if rule_intent is None and raw_message and raw_message != message:
+        # Item #99: the offline spellchecker is a dictionary, not a domain
+        # model, so it sometimes CORRUPTS a correctly-spelled domain word and
+        # destroys a match the user's own text would have made — live-traced:
+        # "top 10 PACE improvers..." is rewritten to "...improves...", which
+        # matches no intent at all, and the message then fell through to the
+        # generalized layer and was answered as a plain PACE ranking (the
+        # wrong operation). Retrying on the RAW text is strictly additive: it
+        # runs only when the corrected text matched NOTHING, so no message
+        # that matches today can change route.
+        rule_intent = intents.match_intent(raw_message)
     llm_result = llm_nlu.classify(raw_message)
 
     # Item #76 (Phase 3, Part B): pace_score_best/pace_score_worst's own
