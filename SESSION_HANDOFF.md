@@ -2623,3 +2623,188 @@ Commit `2b98bdd` (fix + tests), pushed to `origin/main` and `origin/master`; Ren
 - **The six live regression failures above are pre-existing and unexplained by this round.** They reproduce identically on the deployed code before the change. They look like an LLM-availability issue in production, but no diagnosis was performed and none should be inferred from this entry.
 - Every limitation listed under item #97 (day/month grouping outside a comparison, grade/designation grouping, unrepresentable metrics, exclusions on engines with no filter parameter, engines that leave no plan behind, `most_early_leavings`) is **unchanged and still open** — this round changed the patch mechanism, not what the executor can express.
 - **No DB credentials** exist in this repo (checked again this round); every number above is what the live chatbot API returned, not a direct SQL count.
+
+## Item #99 — removing the closed-vocabulary / finite-verb restriction on generalized queries
+
+### The report
+
+Item #98's own independent verification pass ran `scripts/regression_live.py` against production and found **6 live failures**, none of them inside item #98's diff, traced to two root causes. The mandate was explicit: fix the ROOT ARCHITECTURE, not the three reported phrases; "GPT-5-mini should be able to understand valid natural-language questions using its own reasoning + PACE_REFERENCE.md + existing intents as reference knowledge, WITHOUT requiring the question to fit the old closed intent vocabulary"; "do not maintain a finite verb vocabulary as the definition of what a user can ask".
+
+### Live pre-change baseline (production, before any code change, run twice, identical)
+
+`scripts/regression_live.py` — **91 checks, 6 failed**. The six:
+
+| question | pre-change reply |
+|---|---|
+| `who's in red in Founders Office?` | "Founders Office — 8 employee(s) / PACE score: 79" (a department PACE aggregate) |
+| `what is their weakest area?` (x2 conversations) | a 10-row ascending company PACE-score ranking table |
+| `is that also the weakest area for the department overall?` | the same unrelated ranking table |
+| `I want every single employee sorted by effectiveness, no limit` | the generic help/greeting fallback, 0 rows |
+| `top 10 PACE improvers in the last 4 weeks` | a plain descending PACE-score ranking (top scorers, not improvers) |
+
+### Root cause A — the closed-vocabulary classifier was the ONLY router for anything the regexes missed
+
+Traced in code, not assumed.
+
+- `app/main.py::handle_message()` computes `rule_intent = intents.match_intent(message)` and, when that is `None`, hands the message to `app/llm_nlu.py::classify()`. `classify()`'s schema is `{"intent": enum(_VALID_INTENTS + ["none"])}` — a CLOSED list of ~124 names. Confirmed directly: `intents.match_intent("who's in red in Founders Office?")` is `None` (the `_STATUS_LIST_PATTERNS` regexes require `who (is|are)`, not `who's`), and `query_plan.detect_group_by()` is `None`, so **none** of the deterministic mechanisms built in items #94/#96/#97/#98 applied to it at all. The entire routing decision was one probabilistic guess from a vocabulary that contains no way to say "this needs no intent name".
+- The failure is therefore not "classify() is bad at these three phrasings". It is that for the whole population of messages the regexes do not claim, a wrong guess is dispatched immediately and answers **confidently**, and no later stage ever gets a turn.
+- Two further, independent defects in the same family were found while tracing, both of which also produced a confident wrong answer without any classifier involvement:
+  - `_PLAN_RANKING_EXTRA` / `_PLAN_ASCENDING_EXTRA` (`app/main.py`) treat "weakest"/"strongest" as a ranking DIRECTION unconditionally. `_plan_fallback_reply()` therefore claimed "what is their weakest area?" and answered an ascending company-wide PACE ranking — the exact 10-row table in the baseline above.
+  - The only code able to ANSWER a strongest/weakest-area question lived inside `_extraction_llm_reply()`'s `_area_match` branch, i.e. behind BOTH a correct `classify()` guess AND a live `llm_nlu.extract_build_query()` call. That extraction call is currently unavailable in production, so even the phrasings that routed correctly fell through to a bare PACE-score overview. Verified live during this round (part 1 of the fix corrected the routing and the area questions still failed).
+  - `_area_match` itself was two literal regexes over `(strongest|weakest)` + `(areas?|metrics?|dimensions?|aspects?)`, so every other phrasing of the same question was invisible to it.
+
+### Root cause B — a finite verb vocabulary as the definition of a ranking request
+
+`app/main.py::_plan_fallback_reply()` (item #94-era code) only treated a message as a ranking/listing request when `delta["limit_mode"] == "unlimited"` **and** the text matched a hardcoded verb list `show|list|give|display|rank|ranked|ranking|breakdown|report|pull up|who`. `"I want every single employee sorted by effectiveness, no limit"` carries a metric (`effectiveness_pct`, from `_detect_build_query_metrics`) and an explicit unlimited cardinality (`entities.extract_limit()` returns `UNLIMITED` — confirmed), and names no single subject; it simply introduces itself with "sorted". The function declined and the message died on `intents.FALLBACK_MESSAGE`.
+
+A second instance of the same "same guard, only one of the two doors" class was found: `_plan_fallback_reply()` never applied `_plan_metric_is_representable()`, the guard the interceptor has carried since item #97, so a period-over-period CHANGE question that reached this second entry point into `_execute_plan()` was answered as a plain single-window ranking.
+
+### The architectural fix (why it is generic, not a patch list)
+
+**1. Semantic SHAPE detection as a first-class layer (`app/query_plan.py`).**
+`detect_status_shape()`, `mentions_status_band()`, `asks_for_status_band()` and `detect_area_shape()` describe two whole QUESTION SHAPES at the level of the product's own vocabulary, in the same style as the module's existing `_GROUP_BY_WORDS`/`_NEGATION_MARKER` detectors:
+- a PACE-status membership question = a status-BAND word plus a reference to PEOPLE (with the count/list split, the distribution-question exclusion, and the disqualifiers that keep a component-metric question out);
+- an AREA question = an area NOUN (area, sub-score, component, category, dimension, aspect, pillar, parameter, factor, metric) plus a DIRECTION word family (weak/worst/lowest/poor/lagging/dragging/struggling/deficient… vs strong/best/highest/strength/standout/excelling…), in either order, with a disqualifier for a message that already NAMES one of the four components (that is a question about that component, not about which one).
+Neither detector contains a phrase from the bug report or from any test case. A novel wording of the same question is recognised by construction.
+
+**2. The GENERALIZED-SHAPE BYPASS, gated on the real structural discriminator.**
+In `handle_message()`, immediately after the existing `_NEW_VOCAB_OVERRIDE_PATTERN` nulling blocks, the shape detectors get to speak **only when `rule_intent is None`** — which is exactly the statement "no deterministic mechanism claimed this message, so `classify()`'s guess is the only thing routing it". That is the generic discriminator between the failing and the succeeding category; it is not phrase matching, and a rule intent that DID fire is never touched, so all ~124 intents keep their behaviour bit-for-bit.
+- A status shape sets `rule_intent` to the existing, verified `status_list` / `status_count` / `status_emp` — the same engines, the same department/team resolution, the same exclusion guard, the same `last_list` bookkeeping. No new answer code, and the answer no longer depends on a guess.
+- An area shape discards the classifier's guess and calls the new deterministic handler below.
+
+**3. The strongest/weakest-AREA operation, answered deterministically (`_handle_area_shape()`).**
+No intent name, no classifier, no extraction LLM anywhere in the path. Shape from the shared detector; SCOPE from the same resolvers every other handler uses, in an explicit precedence (named employee → named department → a plural pronoun resolved against `query_context.last_result_ids` (per-employee form) → a singular referent from `query_context`/sticky state → a department word plus sticky department → **decline**); NUMBERS from the same `build_query(_AREA_METRICS)` call the older branch makes, factored into `_area_rows_for()` together with the item #89/#90 qualifying-population relaxation retry, so there is one implementation rather than two that can drift. It writes the same `query_context`/sticky state the older branch did, so `_handle_dept_weakest_area_followup()` ("…also the weakest area for the department overall?") chains off it unchanged.
+`_extraction_llm_reply()`'s own `_area_match` is now the SAME detector, so the routing decision and the answering branch can never disagree about what an area question is.
+
+**4. "Weakest" is a direction OR an operation, decided once.**
+`_plan_seed_delta_from_message()` consults the area detector first: when the superlative is bound to an area noun the delta carries `operation="strongest_weakest"` instead of a ranking direction, and `_execute_plan()` declines that operation outright (the area engine owns it) rather than answering an ungrouped ranking. When the same word qualifies a population ("the weakest managers on discipline") nothing changes — asserted in the tests.
+
+**5. The ranking fire condition rewritten on the signals that actually define the shape.**
+`_plan_fallback_reply()` now fires on: an explicit cardinality the user stated (a row count, or "everything") **+ a metric** **+ no single named subject** (the pre-existing `extract_employee` check) **+ not an aggregate question**. The verb is redundant information — which word introduces the request cannot change whether "every employee, by effectiveness" is a list. The one distinction that IS load-bearing is preserved as its own explicit guard rather than as a side effect of the verb list: an explicit aggregate cue (`average|avg|mean|median|overall|total|sum|combined|aggregate|typical|as a whole`, plus the bare "what is the …" opener) means ONE number and declines, so "what's the average effectiveness across all employees" keeps its engine. The old verb list survives only as an additional way IN for the metric-less form ("show me all employees"), never as a requirement.
+
+**6. Two consistency gaps closed.**
+- `_plan_metric_is_representable()` now guards BOTH doors into `_execute_plan()` (the interceptor already had it).
+- `intents.match_intent()` is retried on the RAW text when the spellchecked text matched nothing. Live-traced: the offline dictionary spellchecker rewrites `"improvers"` → `"improves"`, which matches no intent at all, so `"top 10 PACE improvers in the last 4 weeks"` fell through to the generalized layer and was answered as a plain PACE ranking. Strictly additive — it runs only when the corrected text matched NOTHING, so no message that matches today can change route.
+
+**7. A status question composes with an exclusion.**
+`queries.status_list()`/`status_count()` take the generic `dimension_filters` list `build_query()` already takes, via one shared `_dimension_filter_clauses()` helper (the operator semantics existed inline in two engines; this is the single implementation), restricted to the two dimensions the status CTE actually reads. Previously "who is in red, excluding SCM" silently dropped the exclusion — item #97's guard only stopped it being misread as a positive SCOPE.
+
+**8. `classify()`'s own contract.** Its system prompt now documents `"none"` as a FIRST-CLASS, CORRECT output meaning "this needs no fixed intent, the generalized layer can represent it" — not "unanswerable" — with explicit instruction never to stretch the closest name. This is a prompt-level improvement only; **nothing in this round's behaviour depends on it**, which is the point.
+
+No phrase from the bug report appears anywhere in the diff.
+
+### Files changed
+
+`app/query_plan.py`, `app/main.py`, `app/queries.py`, `app/llm_nlu.py`, `scripts/test_plan_pipeline.py`.
+
+### Tests
+
+`scripts/test_plan_pipeline.py` gains **sections T1–T13: 143 new checks (315 → 458)**, in the file's existing stubbed-DB style. `llm_nlu.classify` and `llm_nlu.extract_build_query` are stubbed to `None` for the whole file, so every check below is also a proof that nothing in these paths depends on a classifier or an LLM.
+
+| section | what it covers | checks |
+|---|---|---|
+| T1 | the status shape detector: 12 novel phrasings + 8 messages that must NOT be one (a distribution question, a component-metric question, a transition question, ordinary rankings) | 20 |
+| T2 | the area shape detector: 12 novel phrasings + 8 non-area messages | 20 |
+| T3 | status questions end to end: statuses, department scope, count form, two colours, and an exclusion reaching `status_list`'s new `dimension_filters` | 12 |
+| T4 | the legacy status phrasing still answered by the rule intent, unchanged | 3 |
+| T5 | rankings introduced by 6 verbs OUTSIDE the old hardcoded list (sorted/ordered/arrange/organize/put in order/sequenced) + an exact row count with no verb at all | 15 |
+| T6 | aggregate-over-a-population must NOT become a list, 3 phrasings | 3 |
+| T7 | an area question is never turned into a ranking (5 phrasings, both at pipeline and delta level), and the same words without an area noun still are one | 11 |
+| T8 | `_execute_plan()` declines the area operation rather than guessing | 1 |
+| T9 | population sweep: employee / department / manager grain each still route | 6 |
+| T10 | a newly-generalized shape composing with an exclusion, cardinality preserved | 3 |
+| T11 | the area operation end to end: 6 named-scope phrasings (employee and department), the pronoun form resolved from conversational state, the state it leaves behind for the department follow-up, and the decline with nothing to scope to | 29 |
+| T12 | the single-entity status form, with and without a colour word, and the PS/shift statuses excluded | 10 |
+| T13 | both doors into `_execute_plan()` decline an unrepresentable operation; a spellchecker-corrupted domain word does not become a plain PACE ranking and reaches the real improvement engine | 10 |
+
+### Regression results
+
+- **Offline, after the change:** `scripts/test_query_plan.py` **213/213**, `scripts/test_plan_pipeline.py` **458/458**. No pre-existing assertion was modified.
+- **Live, `scripts/regression_live.py` against production — BEFORE: 91 checks, 6 failed** (the six listed at the top; run twice pre-change, identical). **AFTER the final deploy: 91 checks, 1 failed** (run three times across the round's deploys, identical each time). **Five of the six are fixed; zero new failures; every other category is 0 failed.**
+- The one remaining failure is `top 10 PACE improvers in the last 4 weeks`, and its behaviour CHANGED for the better without satisfying the assertion: it now reaches the correct engine family (`improving` → `pace_score_trend_ranking`) and answers honestly — *"Who is improving: No employees had enough data in both this month and the prior period…"* — instead of the confidently-wrong top-scorer ranking it returned before. The assertion expects the word "gainer". The real remaining gap is a PERIOD-representability one, pre-existing and untouched by this round: `"the last 4 weeks"` is a date RANGE, so it misses `_no_period_named_at_all()` and lands on the calendar-MONTH trend engine, which can only compare a month against its immediate predecessor. See limitations.
+
+### Live verification (post-deploy, production; exact question → exact reply → row count)
+
+**The three reported failures**
+
+| Q | A | rows |
+|---|---|---|
+| `who's in red in Founders Office?` | "Employees currently Red in Founders Office: Ajay Gaur / Amit Sharma / Rahul Kanwaria" | 3 |
+| `pace score of Aarna Jain` → `what is their weakest area?` | "Aarna Jain's weakest area is Effectiveness (63%). All 4 areas: Engagement 66%, Effectiveness 63%, Discipline 93%, Working hours 101%" | 1 |
+| → `is that also the weakest area for the department overall?` | "Customer Success - Digital Fleet's weakest area is Engagement (58%). All 4 areas: Engagement 58%, Effectiveness 69%, Discipline 95%, Working hours 105%" | 1 |
+| `I want every single employee sorted by effectiveness, no limit` | "Ranked by effectiveness %: Siddhant Rajendra Pawar 100, Nidhi Parihar 99, Manisha Kumhar 99, …" | **333** |
+
+**Status/colour lookups (8 novel phrasings + the legacy one)**
+
+| Q | A | rows |
+|---|---|---|
+| `which people are sitting in the amber band right now` | "Employees currently Amber company-wide: Aarna Jain …" | 110 |
+| `anyone flagged black in Annotation?` | "No one is currently Black in Annotation." | 0 |
+| `give me the names of everybody currently green` | "Employees currently Green company-wide: Aaditay Jangid …" | 85 |
+| `show me the amber and red guys in SCM` | "Employees currently Amber/Red in SCM: Akash Gurjar, Hari prasad godwal, Lokesh Chandel, Mahendra Kumar Bairwa" | 4 |
+| `how many staff are black company wide` | "30 employee(s) are currently Black company-wide." | 1 |
+| `who is in red, excluding SCM` | "Employees currently Red company-wide: …" — **verified programmatically: zero SCM rows** (113 vs the 4 SCM Red employees listed above) | 113 |
+| `is Rahul Kanwaria in the red band?` | "Rahul Kanwaria's current PACE status: Red." | 1 |
+| `what is Aarna Jain's pace status` | "Aarna Jain's current PACE status: Amber." | 1 |
+| `who is red status in Founders Office` **(legacy, must be unchanged)** | byte-identical to the `who's in red…` answer above | 3 |
+
+**Weakest/strongest-area lookups (8 phrasings, only one of which uses "weakest area" literally)**
+
+| Q | A | rows |
+|---|---|---|
+| `worst-performing category for Rahul Kanwaria` | "Rahul Kanwaria's weakest area is Engagement (65%). All 4 areas: …" | 1 |
+| `which of the four sub-scores is dragging them down` (after an employee turn) | "Aarna Jain's weakest area is Effectiveness (63%) …" | 1 |
+| `where is he strongest across the four components` (after an employee turn) | "Rahul Kanwaria's strongest area is Working hours (111%) …" | 1 |
+| `which aspect is lagging for Aarna Jain` | "Aarna Jain's weakest area is Effectiveness (63%) …" | 1 |
+| `which dimension is Annotation weakest in` | "Annotation's weakest area is Engagement (72%) …" | 1 |
+| `what is the worst-performing category for Founders Office` | "Founders Office's weakest area is Engagement (68%) …" | 1 |
+| `what is Aarna Jain's standout area` | "Aarna Jain's strongest area is Working hours (101%) …" | 1 |
+| `which area is Rahul Kanwaria weakest in` **(legacy phrasing)** | "Rahul Kanwaria's weakest area is Engagement (65%) …" | 1 |
+| `bottom 5 employees by pace score` → `what are their weakest areas?` | "Each employee's weakest area: Ankur Agrawal — Discipline (25%); Divyansh Sharma — Effectiveness (18%); Preetam Singh — Engagement (21%); Manish Kumar Mahawar — Engagement (12%); Itti Jain — Engagement (19%)" | 5 |
+
+**Rankings introduced by verbs outside the old list, and cardinality**
+
+| Q | A | rows |
+|---|---|---|
+| `every employee ordered by discipline, no limit` | "Ranked by discipline %: Pramod Saini 100 …" | 333 |
+| `arrange all employees by engagement, no limit` | "Ranked by engagement %: Manisha Kumhar 89 …" | 333 |
+| `organize the entire company by effectiveness, no limit` | "Ranked by effectiveness %: …" | 333 |
+| `put every employee in order of discipline, no limit` | "Ranked by discipline %: …" | 333 |
+| `I need all employees sequenced by engagement with no limit` | "Ranked by engagement %: …" | 333 |
+| `the 12 employees with the lowest discipline` (exact cardinality, no verb) | "Ranked by avg discipline % (2026-07-20 to 2026-09-17): Ankur Agrawal 25 …" | **12** |
+| `what's the average effectiveness across all employees` (**must stay one number**) | "The whole company — 333 employee(s) effectiveness %: 82" | **1** |
+| `rank every department by engagement, no limit` | "Ranked by engagement %: Ops - Cement 76, CRM 74 …" | 34 |
+| `list all managers by discipline with no limit` | "Ranked by discipline %: Shiv Kumar Singh Kushwah 99 …" | 63 |
+| `sort every employee by engagement excluding Annotation, no limit` | "Ranked by engagement %: …" — 333 − 31 Annotation | **302** |
+
+**Conversational follow-ups after a newly-generalized answer**
+
+- `every employee ordered by discipline, no limit` (333) → `make it the top 5` (5 rows, "(grouped by employee)") → `exclude SCM` (5 rows, "(grouped by employee, excluding SCM)") — the item #98 patch mechanism attaches to the new shapes unchanged.
+- `who's in red in Founders Office?` (3) → `top 3 employees by pace score` → "Ranked by avg PACE score in Founders Office: Rudhi 91, Aryan Gupta 90, Muskan Sharma 81" — identical to the same chain started from the LEGACY phrasing, i.e. the new route leaves the same conversational state.
+
+**Regression floor (items #93–#98), re-verified live after the final deploy**
+
+`dept_best` ("HR - Talent Acquisition, avg 89") · `dept_compare`'s real two-department use ("compare Accounts vs Billing", both blocks) · item #95 cardinality ("rank the whole company by discipline" → 333) · item #96 grouping ("engagement by department" → 10 department rows) · item #93's headline chain ("bottom 10 employees by engagement" → "exclude Sales - Digital Fleet") · item #97's fixes ("whatsapp usage by manager" → manager-grouped WhatsApp minutes; "who is improving the most excluding SCM" → a real change ranking with the exclusion) · item #98's comparison+grain ("compare 11 sept vs 10 sept" → "for all employees" → 203 employee rows) and comparison+grouping+period patch ("compare 11 sept vs 10 sept" → "department wise" → 30 → "now compare 9 sept and 10 sept" → 30, grouping preserved).
+
+**Population sweep**: employee, department, manager and company grains each verified above ("sort every employee…" 333 / "rank every department…" 34 / "list all managers…" 63 / "what's the average effectiveness across all employees" 1 row).
+
+### Commits and deployment
+
+`228044d` (part 1: shape detectors, the bypass, the ranking fire condition, status exclusions, the classify() contract) · `ed6bc0b` (part 2: the deterministic area operation) · `ec0272c` (part 3: the single-entity status form) · `8792765` (part 4: the two consistency gaps) · `3ca561a` (part 5: the colour-free single-employee status lookup). All pushed to `origin/main` and `origin/master`; Render redeployed after each, and the new behaviour was POLLED for before any verification above was recorded.
+
+### Honest completeness / limitations
+
+**What has genuinely been removed structurally.** For the two question families this round covers, `classify()` is no longer in the routing path at all: the shape is recognised deterministically, and the ANSWER is produced by engines that need no LLM (the status engines, and the new `_handle_area_shape()`). That is stronger than "classify() guesses better" — it is verifiable offline with the classifier stubbed to `None`, which is how all 143 new checks run. The ranking fire condition no longer contains a verb requirement at all: cardinality + metric + no single subject is the whole positive test, with an aggregate guard as the one explicit negative.
+
+**What is only REDUCED, not removed — stated plainly.** The closed-vocabulary dependency is **not** gone in general. Any well-formed question that (a) matches no rule regex, (b) is not one of the two shapes this round added detectors for, and (c) carries no explicit grouping/exclusion/cardinality signal that the item #94–#98 layers already recognise, is **still routed by a single `classify()` guess**, and a wrong guess still answers confidently. This round removed the dependency for a named set of shapes and built the mechanism for adding more (a detector plus one `elif` in the bypass); it did not make the dependency structurally impossible. Anyone claiming otherwise should re-read this paragraph.
+
+**Everything downstream of the bypass still depends on a live LLM where it always did.** `_extraction_llm_reply()` requires `llm_nlu.extract_build_query()`, and that call appears to be **unavailable in production right now** — live-observed this round, which is why part 1's routing fix alone did not make the area questions work and why part 2 had to make that operation LLM-free. No diagnosis of the outage was performed and none should be inferred. Questions that still depend on that call (the general metric/dimension extraction cascade) remain unanswerable while it is down; that is a pre-existing production condition, not a change from this round.
+
+**Known gaps found and NOT fixed:**
+- `top 10 PACE improvers in the last 4 weeks` — the last live failure. Now routed to the right engine and answered honestly, but a date-RANGE period reaches the calendar-MONTH trend engine, which cannot express it. Fixing it means either a window-over-window change engine or extending `_no_period_named_at_all()`'s semantics — a business decision about what "improving in the last 4 weeks" should compare against, which nobody has made.
+- `worst-performing category for Rahul Kanwaria` → `what about Aarna Jain` answers her PACE-score overview, not her weakest area: the older bare-re-scope handler does not carry the area operation forward. The area answer does leave `query_context` behind, so the pronoun and department follow-ups work; a bare NAME follow-up does not.
+- `top 5 managers by engagement` still ranks EMPLOYEES, and `what is the average pace score for the whole company` still returns a 349-row per-employee list. Both are pre-existing, both reproduce on paths this round did not touch (an older rule intent claims each of them before any layer changed here runs), and neither is in the live suite. Recorded because they were observed, not because they were introduced.
+- The area disqualifier deliberately refuses a message that already names one of the four components, so "is engagement her weakest area?" is not treated as an area question. Judged the safer default: naming a component is overwhelmingly a question ABOUT that component.
+- Status exclusions are supported for the department and employee dimensions only — the two columns the status CTE actually reads out of `pace_chatbot_view`. A grade/designation/manager exclusion on a status question is silently skipped rather than injected against a column that may not exist there.
+- Every limitation listed under items #97 and #98 (day/month grouping outside a comparison, grade/designation grouping, unrepresentable metrics, engines with no filter parameter, engines that leave no plan behind, the parser-vocabulary gaps in `entities.extract_limit()`, single-turn vs multi-turn ordering/cardinality for the day-comparison pair) is **unchanged and still open**.
+- **No DB credentials** exist in this repo (checked again this round); every number above is what the live chatbot API returned, not a direct SQL count. The one exception is the SCM-exclusion check, which was verified by inspecting the `rows` payload the API itself returned.
