@@ -2808,3 +2808,147 @@ No phrase from the bug report appears anywhere in the diff.
 - Status exclusions are supported for the department and employee dimensions only — the two columns the status CTE actually reads out of `pace_chatbot_view`. A grade/designation/manager exclusion on a status question is silently skipped rather than injected against a column that may not exist there.
 - Every limitation listed under items #97 and #98 (day/month grouping outside a comparison, grade/designation grouping, unrepresentable metrics, engines with no filter parameter, engines that leave no plan behind, the parser-vocabulary gaps in `entities.extract_limit()`, single-turn vs multi-turn ordering/cardinality for the day-comparison pair) is **unchanged and still open**.
 - **No DB credentials** exist in this repo (checked again this round); every number above is what the live chatbot API returned, not a direct SQL count. The one exception is the SCM-exclusion check, which was verified by inspecting the `rows` payload the API itself returned.
+
+---
+
+## Item #100 — two live-confirmed gaps in item #99's shape layer: status language that never reached the detector, and an equality COMPARISON answered as a value lookup
+
+### The report
+
+Independent live testing (not part of item #99's own test set) found two failures on production at commit `8d7d6d6`:
+
+1. `list everyone flagged black in Annotation` → *"I don't have a specific list from our conversation to expand …"*, while `who's in red in Founders Office?` and `who is currently in the amber band at SCM` worked.
+2. `which employee has the lowest PACE score?` → `what is their weakest area?` → **`is that also the weakest area for the department overall?`** → *"Product's weakest area is Engagement (57%) …"* — the department's bare weakest area, with no statement of whether it matches the employee's own. The user asked a YES/NO comparison; the answer did not answer it.
+
+Both reproduced live before any change (transcripts below).
+
+### Root cause 1 — it was never the status detector
+
+The first hypothesis (a hardcoded trigger-word list in `query_plan.detect_status_shape()`) is **wrong**, and was disproved rather than assumed. `detect_status_shape("list everyone flagged black in Annotation")` already returns `{"statuses": ["Black"], "kind": "list"}`, and `intents.match_intent()` on the same text already returns `None` — so item #99's bypass would have routed it correctly. A sweep of ~20 further verb/preposition variants ("flagged", "marked", "classified as", "labelled", "tagged", "rated", "whose status is", "sitting in the … band", "holds a … rating", bare "black employees") found the detector recognises **every one of them**: it is already keyed on the closed 4-value status vocabulary (`PACE_STATUS_WORDS` = black/red/amber/green, the same values `queries.status_list()` takes) plus a population reference, exactly as the mandate describes, and needed no change.
+
+The message never reached it. `app/main.py::handle_message()` runs the item #26-era **vague "list expand" follow-up interceptor** far earlier, at the top of the normal query flow, and `_VAGUE_LIST_EXPAND_STRICT` contains the alternative `list (them|everyone|their names|the names)\b`. With no previous list in the session (`last_list is None`), that branch returns the "nothing to expand" clarification and the pipeline stops. Verified directly: of the 10 status phrasings now in test section T14, **4 matched `_VAGUE_LIST_EXPAND_STRICT`** pre-fix.
+
+The defect class is the same one items #94/#97 already fixed twice inside this very block (a negation filter, then a group-by, each of which this older handler cannot express): **a "vague" follow-up is by definition a message that carries no query specification of its own**, and these patterns only approximate that by listing phrasings.
+
+**A second, independent instance of the same class was found while sweeping** (not in the report): the `roster_list` rule intent — three regexes, `list … employees` / `employees … list` — claims `give me the list of black employees`, `list all employees in the black band`, `employee list for the amber band` and similar, and has **no status parameter at all**, so it answered with a full unfiltered employee roster, silently dropping the band. A rule intent wins unconditionally (item #52's precedence flip), so item #99's bypass never saw these either.
+
+### The architectural fix 1 — "does this message specify its own query?"
+
+`app/main.py`, in the vague-list block: a new predicate `_self_specified_msg`, computed from the **same shape detectors the rest of the pipeline uses** (`query_plan.detect_status_shape()`, `query_plan.detect_area_shape()`), joins the pre-existing negation/group-by guard in `_precise_modification_msg` **and** gates the `last_list is None` strict branch. A message that fully specifies its own question is never treated as a request to expand a previous answer, whatever words introduce it. No phrase from the bug report is in the diff; the guard is the concept ("this is a self-contained status/area question"), and every future shape detector inherits it for free.
+
+`app/main.py`, at the bypass: one **representability** override, `_STATUS_BLIND_LIST_INTENTS = ("roster_list",)` — a rule intent that fired but cannot express the status filter the deterministic detector found is nulled so the status engines get the turn. This is the same principle items #97/#98/#99 already apply to engines with no filter parameter, not a phrase match: it fires only on the detector's verdict, and only for an intent with no way to represent one. `list all employees in SCM` / `give me the full list of employees in SCM` (no band named) still go to `roster_list` unchanged — verified live.
+
+**Status is a FILTER/value dimension, not a group-by dimension.** A status *breakdown by department* is a real and already-owned question: the `status_distribution` intent answers it, and `_STATUS_RANKING_CUE` deliberately keeps a quantity superlative ("which department has the MOST red employees") out of the membership detector. Verified live post-change — it still returns the full per-department Black/Red/Amber/Green distribution table. No grouping was added to the status path, by design.
+
+### Root cause 2 — a comparison recognised by one literal phrase
+
+`app/main.py::_handle_dept_weakest_area_followup()` (item #86, failure O) was gated by `_DEPT_AREA_FOLLOWUP_PATTERN`, a two-alternative regex requiring the **literal** words `that area` + `department|team` + `overall`. Tested directly:
+
+| phrasing | matched? |
+|---|---|
+| `was that area also the weakest area for the department overall?` | YES (the one form ever tested) |
+| `is that also the weakest area for the department overall?` | no |
+| `is that the department's weakest area too?` | no |
+| `does the company have the same weakest area?` | no |
+| `is that also the weakest area for Annotation?` | no |
+
+Every non-matching form fell through. Before item #99 they died in the cascade; **after** item #99 they land on `_handle_area_shape()`, which is a VALUE engine and answers the department's weakest area as a standalone question — confidently, and without the verdict. Item #99's routing change did not cause the gap, it made it visible and fluent.
+
+### The architectural fix 2 — EQUALITY COMPARISON as a first-class shape
+
+`app/query_plan.py::detect_area_comparison_shape()` — new, in the same style as `detect_status_shape`/`detect_area_shape`/`detect_group_by`. Two independent signals, both required:
+
+* the message is an **area question** at all (`detect_area_shape`, unchanged), and
+* it carries an **EQUIVALENCE CUE** (`_EQUIVALENCE_CUE`: `also | too | as well | same | match(es) | likewise | identical | differ(s) | hold true | true for/of | apply/applies to`).
+
+It returns `{"direction", "scope_word"}`, where `scope_word` is `company | department | rm | None` from a generic scope vocabulary (`_SCOPE_WORD_COMPANY/_DEPARTMENT/_MANAGER`) — the caller resolves an explicitly-named entity first and only then consults it.
+
+`app/main.py::_handle_area_comparison()` replaces `_handle_dept_weakest_area_followup()` at the same call site. It is a **mechanism, not a template**: take the reference value already established in `query_context` (`last_operation == "strongest_weakest"`, one `last_result_ids`, one `_AREA_METRICS` key), resolve the SECOND scope (explicit employee → explicit department → explicit manager → `company` → sticky department via `employee_dept_name`/`dept_name` → decline), compute that scope's strongest/weakest area with the **same `_area_rows_for()` engine** the value path uses, then state **both values and an explicit Yes/No verdict** plus all 4 areas for the compared scope. Because both sides are just `build_query(_AREA_METRICS)` at a dimension, the supported scope pairs are any combination of **employee / department / rm / company** — employee→department, employee→company, employee→named-department, department→department and department→company are all live-verified below. It declines (falls through to the value engine) whenever there is no established reference or no second scope, so it can never hijack a plain area question. The area DEFINITIONS are untouched: employee-level and department-level weakest/strongest area remain exactly the item #86 Decision 2 calculation.
+
+### Files changed
+
+`app/query_plan.py`, `app/main.py`, `scripts/test_plan_pipeline.py`, `SESSION_HANDOFF.md`.
+
+### Tests
+
+`scripts/test_plan_pipeline.py` gains **sections T14–T15: 83 new checks (458 → 541)**, in the file's existing stubbed-DB style (`llm_nlu.classify`/`extract_build_query` stubbed to `None` for the whole file, so every check is also a proof the paths need no LLM).
+
+| section | what it covers | checks |
+|---|---|---|
+| T14 | 10 unseen status-band phrasings across all 4 colours and 8 different verbs/prepositions (flagged / marked / classified as / labelled / tagged / whose status is / sitting in the band / bare "…band"), with department filters, a count form, a two-colour form, an unlimited cardinality, and the single-employee form | 39 |
+| T14 negatives | a department FILTER is not a status shape; department GROUPING still groups and is not a status shape; a colour word inside a component-metric question does not misfire; a status DISTRIBUTION question keeps its own engine; a genuinely vague expand follow-up is still vague; "the black ones instead" stays a re-scope | 6 |
+| T15 | the comparison shape detector: 6 positives + 2 must-not-be + 4 plain area questions that must stay VALUE questions | 12 |
+| T15 end to end | mismatching case (3 phrasings, must say NO and name both values), matching case (2 phrasings, must say YES), employee→company, employee→named-department, department→company, the strongest pole, the decline with no reference, and a plain area question still answered as a value | 26 |
+
+### Regression results
+
+* **Offline, after the change:** `scripts/test_query_plan.py` **213/213**, `scripts/test_plan_pipeline.py` **541/541**. No pre-existing assertion was modified or removed.
+* **Live, `scripts/regression_live.py` against production — BEFORE the change: 91 checks, 1 failed. AFTER the deploy: 91 checks, 1 failed — the SAME one**, `top 10 PACE improvers in the last 4 weeks`, item #99's documented, unfixed period-representability gap. Every other category 0 failed, both runs: baseline, cardinality, comparison, context_reset, equivalence, filter_mod, grouping, metric_mod, multiturn, neg_filter, neg_generic, period_mod, pos_filter, ranking, unseen. **Zero regressions, zero new failures.**
+
+### Live verification (post-deploy, production)
+
+**The two reported repros — before and after**
+
+| Q | BEFORE | AFTER |
+|---|---|---|
+| `list everyone flagged black in Annotation` | "I don't have a specific list from our conversation to expand…" | "No one is currently Black in Annotation." (0 rows — matches item #99's own result for `anyone flagged black in Annotation?`) |
+| `…lowest PACE score?` → `what is their weakest area?` → `is that also the weakest area for the department overall?` | "Product's weakest area is Engagement (57%). …" | "**No** — Product's weakest area is Engagement (57%), **not Discipline** (that employee's weakest area). All 4 areas for Product: Engagement 57%, Effectiveness 88%, Discipline 89%, Working hours 100%" |
+
+**Unseen status phrasings (11)**
+
+| Q | A | rows |
+|---|---|---|
+| `list everyone marked red in SCM` | "Employees currently Red in SCM: Akash Gurjar, Hari prasad godwal, Lokesh Chandel, Mahendra Kumar Bairwa" | 4 |
+| `give me the list of black employees` **(was a full unfiltered roster)** | "Employees currently Black company-wide: …" | 29 |
+| `list all the people labelled amber in Control Tower` | "Employees currently Amber in Control Tower: …" | 11 |
+| `names of red employees in Founders Office` | "Employees currently Red in Founders Office: Ajay Gaur, Amit Sharma, Rahul Kanwaria" | 3 |
+| `total number of green employees` | "84 employee(s) are currently Green company-wide." | 1 |
+| `employee list for the amber band` | "Employees currently Amber company-wide: …" | 109 |
+| `which staff are classified as green in Walle8` | "Employees currently Green in Walle8: Harshit Singh Negi, Tanuja Bharti" | 2 |
+| `list everyone whose status is red, excluding SCM` | "Employees currently Red company-wide: …" — **verified programmatically: 0 SCM rows** (114, against 4 SCM Red employees) | 114 |
+| `show me the list of black employees, no limit` | "Employees currently Black company-wide: …" | 29 |
+| `is Rahul Kanwaria flagged red` | "Rahul Kanwaria's current PACE status: Red." | 1 |
+| `list everyone flagged black in Annotation` | "No one is currently Black in Annotation." | 0 |
+
+**Status negatives (live)**
+
+* `list all employees in SCM` → "SCM — employee list: …" (the `roster_list` engine, unchanged).
+* `engagement by department` → 10 department-grouped engagement rows (grouping, not status).
+* `which department has the most red employees` → the full per-department status DISTRIBUTION table (34 rows), not a membership list.
+* `list them` (no prior list) → still the "nothing to expand" clarification.
+
+**Weakest/strongest-area COMPARISONS — both verdicts, 6 scope pairs**
+
+| chain | final Q | A |
+|---|---|---|
+| lowest-PACE employee → weakest area | `is that the department's weakest area too?` | "**No** — Product's weakest area is Engagement (57%), not Discipline (that employee's weakest area). All 4 areas …" |
+| same | `does the company have the same weakest area?` | "**No** — the company's weakest area is Engagement (62%), not Discipline (that employee's weakest area). All 4 areas for the company: Engagement 62%, Effectiveness 82%, Discipline 87%, Working hours 103%" |
+| same | `does the same weakest area apply to the team?` | "**No** — Product's weakest area is Engagement (57%), not Discipline …" |
+| `pace score of Aarna Jain` → `what is her weakest area?` (Effectiveness 63%) | `is that also the weakest area for SCM?` | "**No** — SCM's weakest area is Engagement (26%), not Effectiveness (Aarna Jain's weakest area). All 4 areas for SCM: Engagement 26%, Effectiveness 80%, Discipline 80%, Working hours 104%" |
+| `which dimension is Annotation weakest in` (Engagement 72%) | `is that also the weakest area company wide?` | "**Yes** — Engagement (62%) is also the company's weakest area, the same as Annotation's (Engagement). All 4 areas …" |
+| `what is Rahul Kanwaria's standout area` (Working hours 111%) | `is that also the strongest area for the department?` | "**Yes** — Working hours (100%) is also Founders Office's strongest area, the same as Rahul Kanwaria's (Working hours). All 4 areas for Founders Office: Engagement 68%, Effectiveness 86%, Discipline 82%, Working hours 100%" |
+| `what is the worst-performing category for Founders Office` (Engagement 68%) | `is the weakest dimension identical for Annotation?` | "**Yes** — Engagement (72%) is also Annotation's weakest area, the same as Founders Office's (Engagement). All 4 areas …" |
+
+Both a real YES and a real NO were found in live data, for both poles, across employee→department, employee→company, employee→named-department, department→company and department→department.
+
+**Regression floor (items #93–#99), re-verified live after the deploy**
+
+`dept_best` ("HR - Talent Acquisition, 6 employees, avg 89") · `dept_compare`'s real two-department use ("compare Accounts vs Billing", both blocks) · item #95 cardinality ("rank the whole company by discipline" → 332) · item #96 grouping ("engagement by department" → 10) · item #93's headline chain ("bottom 10 employees by engagement" → "exclude Sales - Digital Fleet") · item #97 ("whatsapp usage by manager" → manager-grouped; "who is improving the most excluding SCM" → the latest-20-vs-previous-20 change ranking with the exclusion) · item #98 ("compare 11 sept vs 10 sept" → "for all employees" → 203 employee rows; → "department wise" → 30 → "now compare 9 sept and 10 sept" → 30, grouping preserved) · item #99 ("I want every single employee sorted by effectiveness, no limit" → 332; "what's the average effectiveness across all employees" → 1 row; "every employee ordered by discipline, no limit" → "make it the top 5" → "exclude SCM"; "who is red status in Founders Office" legacy phrasing; "bottom 5 employees by pace score" → "what are their weakest areas?" → 5 per-employee rows; "which area is Rahul Kanwaria weakest in"; "how many staff are black company wide"; "sort every employee by engagement excluding Annotation, no limit" → 301).
+
+### Commits and deployment
+
+`024f082` — "Item #100: two live-confirmed gaps in item #99's shape layer, both fixed generically" — plus this documentation commit. Both pushed to `origin/main` and `origin/master`; Render redeployed and the new behaviour was **polled for** (the fix went live on the third 20-second poll) before any verification above was recorded.
+
+### Honest completeness / limitations
+
+**What genuinely generalizes.** Neither fix contains a phrase from the bug report. Gap 1's fix is a predicate over the pipeline's own shape detectors, so any shape added later is automatically protected from the vague-list interceptor; it was verified against 10 unseen phrasings spanning 8 verbs and all 4 colours, 4 of which provably hit the old interceptor. Gap 2's fix is an equality-comparison *mechanism* over two independently computed area values, verified against 7 unseen phrasings and 6 distinct scope pairs, with both a YES and a NO produced from real live data.
+
+**Genuine limitations, stated plainly:**
+
+* **RM/manager scope is computable but not reachable from a bare word.** `build_query("rm", _AREA_METRICS)` works, and `_handle_area_comparison()` resolves an explicitly-NAMED manager — but there is no sticky-manager slot anywhere in `session_store`, so "is that also the weakest area for their manager?" declines rather than guessing. That is a conversational-state gap, not a data-model one.
+* **A comparison that names one of the four components is still not recognised** — "is engagement also the weakest area for the company?" is refused by item #99's `_AREA_DISQUALIFIER`, which deliberately treats naming a component as a question ABOUT that component. Unchanged, and still the safer default.
+* **A bare reference with no area noun declines** — "does that also apply to the whole company?" carries an equivalence cue but no area vocabulary, and "that" could refer to any previous answer. Declining is honest; resolving it would need a general "what was the previous question's shape?" mechanism that does not exist.
+* **The reference side must be a single scope.** After the per-employee plural form ("what are their weakest areas?", 5 rows) there is no single value to compare against, so a comparison follow-up declines rather than picking one.
+* **`top 10 PACE improvers in the last 4 weeks`** remains the one live-suite failure — item #99's documented period-representability gap, untouched here, and still blocked on a business decision about what "improving in the last 4 weeks" compares against.
+* Every limitation listed under items #97, #98 and #99 is **unchanged and still open**, including the closed-vocabulary dependency for any question shape that has no detector, and the production unavailability of `llm_nlu.extract_build_query()`.
+* **No DB credentials exist in this repo** (checked again). Every number above is what the live chatbot API returned; the SCM-exclusion check was verified by inspecting the `rows` payload the API itself returned.
