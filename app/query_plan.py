@@ -597,6 +597,27 @@ def mentions_status_band(text):
     return list(dict.fromkeys(m.group(1).capitalize() for m in _STATUS_WORD.finditer(text)))
 
 
+#: "status" as the PACE BAND, as opposed to the several other statuses this
+#: product talks about (PS status, shift status, visit status, work status).
+#: Naming the band without naming a colour is the other half of the same
+#: single-entity question ("what is X's pace status").
+_STATUS_BAND_NOUN = re.compile(
+    r"\bpace\s+status\b|\bstatus\s+(?:band|banding|categor\w+)\b|"
+    r"\bcolou?r\s+(?:band|categor\w+|code)\b|"
+    r"(?<!ps\s)(?<!shift\s)(?<!visit\s)(?<!work\s)(?<!install\s)\bstatus\b",
+    re.IGNORECASE)
+
+
+def asks_for_status_band(text):
+    """True when the message asks about the PACE STATUS BAND itself (no
+    colour named). The caller still requires a resolvable subject before
+    acting on it, so this never decides anything on its own."""
+    text = text or ""
+    if _STATUS_DISQUALIFIER.search(text) or _STATUS_RANKING_CUE.search(text):
+        return False
+    return _STATUS_BAND_NOUN.search(text) is not None
+
+
 #: The four PACE components are collectively "areas" in this product's
 #: language. This is the full noun vocabulary for that concept.
 _AREA_NOUN = (r"(?:areas?|sub[-\s]?scores?|subscores?|sub[-\s]?metrics?|"

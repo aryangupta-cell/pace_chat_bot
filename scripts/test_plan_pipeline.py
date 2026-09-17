@@ -1686,6 +1686,19 @@ for sid, msg, want_id in [
     check_true("%s routed to the single-employee status lookup (%r)" % (sid, msg),
                c is not None and c["employee_ids"] == [want_id], repr(resp.reply[:140]))
 
+for sid, msg, want_id in [
+    ("T12f", "what is Aarna Jain's pace status", 100),
+    ("T12g", "what is Rahul Kanwaria's status", 101),
+]:
+    resp, calls = ask(sid, msg)
+    c = last_call("status_list")
+    check_true("%s colour-free single-employee status lookup (%r)" % (sid, msg),
+               c is not None and c["employee_ids"] == [want_id], repr(resp.reply[:140]))
+
+check("T12h the PS/shift statuses are not the PACE band",
+      [query_plan.asks_for_status_band("what is the ps status of Aarna Jain"),
+       query_plan.asks_for_status_band("shift status for Aarna Jain")], [False, False])
+
 check("T12c a band word with no resolvable person is not a single-entity lookup",
       query_plan.detect_status_shape("is he red"), None)
 check("T12d mentions_status_band ignores a distribution question",
