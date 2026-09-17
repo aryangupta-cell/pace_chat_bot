@@ -2703,79 +2703,130 @@ def _handle_rank_both_ends(raw_message, message, session):
     return reply, [lowest, highest]
 
 
-# Item #86, failure O (item #83 section 5's "strongest/weakest area at
-# DEPARTMENT grain" ambiguity, now unblocked by Decision 2 - CONFIRMED as
-# the existing item #76/#78 department-level average-of-the-4-pct-sub-
-# metrics mechanism, no calculation change needed): "was that area also the
-# weakest area for the department overall?" right after a single employee's
-# own weakest/strongest-area answer.
-_DEPT_AREA_FOLLOWUP_PATTERN = re.compile(
-    r"\bthat area\b[^.?!]{0,80}\b(?:department|team)\b[^.?!]{0,40}\boverall\b"
-    r"|\b(?:department|team)\b[^.?!]{0,40}\boverall\b[^.?!]{0,80}\bthat area\b",
-    re.IGNORECASE)
+# Item #86, failure O, GENERALIZED in item #100: "is that also the weakest
+# area for the department overall?" right after a single scope's own
+# strongest/weakest-area answer.
+#
+# Item #86's original implementation was a single two-alternative regex that
+# required the LITERAL words "that area" + "department|team" + "overall", so
+# exactly one phrasing of the question reached it; every other wording of the
+# same comparison ("is that also the weakest area for the department
+# overall?", without the literal "that area") fell through and was answered
+# as a STANDALONE department lookup, stating the department's weakest area
+# but never answering the yes/no question that was actually asked
+# (live-confirmed after item #99 routed that phrasing to _handle_area_shape).
+#
+# Item #100 replaces the phrase regex with the general EQUALITY-COMPARISON
+# concept (`query_plan.detect_area_comparison_shape()`): an area question
+# carrying an EQUIVALENCE cue is asking whether the already-established value
+# equals the value of a SECOND scope. The handler therefore computes
+# weakest/strongest-area(scope A) [known, from query_context] and
+# weakest/strongest-area(scope B) [the scope this message names] with the SAME
+# `_area_rows_for()` engine, and always states both values plus the verdict.
+# Scope pairs supported: employee|department|rm|company  ->
+# employee|department|rm|company, in any combination the data model can
+# express, because both sides are just `build_query(_AREA_METRICS)` at a
+# dimension.
+
+def _area_scope_label(dimension, name_filter, session):
+    if dimension == "company":
+        return "the company"
+    if dimension == "employee":
+        return session_store.get_recent_context(session, "employee_name") or "that employee"
+    return name_filter or "that scope"
 
 
-def _handle_dept_weakest_area_followup(raw_message, session):
-    """Item #86, failure O: resolves "that area" (the employee's own
-    strongest/weakest area, found in the immediately preceding turn) and
-    "the department" (that employee's own department, carried into sticky
-    context by the singular _area_match branch / its 1-employee "group"
-    variant in _extraction_llm_reply - see the push_context() calls added
-    there this round) from conversational state, then runs the EXISTING,
-    UNCHANGED department-level strongest/weakest-area calculation (item #76/
-    #78's _area_match mechanism, dimension="department" - the average of the
-    4 pct sub-metrics across the department, confirmed as the correct
-    definition per Decision 2) and reports whether it matches the employee's
-    own weakest/strongest area.
+def _handle_area_comparison(raw_message, message, session):
+    """The EQUALITY-COMPARISON form of the strongest/weakest-area operation.
 
-    Returns (reply, rows) or None to fall through to the normal cascade
-    (nothing to resolve - nothing tracked yet, or the tracked answer wasn't
-    a single-employee strongest/weakest-area result)."""
-    if session is None or not _DEPT_AREA_FOLLOWUP_PATTERN.search(raw_message or ""):
+    Returns (reply, rows) or None to fall through (no equivalence cue, no
+    established reference value, or no second scope to compare against)."""
+    if session is None:
+        return None
+    text = raw_message or message or ""
+    shape = (query_plan.detect_area_comparison_shape(text)
+             or query_plan.detect_area_comparison_shape(message))
+    if not shape:
         return None
     qc = session_store.get_query_context(session) or {}
-    if qc.get("last_operation") != "strongest_weakest" or qc.get("last_dimension") != "employee":
+    if qc.get("last_operation") != "strongest_weakest":
         return None
-    emp_ids = qc.get("last_result_ids") or []
-    emp_metric = (qc.get("metric") or [None])[0]
-    if not emp_ids or emp_metric not in _AREA_METRICS:
+    ref_ids = qc.get("last_result_ids") or []
+    ref_metric = (qc.get("metric") or [None])[0]
+    if len(ref_ids) != 1 or ref_metric not in _AREA_METRICS:
+        # Nothing single and concrete to compare AGAINST (e.g. the per-employee
+        # plural form, or a ranking) - decline rather than invent a reference.
         return None
-    # Item #92 fix: reads the dedicated `employee_dept_name` slot (see
-    # push_context()'s docstring) - the incidental department pushed by the
-    # single-employee weakest/strongest-area lookup this follow-up chains
-    # from - not the general `dept_name` slot (which must only ever hold an
-    # EXPLICITLY-named department, per its own documented contract).
-    dept_name = session_store.get_recent_context(session, "employee_dept_name")
-    if not dept_name:
-        return None
+    ref_dimension = qc.get("last_dimension")
+    # The pole the CURRENT message names decides which end of scope B is
+    # computed - that is literally what was asked, and it is always present
+    # (an area shape requires a direction word). The reference side is the
+    # metric already established in `query_context`, whichever pole produced
+    # it.
+    want_weakest = shape["direction"] == "weakest"
+    ref_label = _area_scope_label(ref_dimension, ref_ids[0], session)
+
+    period, latest_n_days, filters = _resolve_period_and_filters(text, {})
+
+    # ---- resolve the SECOND scope, most explicit signal first -------------
+    dimension = name_filter = None
     try:
-        dept_rows = queries.build_query("department", _AREA_METRICS, filters={}, period=None,
-                                         name_filter=dept_name, limit=1)
-    except Exception:
-        logging.getLogger("pace_chatbot.main").exception(
-            "build_query() raised inside _handle_dept_weakest_area_followup")
+        emp_id, emp_name = entities.extract_employee(message, fallback_text=raw_message)
+    except entities.Ambiguous:
+        emp_id = emp_name = None
+    if emp_id and not (ref_dimension == "employee" and emp_id == ref_ids[0]):
+        dimension, name_filter, label = "employee", emp_id, emp_name
+    if dimension is None:
+        dept_name, _cands = entities.extract_department(message, fallback_text=raw_message)
+        if dept_name and dept_name not in _excluded_department_names(raw_message, message):
+            dimension, name_filter, label = "department", dept_name, dept_name
+    if dimension is None:
+        mgr_id, mgr_name = entities.extract_manager(message, fallback_text=raw_message)
+        if mgr_id:
+            dimension, name_filter, label = "rm", mgr_name, mgr_name
+    if dimension is None:
+        scope_word = shape["scope_word"]
+        if scope_word == "company":
+            dimension, name_filter, label = "company", None, "the company"
+        elif scope_word == "department":
+            _dept = (session_store.get_recent_context(session, "employee_dept_name")
+                     or session_store.get_recent_context(session, "dept_name"))
+            if _dept and not (ref_dimension == "department" and _dept == ref_ids[0]):
+                dimension, name_filter, label = "department", _dept, _dept
+        elif scope_word == "rm":
+            # No sticky manager slot exists, and a manager cannot be resolved
+            # from a bare "the manager" - decline honestly.
+            return None
+    if dimension is None:
         return None
-    if not dept_rows:
-        return (f"No department-level data found for {dept_name} in this period.", [])
-    row = dept_rows[0]
-    present = [(k, row.get(k)) for k in _AREA_METRICS if row.get(k) is not None]
+
+    rows, present = _area_rows_for(dimension, name_filter, period, latest_n_days, filters)
     if not present:
-        return (f"No department-level data found for {dept_name} in this period.", [])
-    dept_weak_key, dept_weak_val = min(present, key=lambda kv: float(kv[1]))
-    emp_label = _AREA_LABELS.get(emp_metric, emp_metric)
-    dept_label = _AREA_LABELS.get(dept_weak_key, dept_weak_key)
-    if dept_weak_key == emp_metric:
+        return ("No data found for %s in this period." % label, [])
+    key, val = (min if want_weakest else max)(present, key=lambda kv: float(kv[1]))
+    direction = "weakest" if want_weakest else "strongest"
+    ref_label_area = _AREA_LABELS.get(ref_metric, ref_metric)
+    other_label_area = _AREA_LABELS.get(key, key)
+    all4 = ", ".join(f"{_AREA_LABELS[k]} {_fmt(v)}%" for k, v in present)
+    if key == ref_metric:
         reply = (
-            f"Yes — {dept_label} ({_fmt(dept_weak_val)}%) is also {dept_name}'s own weakest area overall, "
-            "the same as that employee's."
+            f"Yes — {other_label_area} ({_fmt(val)}%) is also {label}'s {direction} area, "
+            f"the same as {ref_label}'s ({ref_label_area}).\n"
+            f"All 4 areas for {label}: {all4}"
         )
     else:
         reply = (
-            f"No — {dept_name}'s own weakest area overall is {dept_label} ({_fmt(dept_weak_val)}%), "
-            f"not {emp_label} (that employee's own weakest area).\n"
-            "All 4 areas (department average): " + ", ".join(f"{_AREA_LABELS[k]} {_fmt(v)}%" for k, v in present)
+            f"No — {label}'s {direction} area is {other_label_area} ({_fmt(val)}%), "
+            f"not {ref_label_area} ({ref_label}'s {direction} area).\n"
+            f"All 4 areas for {label}: {all4}"
         )
-    return reply, dept_rows
+    if dimension == "department":
+        session_store.push_context(session, dept_name=name_filter)
+    session_store.set_query_context(
+        session, last_operation="strongest_weakest", last_dimension=dimension,
+        last_result_ids=[name_filter] if name_filter else [],
+        ascending=want_weakest, metric=[key])
+    return reply, rows
 
 
 def _area_rows_for(dimension, name_filter, period, latest_n_days, filters):
@@ -6829,11 +6880,31 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # department") is likewise a precise modification this older handler
     # cannot express — it re-ran the previous query at its ORIGINAL grain,
     # just expanded to a full list. Live-found alongside the negation case.
+    # Item #100: the same principle, one level more general. A "vague list
+    # expand" follow-up is BY DEFINITION a message that carries no query
+    # specification of its own — that is the whole reason it has to be
+    # resolved against the previous answer. "list everyone flagged black in
+    # Annotation" opens with the literal words `list everyone`, so the
+    # phrase-level patterns below claimed it, but it fully specifies its own
+    # question (a status band + a population + a department) and needs no
+    # previous answer at all. Live-confirmed: with no previous list it
+    # returned "I don't have a specific list ... to expand".
+    # The generic guard is therefore "does this message specify its own
+    # query?", asked through the SAME shape detectors the rest of the
+    # pipeline uses (a status-band membership question, a strongest/weakest-
+    # AREA question) rather than by adding an exception for a phrasing.
+    _self_specified_msg = (
+        query_plan.detect_status_shape(raw_message) is not None
+        or query_plan.detect_status_shape(message) is not None
+        or query_plan.detect_area_shape(raw_message) is not None
+        or query_plan.detect_area_shape(message) is not None
+    )
     _precise_modification_msg = (
         _message_has_negative_dimension_filter(raw_message)
         or _message_has_negative_dimension_filter(message)
         or query_plan.detect_group_by(raw_message) is not None
         or query_plan.detect_group_by(message) is not None
+        or _self_specified_msg
     )
     if last_list is not None and not _precise_modification_msg and (
         _VAGUE_LIST_EXPAND_PATTERN.search(message) is not None
@@ -6849,7 +6920,8 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
             and intents.match_intent(message) is None)
     ):
         return _resolve_vague_list_followup(last_list, message, raw_message, session)
-    if last_list is None and _VAGUE_LIST_EXPAND_STRICT.search(message) is not None:
+    if last_list is None and not _self_specified_msg \
+            and _VAGUE_LIST_EXPAND_STRICT.search(message) is not None:
         # These phrasings ("list them", "who are they", "show me their
         # names", ...) can NEVER be a meaningful standalone/fresh query -
         # there is nothing to guess at, so ask for clarification rather
@@ -6971,7 +7043,7 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     # the normal cascade (which has no way to know "that area"/"the
     # department" refer to the prior turn's employee-level answer). See
     # _handle_dept_weakest_area_followup above. ---
-    _dept_area_followup_response = _handle_dept_weakest_area_followup(raw_message, session)
+    _dept_area_followup_response = _handle_area_comparison(raw_message, message, session)
     if _dept_area_followup_response is not None:
         _da_reply, _da_rows = _dept_area_followup_response
         return ChatResponse(reply=_da_reply, rows=_da_rows)
@@ -7407,6 +7479,24 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
     #
     # A rule intent that DID fire is never touched here, so every phrasing
     # the 124 intents already answer correctly is bit-for-bit unchanged.
+    #
+    # Item #100 extends the gate by ONE structural case, on the same
+    # representability principle items #97/#98/#99 already use: a rule intent
+    # that fired but CANNOT EXPRESS the question's status filter would answer
+    # confidently with the filter silently dropped. `roster_list` is the whole
+    # of that set — its three regexes are `list ... employees` / `employees
+    # ... list`, it takes no status argument at all, and it therefore turns
+    # "give me the list of black employees" into a full unfiltered employee
+    # roster (live-reproducible). The override is not a phrase match: it fires
+    # only when the deterministic status-shape detector says the message IS a
+    # status-membership question, and only for an intent that has no way to
+    # represent one.
+    _STATUS_BLIND_LIST_INTENTS = ("roster_list",)
+    if rule_intent in _STATUS_BLIND_LIST_INTENTS and (
+            query_plan.detect_status_shape(raw_message) is not None
+            or query_plan.detect_status_shape(message) is not None):
+        rule_intent = None
+
     if rule_intent is None:
         _status_shape = (query_plan.detect_status_shape(raw_message)
                          or query_plan.detect_status_shape(message))

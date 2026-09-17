@@ -1746,6 +1746,241 @@ check_true("T13d reached the real improvement-ranking engine",
 main.spellcheck.correct_typos = _real_correct
 
 
+# ==========================================================================
+# ITEM #100 — two live-confirmed gaps in item #99's shape layer.
+#
+# T14  a self-specified STATUS question is never swallowed by the vague
+#      "list expand" follow-up interceptor, whatever verb introduces it.
+# T15  an area question carrying an EQUIVALENCE cue is an equality
+#      COMPARISON: it must state both values and an explicit yes/no verdict.
+# ==========================================================================
+
+# --- T14: status-band phrasings across all four colours --------------------
+# Every one of these is a fresh conversation with NO previous list, which is
+# exactly the condition under which "list everyone flagged black in
+# Annotation" used to return "I don't have a specific list ... to expand".
+for sid, msg, want_statuses, want_dept, want_fn in [
+    ("T14a", "list everyone flagged black in Annotation", ["Black"], "Annotation", "status_list"),
+    ("T14b", "list everyone marked red in SCM", ["Red"], "SCM", "status_list"),
+    ("T14c", "list everyone classified as amber", ["Amber"], None, "status_list"),
+    ("T14d", "show me their names for everyone currently green in Walle8",
+     ["Green"], "Walle8", "status_list"),
+    ("T14e", "list all the people labelled black", ["Black"], None, "status_list"),
+    ("T14f", "name the employees whose status is red in Control Tower",
+     ["Red"], "Control Tower", "status_list"),
+    ("T14g", "which staff are sitting in the amber band in Admin", ["Amber"], "Admin", "status_list"),
+    ("T14h", "give me every employee tagged green", ["Green"], None, "status_list"),
+    ("T14i", "how many people are flagged black in Annotation", ["Black"], "Annotation", "status_count"),
+    ("T14j", "list everyone in the black and red bands in SCM", ["Black", "Red"], "SCM", "status_list"),
+]:
+    resp, calls = ask(sid, msg)
+    c = last_call(want_fn)
+    check_true("%s reached %s (%r)" % (sid, want_fn, msg), c is not None,
+               repr(resp.reply[:160]))
+    if c:
+        check("%s statuses" % sid, c["statuses"], want_statuses)
+        check("%s department scope" % sid, c["dept_name"], want_dept)
+    check_true("%s is not the 'nothing to expand' clarification" % sid,
+               "to expand" not in resp.reply, repr(resp.reply[:160]))
+
+# an explicit cardinality still reaches the status engine
+resp, calls = ask("T14k", "list everyone flagged red in SCM, no limit")
+check_true("T14k unlimited status list reached status_list",
+           last_call("status_list") is not None, repr(resp.reply[:160]))
+
+# the single-employee form is untouched by the guard
+entities.extract_employee = fake_extract_employee_named
+main.entities.extract_employee = fake_extract_employee_named
+queries.status_list = fake_status_emp_list
+main.queries.status_list = fake_status_emp_list
+resp, calls = ask("T14l", "is Aarna Jain flagged amber")
+c = last_call("status_list")
+check_true("T14l single-employee status form still routes",
+           c is not None and c["employee_ids"] == [100], repr(resp.reply[:160]))
+queries.status_list = fake_status_list
+main.queries.status_list = fake_status_list
+entities.extract_employee = fake_extract_employee
+main.entities.extract_employee = fake_extract_employee
+
+# --- T14 NEGATIVES ---------------------------------------------------------
+# a department FILTER is not a status question
+check("T14m a department filter is not a status shape",
+      query_plan.detect_status_shape("show me all employees in Sales - Digital Fleet"), None)
+# department GROUPING is not a status question either, and still groups
+resp, calls = ask("T14n", "engagement by department")
+c = last_bq()
+check_true("T14n department grouping still groups by department",
+           c is not None and c["dimension"] == "department", repr(calls))
+check("T14n grouping is not a status shape",
+      query_plan.detect_status_shape("engagement by department"), None)
+# the colour word inside a component-metric question must not misfire
+check("T14o a colour word in a metric question is not a status shape",
+      query_plan.detect_status_shape("what is the red engagement percentage for those people"), None)
+# a status DISTRIBUTION question keeps its own engine
+check("T14p a distribution question is not a membership list",
+      query_plan.detect_status_shape("which department has the most red employees"), None)
+# a genuinely vague expand follow-up is STILL vague
+resp, calls = ask("T14q", "list them")
+check_true("T14q a genuinely vague expand follow-up still asks for clarification",
+           resp.needs_clarification, repr(resp.reply[:160]))
+check("T14r 'the black ones instead' stays a vague re-scope, not a fresh status query",
+      query_plan.detect_status_shape("the black ones instead"), None)
+
+# --- T15: the EQUALITY COMPARISON shape ------------------------------------
+for msg, want_dir, want_scope in [
+    ("is that also the weakest area for the department overall?", "weakest", "department"),
+    ("is that the department's weakest area too?", "weakest", "department"),
+    ("does the company have the same weakest area?", "weakest", "company"),
+    ("is their worst category the same as the team's?", "weakest", "department"),
+    ("is that also their strongest area company wide?", "strongest", "company"),
+    ("does that hold true for the department as well?", None, None),
+    ("is the weakest dimension identical for SCM?", "weakest", None),
+    ("is that also the weakest area for Annotation?", "weakest", None),
+]:
+    got = query_plan.detect_area_comparison_shape(msg)
+    if want_dir is None:
+        check("T15 not a comparison shape %r" % msg, got, None)
+    else:
+        check("T15 comparison shape %r" % msg, got,
+              {"direction": want_dir, "scope_word": want_scope})
+
+for msg in [
+    "what is their weakest area?",
+    "which dimension is Annotation weakest in",
+    "bottom 10 employees by engagement",
+    "who is in red in SCM",
+]:
+    check("T15 NOT a comparison shape %r" % msg,
+          query_plan.detect_area_comparison_shape(msg), None)
+
+# --- T15 end to end: both values + an explicit verdict ---------------------
+AREA_VALUES = {}
+
+
+def fake_area_build_query(dimension, metrics, **kw):
+    CALLS.append(dict(fn="build_query", dimension=dimension, metrics=list(metrics), **kw))
+    key = (dimension, kw.get("name_filter"))
+    vals = AREA_VALUES.get(key) or AREA_VALUES.get((dimension, None)) or \
+        {"engagement_pct": 70, "effectiveness_pct": 60, "discipline_pct": 90, "working_pct": 100}
+    row = {"emp_name": "Aarna Jain", "dept_name": "Annotation",
+           "employee_id": kw.get("name_filter") if dimension == "employee" else None}
+    row.update(vals)
+    return [row]
+
+
+def seed_area_reference(sid, dimension, ident, metric, ascending=True,
+                        employee_name="Aarna Jain", dept=None):
+    session = session_store.get_session(sid)
+    session_store.set_query_context(
+        session, last_operation="strongest_weakest", last_dimension=dimension,
+        last_result_ids=[ident], ascending=ascending, metric=[metric])
+    if dimension == "employee":
+        session_store.push_context(session, employee_id=ident, employee_name=employee_name)
+        if dept:
+            session_store.push_context(session, employee_dept_name=dept)
+    return session
+
+
+_real_bq = queries.build_query
+queries.build_query = fake_area_build_query
+main.queries.build_query = fake_area_build_query
+entities.extract_employee = fake_extract_employee_named
+main.entities.extract_employee = fake_extract_employee_named
+
+# MISMATCH case: employee's weakest is Discipline, department's is Engagement
+AREA_VALUES.clear()
+AREA_VALUES[("department", "Annotation")] = {
+    "engagement_pct": 57, "effectiveness_pct": 70, "discipline_pct": 90, "working_pct": 100}
+for sid, msg in [
+    ("T15a", "is that also the weakest area for the department overall?"),
+    ("T15b", "is that the department's weakest area too?"),
+    ("T15c", "does the same weakest area apply to the team?"),
+]:
+    seed_area_reference(sid, "employee", 100, "discipline_pct", dept="Annotation")
+    resp, calls = ask(sid, msg)
+    low = resp.reply.lower()
+    check_true("%s states a NO verdict (%r)" % (sid, msg), low.startswith("no —") or low.startswith("no -"),
+               repr(resp.reply[:200]))
+    check_true("%s names the department's own weakest area" % sid,
+               "engagement" in low, repr(resp.reply[:200]))
+    check_true("%s names the reference (employee) value too" % sid,
+               "discipline" in low, repr(resp.reply[:200]))
+
+# MATCH case: both weakest in Engagement
+AREA_VALUES[("department", "Annotation")] = {
+    "engagement_pct": 40, "effectiveness_pct": 70, "discipline_pct": 90, "working_pct": 100}
+for sid, msg in [
+    ("T15d", "is that also the weakest area for the department overall?"),
+    ("T15e", "does the department have the same weakest area?"),
+]:
+    seed_area_reference(sid, "employee", 100, "engagement_pct", dept="Annotation")
+    resp, calls = ask(sid, msg)
+    low = resp.reply.lower()
+    check_true("%s states a YES verdict (%r)" % (sid, msg), low.startswith("yes —") or low.startswith("yes -"),
+               repr(resp.reply[:200]))
+    check_true("%s names the shared area" % sid, "engagement" in low, repr(resp.reply[:200]))
+
+# employee -> COMPANY
+AREA_VALUES[("company", None)] = {
+    "engagement_pct": 80, "effectiveness_pct": 55, "discipline_pct": 90, "working_pct": 100}
+seed_area_reference("T15f", "employee", 100, "engagement_pct", dept="Annotation")
+resp, calls = ask("T15f", "does the company have the same weakest area?")
+c = last_bq()
+check_true("T15f compared against the COMPANY scope",
+           c is not None and c["dimension"] == "company", repr(calls))
+check_true("T15f verdict is NO and names effectiveness",
+           resp.reply.lower().startswith("no") and "effectiveness" in resp.reply.lower(),
+           repr(resp.reply[:200]))
+
+# employee -> a DIFFERENT, explicitly-named department
+AREA_VALUES[("department", "SCM")] = {
+    "engagement_pct": 88, "effectiveness_pct": 90, "discipline_pct": 30, "working_pct": 100}
+seed_area_reference("T15g", "employee", 100, "discipline_pct", dept="Annotation")
+resp, calls = ask("T15g", "is that also the weakest area for SCM?")
+c = last_bq()
+check_true("T15g compared against the NAMED department",
+           c is not None and c["name_filter"] == "SCM", repr(calls))
+check_true("T15g verdict is YES", resp.reply.lower().startswith("yes"), repr(resp.reply[:200]))
+
+# department -> COMPANY (a scope pair that is not employee->department)
+seed_area_reference("T15h", "department", "Annotation", "engagement_pct")
+resp, calls = ask("T15h", "is that also the weakest area company wide?")
+c = last_bq()
+check_true("T15h department -> company comparison ran",
+           c is not None and c["dimension"] == "company", repr(calls))
+check_true("T15h states both values",
+           "effectiveness" in resp.reply.lower() and "engagement" in resp.reply.lower(),
+           repr(resp.reply[:200]))
+
+# the STRONGEST pole compares like with like
+AREA_VALUES[("department", "Annotation")] = {
+    "engagement_pct": 40, "effectiveness_pct": 70, "discipline_pct": 90, "working_pct": 120}
+seed_area_reference("T15i", "employee", 100, "working_pct", ascending=False, dept="Annotation")
+resp, calls = ask("T15i", "is that also their strongest area for the department?")
+check_true("T15i strongest-pole comparison answered yes",
+           resp.reply.lower().startswith("yes") and "working" in resp.reply.lower(),
+           repr(resp.reply[:200]))
+
+# with NO established reference value the comparison declines cleanly
+session_store.get_session("T15j").pop("query_context", None)
+check("T15j declines with no reference value",
+      main._handle_area_comparison("is that also the weakest area for the department overall?",
+                                   "is that also the weakest area for the department overall?",
+                                   session_store.get_session("T15j")), None)
+
+# a plain (non-comparison) area question is still answered as a VALUE
+seed_area_reference("T15k", "employee", 100, "discipline_pct", dept="Annotation")
+resp, calls = ask("T15k", "which dimension is Annotation weakest in")
+check_true("T15k a plain area question is still a value answer, not a verdict",
+           "weakest area is" in resp.reply and not resp.reply.lower().startswith(("yes", "no")),
+           repr(resp.reply[:200]))
+
+queries.build_query = _real_bq
+main.queries.build_query = fake_build_query
+queries.build_query = fake_build_query
+entities.extract_employee = fake_extract_employee
+main.entities.extract_employee = fake_extract_employee
+
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:
     print("  FAIL " + f)

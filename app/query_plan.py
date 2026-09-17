@@ -670,6 +670,75 @@ def detect_area_shape(text):
     return None
 
 
+# --------------------------------------------------------------------------
+# EQUALITY COMPARISON (item #100)
+# --------------------------------------------------------------------------
+# A question can ask for a VALUE ("what is X's weakest area?") or it can ask
+# whether two independently-computable values are THE SAME ("is that also the
+# weakest area for the department?"). The second is a distinct semantic
+# concept — an EQUALITY COMPARISON between the same operation evaluated at two
+# different SCOPES — in the same way that filtering, grouping and cardinality
+# were each recognised as distinct concepts in items #93–#98.
+#
+# The generalizable signal is an EQUIVALENCE CUE: a word or phrase asserting
+# sameness between what the current message asks for and something already
+# established ("also", "too", "as well", "the same", "match", "likewise",
+# "either", "both"). It is not a phrasing list: any question shape that
+# carries an equivalence cue is asking "are these two equal?", and the answer
+# must state BOTH values and an explicit verdict.
+
+_EQUIVALENCE_CUE = re.compile(
+    r"\balso\b|\btoo\b|\bas\s+well\b|\bsame\b|\bmatch(?:es|ing)?\b|"
+    r"\blikewise\b|\bidentical\b|\bdiffer(?:ent|s)?\b|\bhold\s+true\b|"
+    r"\btrue\s+(?:for|of)\b|\bapply\s+(?:to|for)\b|\bapplies\s+(?:to|for)\b",
+    re.IGNORECASE)
+
+#: The scope a comparison's SECOND side names, expressed as a WORD rather than
+#: a resolved entity — the caller resolves an explicit employee/department/
+#: manager name itself, and falls back to these generic scope words.
+_SCOPE_WORD_COMPANY = re.compile(
+    r"\bcompany\b|\bcompany[-\s]?wide\b|\borganisation\b|\borganization\b|"
+    r"\bwhole\s+(?:firm|business|org)\b|\bfirm\s+wide\b|\bacross\s+the\s+org\w*\b",
+    re.IGNORECASE)
+_SCOPE_WORD_DEPARTMENT = re.compile(r"\b(?:department|dept|team|division|function)s?\b",
+                                    re.IGNORECASE)
+_SCOPE_WORD_MANAGER = re.compile(r"\b(?:manager|reporting\s+manager|rm|supervisor|lead)s?\b",
+                                 re.IGNORECASE)
+
+
+def detect_area_comparison_shape(text):
+    """`{"direction": "weakest"|"strongest", "scope_word": ...}` when this
+    message asks whether a PREVIOUSLY-ESTABLISHED strongest/weakest AREA is
+    ALSO the strongest/weakest area of some other scope — else None.
+
+    Two independent signals, both required:
+      * the message is an AREA question at all (`detect_area_shape`), and
+      * it carries an EQUIVALENCE CUE (above).
+
+    `scope_word` is `"company"`, `"department"`, `"rm"` or `None` (the caller
+    resolves an explicitly-named entity first and only then consults this).
+    Nothing here is keyed to any particular phrasing: "is that also the
+    weakest area for the department overall?", "does the company have the
+    same weakest area?" and "is their worst category the same as the team's?"
+    all resolve through the identical two signals.
+    """
+    text = text or ""
+    direction = detect_area_shape(text)
+    if not direction:
+        return None
+    if not _EQUIVALENCE_CUE.search(text):
+        return None
+    if _SCOPE_WORD_COMPANY.search(text):
+        scope_word = "company"
+    elif _SCOPE_WORD_MANAGER.search(text):
+        scope_word = "rm"
+    elif _SCOPE_WORD_DEPARTMENT.search(text):
+        scope_word = "department"
+    else:
+        scope_word = None
+    return {"direction": direction, "scope_word": scope_word}
+
+
 def detect_context_modification(text, has_filters=False, has_group_by=False,
                                 has_metric=False, has_period=False, has_limit=False):
     """Classify how a follow-up message relates to the previous plan.
