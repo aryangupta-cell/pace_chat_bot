@@ -7405,6 +7405,17 @@ def handle_message(message: str, session_id: str = "default") -> ChatResponse:
                     _ss_emp_id = None
                 rule_intent = "status_emp" if _ss_emp_id else "status_list"
             llm_result = None
+        elif query_plan.mentions_status_band(raw_message):
+            # The SINGLE-ENTITY form of the same question ("is X in the red
+            # band?"): a status band named about one resolvable person. Same
+            # resolver, same verified engine (status_emp), still no classifier.
+            try:
+                _ss_emp_id, _ = entities.extract_employee(message, fallback_text=raw_message)
+            except entities.Ambiguous:
+                _ss_emp_id = None
+            if _ss_emp_id:
+                rule_intent = "status_emp"
+                llm_result = None
         elif (query_plan.detect_area_shape(raw_message)
                 or query_plan.detect_area_shape(message)):
             llm_result = None

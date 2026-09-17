@@ -585,6 +585,18 @@ def detect_status_shape(text):
     return {"statuses": statuses, "kind": kind}
 
 
+def mentions_status_band(text):
+    """The PACE status bands this message names, ignoring whether it also
+    refers to a population. Used for the SINGLE-ENTITY form of the same
+    question ("is X in the red band?"), where the subject is a resolved
+    employee rather than a population reference.
+    """
+    text = text or ""
+    if _STATUS_DISQUALIFIER.search(text) or _STATUS_RANKING_CUE.search(text):
+        return []
+    return list(dict.fromkeys(m.group(1).capitalize() for m in _STATUS_WORD.finditer(text)))
+
+
 #: The four PACE components are collectively "areas" in this product's
 #: language. This is the full noun vocabulary for that concept.
 _AREA_NOUN = (r"(?:areas?|sub[-\s]?scores?|subscores?|sub[-\s]?metrics?|"

@@ -1659,6 +1659,46 @@ entities.extract_employee = fake_extract_employee
 main.entities.extract_employee = fake_extract_employee
 
 
+
+# --- T12: the SINGLE-ENTITY status form ------------------------------------
+entities.extract_employee = fake_extract_employee_named
+main.entities.extract_employee = fake_extract_employee_named
+
+
+def fake_status_emp_list(statuses, dept_name=None, employee_ids=None, limit=None,
+                         dimension_filters=None):
+    CALLS.append(dict(fn="status_list", statuses=statuses, dept_name=dept_name,
+                      employee_ids=employee_ids, limit=limit,
+                      dimension_filters=dimension_filters))
+    return [{"employee_id": (employee_ids or [100])[0], "emp_name": "Aarna Jain",
+             "dept_name": "Annotation", "overall_std_pace_status": "Amber"}]
+
+
+queries.status_list = fake_status_emp_list
+main.queries.status_list = fake_status_emp_list
+
+for sid, msg, want_id in [
+    ("T12a", "is Rahul Kanwaria in the red band?", 101),
+    ("T12b", "is Aarna Jain black right now", 100),
+]:
+    resp, calls = ask(sid, msg)
+    c = last_call("status_list")
+    check_true("%s routed to the single-employee status lookup (%r)" % (sid, msg),
+               c is not None and c["employee_ids"] == [want_id], repr(resp.reply[:140]))
+
+check("T12c a band word with no resolvable person is not a single-entity lookup",
+      query_plan.detect_status_shape("is he red"), None)
+check("T12d mentions_status_band ignores a distribution question",
+      query_plan.mentions_status_band("which department has the most red employees"), [])
+check("T12e mentions_status_band finds the band",
+      query_plan.mentions_status_band("is Rahul Kanwaria in the red band?"), ["Red"])
+
+queries.status_list = fake_status_list
+main.queries.status_list = fake_status_list
+entities.extract_employee = fake_extract_employee
+main.entities.extract_employee = fake_extract_employee
+
+
 print("plan-pipeline offline suite: %d passed, %d failed" % (PASSED[0], len(FAILURES)))
 for f in FAILURES:
     print("  FAIL " + f)
